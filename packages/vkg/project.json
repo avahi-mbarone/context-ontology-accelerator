@@ -1,0 +1,19 @@
+{
+  "name": "vkg",
+  "namedInputs": { "default": ["python"] },
+  "implicitDependencies": ["common"],
+  "targets": {
+    "lint": {
+      "command": "uv run ruff check packages/vkg && uv run ruff format --check packages/vkg"
+    },
+    "test": {
+      "command": "COVERAGE_FILE=packages/vkg/.coverage uv run pytest packages/vkg -m unit -v --tb=short --cov=packages/vkg --cov-report=term-missing --cov-report=xml:packages/vkg/coverage.xml --cov-fail-under=80 --junitxml=packages/vkg/junit.xml"
+    },
+    "format": {
+      "command": "uv run ruff format packages/vkg"
+    },
+    "format:check": {
+      "command": "uv run ruff format --check packages/vkg"
+    }
+  }
+}

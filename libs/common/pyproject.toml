@@ -1,0 +1,36 @@
+[project]
+name = "coa-common"
+version = "0.1.0"
+description = "Shared utilities for Context Ontology Accelerator"
+requires-python = ">=3.12"
+
+dependencies = [
+    "boto3>=1.35.0",
+    # Cedar policy engine for coa_authorization (shared by the control-plane API
+    # authorizer and the serve-path query authorizer). arm64 cp312 wheel exists.
+    "cedarpy>=4.8.0",
+    "cryptography>=49.0.0",
+    # Shared AOSS vector client (coa_common.opensearch). opensearch-py
+    # provides the client + SigV4 signer; requests-aws4auth is a transitive of the
+    # RequestsHttpConnection path. Consolidates the per-package clients that
+    # ontology-engine / metric-service / serve previously hand-rolled.
+    "opensearch-py>=2.5",
+    "requests-aws4auth>=1.3",
+    "pydantic-settings>=2.0",
+    "PyJWT>=2.13.0",
+    "requests>=2.34.2",
+    "structlog>=24.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/coa_common", "src/coa_authorization"]
+
+[tool.pytest.ini_options]
+markers = [
+    "unit: Unit tests",
+    "integ: Integration tests",
+]

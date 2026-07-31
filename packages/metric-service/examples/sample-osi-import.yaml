@@ -1,0 +1,92 @@
+# OSI v1.0 — Sample import YAML for the Context Ontology Accelerator
+#
+# This file demonstrates the expected format for the POST /namespaces/{ns}/import-osi endpoint.
+# The YAML content is passed in the request body as: { "content": "<yaml-string>" }
+#
+# Dialect mapping (OSI → internal):
+#   ANSI_SQL   → POSTGRESQL (default)
+#   SNOWFLAKE  → SNOWFLAKE
+#   DATABRICKS → DATABRICKS
+#
+# ai_context is a structured object per OSI spec (not a flat string):
+#   synonyms: list of alternative names
+#   instructions: free-text guidance for AI agents
+#   examples: list of example queries/questions
+
+osi_spec_version: "1.0"
+
+datasets:
+  - name: public.orders
+    data_source_id: ds-warehouse-prod
+    description: "Production orders table in the data warehouse"
+    synonyms:
+      - sales_orders
+      - order_history
+
+  - name: public.customers
+    data_source_id: ds-warehouse-prod
+    description: "Customer master data"
+
+metrics:
+  - name: total_revenue
+    description: "Total revenue from completed orders, excluding refunds"
+    expression:
+      dialects:
+        - dialect: ANSI_SQL
+          expression: "SUM(CASE WHEN status = 'completed' THEN amount ELSE 0 END)"
+        - dialect: SNOWFLAKE
+          expression: "SUM(IFF(status = 'completed', amount, 0))"
+    ai_context:
+      synonyms:
+        - "total sales"
+        - "gross revenue"
+        - "income"
+      instructions: "Use this metric when the user asks about revenue, sales totals, or income. Excludes cancelled and refunded orders."
+      examples:
+        - "What was our total revenue last quarter?"
+        - "Show me revenue by region"
+    x_coa:
+      data_source_id: ds-warehouse-prod
+      source_table: public.orders
+      unit: USD
+      return_type: decimal
+      time_dimension: order_date
+      ontology_concepts:
+        - Revenue
+        - FinancialMetric
+
+  - name: active_customers
+    description: "Count of customers with at least one order in the last 90 days"
+    expression:
+      dialects:
+        - dialect: ANSI_SQL
+          expression: "COUNT(DISTINCT customer_id) FILTER (WHERE order_date >= CURRENT_DATE - INTERVAL '90 days')"
+    ai_context:
+      synonyms:
+        - "engaged customers"
+        - "active users"
+      instructions: "Use for questions about customer engagement, active user counts, or retention."
+    x_coa:
+      data_source_id: ds-warehouse-prod
+      source_table: public.customers
+      return_type: integer
+      ontology_concepts:
+        - CustomerEngagement
+
+  - name: avg_order_value
+    description: "Average order value for completed orders"
+    expression:
+      dialects:
+        - dialect: ANSI_SQL
+          expression: "AVG(amount) FILTER (WHERE status = 'completed')"
+        - dialect: DATABRICKS
+          expression: "AVG(CASE WHEN status = 'completed' THEN amount END)"
+    ai_context:
+      synonyms:
+        - "AOV"
+        - "average basket size"
+    x_coa:
+      data_source_id: ds-warehouse-prod
+      source_table: public.orders
+      unit: USD
+      return_type: decimal

@@ -1,0 +1,305 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+import * as cdk from "aws-cdk-lib";
+import * as s3 from "aws-cdk-lib/aws-s3";
+import { Template, Match } from "aws-cdk-lib/assertions";
+import { VkgStack } from "../../lib/stacks/services/vkg-stack";
+import { NetworkStack } from "../../lib/stacks/foundation/network-stack";
+import { DEFAULT_RESOURCE_PREFIX, DEFAULT_ENV } from "../../lib/constants";
+
+const TEST_CONTEXT = {
+  resource_prefix: DEFAULT_RESOURCE_PREFIX,
+  env: DEFAULT_ENV,
+  "aws:cdk:bundling-stacks": [],
+};
+
+const PREFIX = `${DEFAULT_RESOURCE_PREFIX}-${DEFAULT_ENV}`;
+
+describe("VkgStack", () => {
+  let template: Template;
+  let templateWithBucket: Template;
+
+  beforeAll(() => {
+    const app = new cdk.App({ context: TEST_CONTEXT });
+    const network = new NetworkStack(app, "TestNetwork");
+    const bucketStack = new cdk.Stack(app, "BucketStack");
+    const bucket = new s3.Bucket(bucketStack, "OntologyBucket", {
+      bucketName: `${PREFIX}-ontology-artifacts`,
+    });
+
+    template = Template.fromStack(
+      new VkgStack(app, "TestVkg", {
+        network,
+        serviceNamespace: network.serviceNamespace,
+        ontologyBucket: bucket,
+      }),
+    );
+
+    // Test with a different externally provided bucket — same path now that
+    // ontologyBucket is required, kept for assertion symmetry.
+    const app2 = new cdk.App({ context: TEST_CONTEXT });
+    const network2 = new NetworkStack(app2, "TestNetwork2");
+    const mockStack = new cdk.Stack(app2, "MockStack");
+    const ontologyBucket = new s3.Bucket(mockStack, "OntologyBucket", {
+      bucketName: `${PREFIX}-ontology-artifacts`,
+    });
+
+    templateWithBucket = Template.fromStack(
+      new VkgStack(app2, "TestVkg2", {
+        network: network2,
+        serviceNamespace: network2.serviceNamespace,
+        ontologyBucket,
+      }),
+    );
+  });
+
+  // ── ECS Cluster ──────────────────────────────────────────────────
+
+  test("creates ECS cluster for VKG service", () => {
+    template.hasResourceProperties("AWS::ECS::Cluster", {
+      ClusterName: `${PREFIX}-vkg-cluster`,
+    });
+  });
+
+  test("does not create its own Cloud Map namespace (uses shared from NetworkStack)", () => {
+    const namespaces = template.findResources(
+      "AWS::ServiceDiscovery::PrivateDnsNamespace",
+    );
+    expect(Object.keys(namespaces).length).toBe(0);
+  });
+
+  // ── Task Definition ──────────────────────────────────────────────
+
+  test("creates Fargate task definition with correct sizing", () => {
+    template.hasResourceProperties("AWS::ECS::TaskDefinition", {
+      Family: `${PREFIX}-vkg-service`,
+      Cpu: "1024",
+      Memory: "2048",
+      RequiresCompatibilities: ["FARGATE"],
+      NetworkMode: "awsvpc",
+    });
+  });
+
+  test("task definition has container with port mapping", () => {
+    template.hasResourceProperties("AWS::ECS::TaskDefinition", {
+      ContainerDefinitions: Match.arrayWith([
+        Match.objectLike({
+          Name: `${PREFIX}-ontop`,
+          PortMappings: Match.arrayWith([
+            Match.objectLike({
+              ContainerPort: 8080,
+              Protocol: "tcp",
+            }),
+          ]),
+        }),
+      ]),
+    });
+  });
+
+  test("container has health check configured", () => {
+    template.hasResourceProperties("AWS::ECS::TaskDefinition", {
+      ContainerDefinitions: Match.arrayWith([
+        Match.objectLike({
+          HealthCheck: Match.objectLike({
+            Command: Match.arrayWith(["CMD-SHELL"]),
+          }),
+        }),
+      ]),
+    });
+  });
+
+  test("container has required environment variables", () => {
+    template.hasResourceProperties("AWS::ECS::TaskDefinition", {
+      ContainerDefinitions: Match.arrayWith([
+        Match.objectLike({
+          Environment: Match.arrayWith([
+            Match.objectLike({ Name: "ONTOLOGY_BUCKET" }),
+            Match.objectLike({ Name: "ONTOLOGY_PREFIX", Value: "ontologies/" }),
+            Match.objectLike({ Name: "ENDPOINT_PORT", Value: "8080" }),
+          ]),
+        }),
+      ]),
+    });
+  });
+
+  test("container has CloudWatch logging configured", () => {
+    template.hasResourceProperties("AWS::ECS::TaskDefinition", {
+      ContainerDefinitions: Match.arrayWith([
+        Match.objectLike({
+          LogConfiguration: Match.objectLike({
+            LogDriver: "awslogs",
+            Options: Match.objectLike({
+              "awslogs-stream-prefix": "vkg",
+            }),
+          }),
+        }),
+      ]),
+    });
+  });
+
+  // ── No static Fargate Service ────────────────────────────────────
+
+  test("does not create a static VKG service (per-namespace only)", () => {
+    const services = template.findResources("AWS::ECS::Service");
+    expect(Object.keys(services).length).toBe(0);
+  });
+
+  // ── IAM Permissions ──────────────────────────────────────────────
+
+  test("task role has S3 read access for ontology artifacts", () => {
+    template.hasResourceProperties("AWS::IAM::Policy", {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: Match.arrayWith(["s3:GetObject*", "s3:GetBucket*"]),
+            Effect: "Allow",
+          }),
+        ]),
+      },
+    });
+  });
+
+  // ── Reload monitoring ───────────────────────────────────
+
+  test("creates a reload-failure alarm on the undimensioned ReloadFailed roll-up metric", () => {
+    // The reload Lambda emits ReloadFailed both per-Namespace and as an
+    // undimensioned cluster-wide roll-up. The alarm must evaluate the roll-up
+    // (a plain Metric), NOT a SUM(SEARCH(...)) expression: CloudWatch metric
+    // alarms reject SEARCH() at deploy time ("SEARCH is not supported on Metric
+    // Alarms"). The undimensioned series receives data from every namespace, so
+    // a single plain-metric alarm still fires on any namespace's reload failure.
+    template.hasResourceProperties("AWS::CloudWatch::Alarm", {
+      AlarmName: `${PREFIX}-vkg-reload-failed`,
+      Namespace: "COA/VKG",
+      MetricName: "ReloadFailed",
+      Statistic: "Sum",
+      Threshold: 1,
+      ComparisonOperator: "GreaterThanOrEqualToThreshold",
+    });
+  });
+
+  test("reload-failure alarm is NOT backed by a SEARCH/MathExpression (deploy-time invalid)", () => {
+    // Regression guard for the "SEARCH is not supported on Metric Alarms"
+    // CloudFormation deploy failure: the alarm must render as a single-metric
+    // alarm (Namespace/MetricName/Statistic on the resource), never a Metrics[]
+    // array carrying an Expression.
+    const alarms = template.findResources("AWS::CloudWatch::Alarm");
+    const reloadAlarm = Object.values(alarms).find(
+      (r) => r.Properties?.AlarmName === `${PREFIX}-vkg-reload-failed`,
+    );
+    expect(reloadAlarm).toBeDefined();
+    expect(reloadAlarm?.Properties?.Metrics).toBeUndefined();
+    expect(JSON.stringify(reloadAlarm?.Properties)).not.toContain("SEARCH");
+  });
+
+  test("reload Lambda may publish only COA/VKG metrics", () => {
+    template.hasResourceProperties("AWS::IAM::Policy", {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: "cloudwatch:PutMetricData",
+            Condition: {
+              StringEquals: { "cloudwatch:namespace": "COA/VKG" },
+            },
+          }),
+        ]),
+      },
+    });
+  });
+
+  // ── SSM Parameters ───────────────────────────────────────────────
+
+  test("publishes VKG container image URI to SSM for reload Lambda", () => {
+    template.hasResourceProperties("AWS::SSM::Parameter", {
+      Name: `/${DEFAULT_RESOURCE_PREFIX}/vkg/container-image`,
+    });
+  });
+
+  test("publishes VKG cluster ARN to SSM", () => {
+    template.hasResourceProperties("AWS::SSM::Parameter", {
+      Name: `/${DEFAULT_RESOURCE_PREFIX}/vkg/cluster-arn`,
+    });
+  });
+
+  test("publishes VKG endpoint pattern to SSM", () => {
+    template.hasResourceProperties("AWS::SSM::Parameter", {
+      Name: `/${DEFAULT_RESOURCE_PREFIX}/vkg/endpoint`,
+    });
+  });
+
+  // ── CloudFormation Outputs ───────────────────────────────────────
+
+  test("exports VkgClusterArn output", () => {
+    template.hasOutput("VkgClusterArn", {});
+  });
+
+  test("exports VkgEndpointPattern output", () => {
+    template.hasOutput("VkgEndpointPattern", {});
+  });
+
+  // ── S3 Bucket (imported via fromBucketName) ───────────────────────
+
+  test("uses imported ontology bucket when not provided", () => {
+    // Stack imports bucket via fromBucketName — no AWS::S3::Bucket resource is created.
+    // Verify the task role has S3 access referencing the expected bucket name.
+    const buckets = template.findResources("AWS::S3::Bucket");
+    expect(Object.keys(buckets).length).toBe(0);
+  });
+
+  test("does not create bucket when one is provided externally", () => {
+    const vkgBuckets = templateWithBucket.findResources("AWS::S3::Bucket");
+    expect(Object.keys(vkgBuckets).length).toBe(0);
+  });
+
+  // ── VPC Configuration ─────────────────────────────────────────────
+
+  test("VkgReloadFn is deployed in VPC (security baseline)", () => {
+    // Per .kiro/steering/cdk-infrastructure.md, all Lambda functions must be
+    // deployed inside a VPC. VkgReloadFn manipulates ECS resources that are
+    // themselves VPC-bound.
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      FunctionName: `${PREFIX}-vkg-reload`,
+      VpcConfig: Match.objectLike({
+        SubnetIds: Match.anyValue(),
+        SecurityGroupIds: Match.anyValue(),
+      }),
+    });
+  });
+
+  // ── OE monitoring (cdk-monitoring-constructs) ────────────────────
+
+  test("emits facade cluster CPU/memory alarms and a vkg dashboard", () => {
+    template.resourceCountIs("AWS::CloudWatch::Dashboard", 1);
+    const alarms = template.findResources("AWS::CloudWatch::Alarm");
+    expect(Object.keys(alarms).length).toBeGreaterThanOrEqual(2);
+  });
+
+  // ── Ontology-reload rule: cross-deployment isolation ──────────────
+
+  test("reload rule matches a resource_prefix-scoped event source, not a shared one", () => {
+    // Two deployments in one account+region share the account-global `default`
+    // bus. If the rule matched only the static brand source, each deployment's
+    // rule would fire on the OTHER's ontology.published events and provision
+    // duplicate per-namespace VKG services that its own teardown never deletes.
+    const app = new cdk.App({
+      context: { ...TEST_CONTEXT, resource_prefix: "sclz" },
+    });
+    const network = new NetworkStack(app, "IsoNetwork");
+    const isoBucketStack = new cdk.Stack(app, "IsoBucketStack");
+    const isoBucket = new s3.Bucket(isoBucketStack, "OntologyBucket", {
+      bucketName: "sclz-dev-ontology-artifacts",
+    });
+    const stack = new VkgStack(app, "IsoVkg", {
+      network,
+      serviceNamespace: network.serviceNamespace,
+      ontologyBucket: isoBucket,
+    });
+    const rules = Template.fromStack(stack).findResources("AWS::Events::Rule");
+    const sources = Object.values(rules).flatMap(
+      (r) => r.Properties?.EventPattern?.source ?? [],
+    );
+
+    expect(sources).toContain("sclz.ontology");
+  });
+});

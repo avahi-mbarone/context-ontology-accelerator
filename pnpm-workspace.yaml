@@ -1,0 +1,21 @@
+packages:
+  - "libs/ts-shared"
+  - "packages/web-app"
+  - "packages/mcp-proxy"
+  - "infra"
+  - "tests/cdk"
+  - "smithy-generated/control-plane-typescript-client"
+  - "smithy-generated/data-layer-typescript-client"
+allowBuilds:
+  esbuild: true
+  nx: true
+
+# Supply chain hardening — prevent exotic subdependency installs and silent downgrades.
+packageManagerStrictness:
+  blockExoticSubdeps: true
+  trustPolicy: no-downgrade
+
+# Quarantine newly-published packages for 7 days before allowing install.
+pnpm:
+  auditConfig:
+    minReleaseAge: "7 days"

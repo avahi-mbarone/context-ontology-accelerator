@@ -1,0 +1,40 @@
+# Docker build context filter — repo root is the build context.
+# Allowlist only the directories needed by Dockerfiles.
+
+# Ignore everything by default
+*
+
+# Allow mise tool-version config (ci/docker/Dockerfile COPYs .mise.toml into /tmp/coa-mise)
+!.mise.toml
+
+# Allow shared library (both Dockerfiles need this)
+!libs/common/
+
+# Allow context-manager package
+!packages/context-manager/Dockerfile
+!packages/context-manager/pyproject.toml
+!packages/context-manager/src/
+
+# Allow MCP server package (same image, different entrypoint)
+!packages/mcp-server/pyproject.toml
+!packages/mcp-server/src/
+
+# Allow sources package (unified sources — database + documents pipelines)
+!packages/sources/
+
+# Allow ontology-engine package
+!packages/ontology-engine/Dockerfile
+!packages/ontology-engine/src/
+!packages/ontology-engine/requirements.txt
+!packages/ontology-engine/tests/fixtures/data-catalog/sample_data/
+
+# Allow smithy-generated models
+!smithy-generated/control-plane-python-server/
+
+# Exclude test artifacts and caches from allowed dirs
+**/__pycache__
+**/.pytest_cache
+**/htmlcov
+**/coverage.xml
+**/junit.xml
+**/*.pyc

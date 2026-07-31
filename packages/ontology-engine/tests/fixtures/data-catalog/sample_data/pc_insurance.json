@@ -1,0 +1,886 @@
+{
+  "namespaceId": "ns-pc-insurance",
+  "sources": [
+    {
+      "datasourceId": "ds-pc-insurance",
+      "sourceType": "JDBC_DATABASE",
+      "databases": [
+        {
+          "name": "pc_insurance",
+          "description": "P&C (Property & Casualty) Insurance database. Schema subset from the OMG P&C Data Model (dtc/13-04-15), as published in \"Knowledge Graph and LLM Accuracy Benchmark Report\" Appendix 9.1 (Sequeda et al., arXiv:2311.07509).",
+          "tables": [
+            {
+              "name": "Claim",
+              "technicalMetadata": {
+                "columnCount": 14,
+                "format": "postgres"
+              },
+              "businessMetadata": {
+                "description": "",
+                "enrichmentSource": "DETERMINISTIC",
+                "reviewStatus": "APPROVED"
+              },
+              "primaryKey": {
+                "columns": [
+                  "Claim_Identifier"
+                ],
+                "source": "DETERMINISTIC",
+                "confidence": 1.0
+              },
+              "foreignKeys": [
+                {
+                  "column": "Catastrophe_Identifier",
+                  "targetTable": "Catastrophe",
+                  "targetColumn": "Catastrophe_Identifier",
+                  "source": "DETERMINISTIC",
+                  "confidence": 1.0
+                },
+                {
+                  "column": "Claim_Identifier",
+                  "targetTable": "Claim",
+                  "targetColumn": "Claim_Identifier",
+                  "source": "DETERMINISTIC",
+                  "confidence": 1.0
+                },
+                {
+                  "column": "Insurable_Object_Identifier",
+                  "targetTable": "Insurable_Object",
+                  "targetColumn": "Insurable_Object_Identifier",
+                  "source": "DETERMINISTIC",
+                  "confidence": 1.0
+                },
+                {
+                  "column": "Occurrence_Identifier",
+                  "targetTable": "Occurrence",
+                  "targetColumn": "Occurrence_Identifier",
+                  "source": "DETERMINISTIC",
+                  "confidence": 1.0
+                }
+              ],
+              "columns": [
+                {
+                  "name": "Claim_Identifier",
+                  "dataType": "INT",
+                  "description": "",
+                  "constraint": "NOT_NULL"
+                },
+                {
+                  "name": "Catastrophe_Identifier",
+                  "dataType": "INT",
+                  "description": "",
+                  "constraint": null
+                },
+                {
+                  "name": "Claim_Description",
+                  "dataType": "VARCHAR",
+                  "description": "",
+                  "constraint": null
+                },
+                {
+                  "name": "Claims_Made_Date",
+                  "dataType": "DATETIME",
+                  "description": "",
+                  "constraint": null
+                },
+                {
+                  "name": "Company_Claim_Number",
+                  "dataType": "VARCHAR",
+                  "description": "",
+                  "constraint": null
+                },
+                {
+                  "name": "Company_Subclaim_Number",
+                  "dataType": "VARCHAR",
+                  "description": "",
+                  "constraint": null
+                },
+                {
+                  "name": "Insurable_Object_Identifier",
+                  "dataType": "INT",
+                  "description": "",
+                  "constraint": null
+                },
+                {
+                  "name": "Occurrence_Identifier",
+                  "dataType": "INT",
+                  "description": "",
+                  "constraint": null
+                },
+                {
+                  "name": "Entry_Into_Claims_Made_Program_Date",
+                  "dataType": "DATETIME",
+                  "description": "",
+                  "constraint": null
+                },
+                {
+                  "name": "Claim_Open_Date",
+                  "dataType": "DATETIME",
+                  "description": "",
+                  "constraint": null
+                },
+                {
+                  "name": "Claim_Close_Date",
+                  "dataType": "DATETIME",
+                  "description": "",
+                  "constraint": null
+                },
+                {
+                  "name": "Claim_Reopen_Date",
+                  "dataType": "DATETIME",
+                  "description": "",
+                  "constraint": null
+                },
+                {
+                  "name": "Claim_Status_Code",
+                  "dataType": "VARCHAR",
+                  "description": "",
+                  "constraint": null
+                },
+                {
+                  "name": "Claim_Reported_Date",
+                  "dataType": "DATETIME",
+                  "description": "",
+                  "constraint": null
+                }
+              ]
+            },
+            {
+              "name": "Claim_Amount",
+              "technicalMetadata": {
+                "columnCount": 7,
+                "format": "postgres"
+              },
+              "businessMetadata": {
+                "description": "",
+                "enrichmentSource": "DETERMINISTIC",
+                "reviewStatus": "APPROVED"
+              },
+              "primaryKey": {
+                "columns": [
+                  "Claim_Amount_Identifier"
+                ],
+                "source": "DETERMINISTIC",
+                "confidence": 1.0
+              },
+              "foreignKeys": [
+                {
+                  "column": "Claim_Offer_Identifier",
+                  "targetTable": "Claim_Offer",
+                  "targetColumn": "Claim_Offer_Identifier",
+                  "source": "DETERMINISTIC",
+                  "confidence": 1.0
+                },
+                {
+                  "column": "Claim_Identifier",
+                  "targetTable": "Claim",
+                  "targetColumn": "Claim_Identifier",
+                  "source": "DETERMINISTIC",
+                  "confidence": 1.0
+                }
+              ],
+              "columns": [
+                {
+                  "name": "Claim_Amount_Identifier",
+                  "dataType": "BIGINT",
+                  "description": "",
+                  "constraint": "NOT_NULL"
+                },
+                {
+                  "name": "Claim_Identifier",
+                  "dataType": "INT",
+                  "description": "",
+                  "constraint": "NOT_NULL"
+                },
+                {
+                  "name": "Claim_Offer_Identifier",
+                  "dataType": "INT",
+                  "description": "",
+                  "constraint": null
+                },
+                {
+                  "name": "Amount_Type_Code",
+                  "dataType": "VARCHAR",
+                  "description": "",
+                  "constraint": null
+                },
+                {
+                  "name": "Event_Date",
+                  "dataType": "DATETIME",
+                  "description": "",
+                  "constraint": null
+                },
+                {
+                  "name": "Claim_Amount",
+                  "dataType": "DECIMAL",
+                  "description": "",
+                  "constraint": null
+                },
+                {
+                  "name": "Insurance_Type_Code",
+                  "dataType": "CHAR",
+                  "description": "",
+                  "constraint": null
+                }
+              ]
+            },
+            {
+              "name": "Loss_Payment",
+              "technicalMetadata": {
+                "columnCount": 1,
+                "format": "postgres"
+              },
+              "businessMetadata": {
+                "description": "",
+                "enrichmentSource": "DETERMINISTIC",
+                "reviewStatus": "APPROVED"
+              },
+              "primaryKey": {
+                "columns": [
+                  "Claim_Amount_Identifier"
+                ],
+                "source": "DETERMINISTIC",
+                "confidence": 1.0
+              },
+              "foreignKeys": [
+                {
+                  "column": "Claim_Amount_Identifier",
+                  "targetTable": "Claim_Payment",
+                  "targetColumn": "Claim_Amount_Identifier",
+                  "source": "DETERMINISTIC",
+                  "confidence": 1.0
+                }
+              ],
+              "columns": [
+                {
+                  "name": "Claim_Amount_Identifier",
+                  "dataType": "BIGINT",
+                  "description": "",
+                  "constraint": "NOT_NULL"
+                }
+              ]
+            },
+            {
+              "name": "Loss_Reserve",
+              "technicalMetadata": {
+                "columnCount": 1,
+                "format": "postgres"
+              },
+              "businessMetadata": {
+                "description": "",
+                "enrichmentSource": "DETERMINISTIC",
+                "reviewStatus": "APPROVED"
+              },
+              "primaryKey": {
+                "columns": [
+                  "Claim_Amount_Identifier"
+                ],
+                "source": "DETERMINISTIC",
+                "confidence": 1.0
+              },
+              "foreignKeys": [
+                {
+                  "column": "Claim_Amount_Identifier",
+                  "targetTable": "Claim_Reserve",
+                  "targetColumn": "Claim_Amount_Identifier",
+                  "source": "DETERMINISTIC",
+                  "confidence": 1.0
+                }
+              ],
+              "columns": [
+                {
+                  "name": "Claim_Amount_Identifier",
+                  "dataType": "BIGINT",
+                  "description": "",
+                  "constraint": "NOT_NULL"
+                }
+              ]
+            },
+            {
+              "name": "Expense_Payment",
+              "technicalMetadata": {
+                "columnCount": 1,
+                "format": "postgres"
+              },
+              "businessMetadata": {
+                "description": "",
+                "enrichmentSource": "DETERMINISTIC",
+                "reviewStatus": "APPROVED"
+              },
+              "primaryKey": {
+                "columns": [
+                  "Claim_Amount_Identifier"
+                ],
+                "source": "DETERMINISTIC",
+                "confidence": 1.0
+              },
+              "foreignKeys": [
+                {
+                  "column": "Claim_Amount_Identifier",
+                  "targetTable": "Claim_Payment",
+                  "targetColumn": "Claim_Amount_Identifier",
+                  "source": "DETERMINISTIC",
+                  "confidence": 1.0
+                }
+              ],
+              "columns": [
+                {
+                  "name": "Claim_Amount_Identifier",
+                  "dataType": "BIGINT",
+                  "description": "",
+                  "constraint": "NOT_NULL"
+                }
+              ]
+            },
+            {
+              "name": "Expense_Reserve",
+              "technicalMetadata": {
+                "columnCount": 1,
+                "format": "postgres"
+              },
+              "businessMetadata": {
+                "description": "",
+                "enrichmentSource": "DETERMINISTIC",
+                "reviewStatus": "APPROVED"
+              },
+              "primaryKey": {
+                "columns": [
+                  "Claim_Amount_Identifier"
+                ],
+                "source": "DETERMINISTIC",
+                "confidence": 1.0
+              },
+              "foreignKeys": [
+                {
+                  "column": "Claim_Amount_Identifier",
+                  "targetTable": "Claim_Reserve",
+                  "targetColumn": "Claim_Amount_Identifier",
+                  "source": "DETERMINISTIC",
+                  "confidence": 1.0
+                }
+              ],
+              "columns": [
+                {
+                  "name": "Claim_Amount_Identifier",
+                  "dataType": "BIGINT",
+                  "description": "",
+                  "constraint": "NOT_NULL"
+                }
+              ]
+            },
+            {
+              "name": "Claim_Coverage",
+              "technicalMetadata": {
+                "columnCount": 3,
+                "format": "postgres"
+              },
+              "businessMetadata": {
+                "description": "",
+                "enrichmentSource": "DETERMINISTIC",
+                "reviewStatus": "APPROVED"
+              },
+              "primaryKey": {
+                "columns": [
+                  "Claim_Identifier",
+                  "Effective_Date",
+                  "Policy_Coverage_Detail_Identifier"
+                ],
+                "source": "DETERMINISTIC",
+                "confidence": 1.0
+              },
+              "foreignKeys": [
+                {
+                  "column": "Claim_Identifier",
+                  "targetTable": "Claim",
+                  "targetColumn": "Claim_Identifier",
+                  "source": "DETERMINISTIC",
+                  "confidence": 1.0
+                },
+                {
+                  "column": "Effective_Date",
+                  "targetTable": "Policy_Coverage_Detail",
+                  "targetColumn": "Effective_Date",
+                  "source": "DETERMINISTIC",
+                  "confidence": 1.0
+                }
+              ],
+              "columns": [
+                {
+                  "name": "Claim_Identifier",
+                  "dataType": "INT",
+                  "description": "",
+                  "constraint": "NOT_NULL"
+                },
+                {
+                  "name": "Effective_Date",
+                  "dataType": "DATETIME",
+                  "description": "",
+                  "constraint": "NOT_NULL"
+                },
+                {
+                  "name": "Policy_Coverage_Detail_Identifier",
+                  "dataType": "INT",
+                  "description": "",
+                  "constraint": "NOT_NULL"
+                }
+              ]
+            },
+            {
+              "name": "Policy_Coverage_Detail",
+              "technicalMetadata": {
+                "columnCount": 9,
+                "format": "postgres"
+              },
+              "businessMetadata": {
+                "description": "",
+                "enrichmentSource": "DETERMINISTIC",
+                "reviewStatus": "APPROVED"
+              },
+              "primaryKey": {
+                "columns": [
+                  "Effective_Date",
+                  "Policy_Coverage_Detail_Identifier"
+                ],
+                "source": "DETERMINISTIC",
+                "confidence": 1.0
+              },
+              "foreignKeys": [
+                {
+                  "column": "Insurable_Object_Identifier",
+                  "targetTable": "Insurable_Object",
+                  "targetColumn": "Insurable_Object_Identifier",
+                  "source": "DETERMINISTIC",
+                  "confidence": 1.0
+                },
+                {
+                  "column": "Coverage_Identifier",
+                  "targetTable": "Coverage",
+                  "targetColumn": "Coverage_Identifier",
+                  "source": "DETERMINISTIC",
+                  "confidence": 1.0
+                },
+                {
+                  "column": "Coverage_Part_Code",
+                  "targetTable": "Policy_Coverage_Part",
+                  "targetColumn": "Coverage_Part_Code",
+                  "source": "DETERMINISTIC",
+                  "confidence": 1.0
+                }
+              ],
+              "columns": [
+                {
+                  "name": "Effective_Date",
+                  "dataType": "DATETIME",
+                  "description": "",
+                  "constraint": "NOT_NULL"
+                },
+                {
+                  "name": "Policy_Coverage_Detail_Identifier",
+                  "dataType": "INT",
+                  "description": "",
+                  "constraint": "NOT_NULL"
+                },
+                {
+                  "name": "Coverage_Identifier",
+                  "dataType": "INT",
+                  "description": "",
+                  "constraint": "NOT_NULL"
+                },
+                {
+                  "name": "Insurable_Object_Identifier",
+                  "dataType": "INT",
+                  "description": "",
+                  "constraint": "NOT_NULL"
+                },
+                {
+                  "name": "Policy_Identifier",
+                  "dataType": "INT",
+                  "description": "",
+                  "constraint": "NOT_NULL"
+                },
+                {
+                  "name": "Coverage_Part_Code",
+                  "dataType": "VARCHAR",
+                  "description": "",
+                  "constraint": "NOT_NULL"
+                },
+                {
+                  "name": "Coverage_Description",
+                  "dataType": "VARCHAR",
+                  "description": "",
+                  "constraint": null
+                },
+                {
+                  "name": "Expiration_Date",
+                  "dataType": "DATETIME",
+                  "description": "",
+                  "constraint": null
+                },
+                {
+                  "name": "Coverage_Inclusion_Exclusion_Code",
+                  "dataType": "CHAR",
+                  "description": "",
+                  "constraint": null
+                }
+              ]
+            },
+            {
+              "name": "Policy",
+              "technicalMetadata": {
+                "columnCount": 6,
+                "format": "postgres"
+              },
+              "businessMetadata": {
+                "description": "",
+                "enrichmentSource": "DETERMINISTIC",
+                "reviewStatus": "APPROVED"
+              },
+              "primaryKey": {
+                "columns": [
+                  "Policy_Identifier"
+                ],
+                "source": "DETERMINISTIC",
+                "confidence": 1.0
+              },
+              "foreignKeys": [
+                {
+                  "column": "Geographic_Location_Identifier",
+                  "targetTable": "Geographic_Location",
+                  "targetColumn": "Geographic_Location_Identifier",
+                  "source": "DETERMINISTIC",
+                  "confidence": 1.0
+                },
+                {
+                  "column": "Policy_Identifier",
+                  "targetTable": "Agreement",
+                  "targetColumn": "Agreement_Identifier",
+                  "source": "DETERMINISTIC",
+                  "confidence": 1.0
+                }
+              ],
+              "columns": [
+                {
+                  "name": "Policy_Identifier",
+                  "dataType": "INT",
+                  "description": "",
+                  "constraint": "NOT_NULL"
+                },
+                {
+                  "name": "Effective_Date",
+                  "dataType": "DATETIME",
+                  "description": "",
+                  "constraint": null
+                },
+                {
+                  "name": "Expiration_Date",
+                  "dataType": "DATETIME",
+                  "description": "",
+                  "constraint": null
+                },
+                {
+                  "name": "Policy_Number",
+                  "dataType": "VARCHAR",
+                  "description": "",
+                  "constraint": null
+                },
+                {
+                  "name": "Status_Code",
+                  "dataType": "VARCHAR",
+                  "description": "",
+                  "constraint": null
+                },
+                {
+                  "name": "Geographic_Location_Identifier",
+                  "dataType": "INT",
+                  "description": "",
+                  "constraint": null
+                }
+              ]
+            },
+            {
+              "name": "Policy_Amount",
+              "technicalMetadata": {
+                "columnCount": 11,
+                "format": "postgres"
+              },
+              "businessMetadata": {
+                "description": "",
+                "enrichmentSource": "DETERMINISTIC",
+                "reviewStatus": "APPROVED"
+              },
+              "primaryKey": {
+                "columns": [
+                  "Policy_Amount_Identifier"
+                ],
+                "source": "DETERMINISTIC",
+                "confidence": 1.0
+              },
+              "foreignKeys": [
+                {
+                  "column": "Effective_Date",
+                  "targetTable": "Policy_Coverage_Detail",
+                  "targetColumn": "Effective_Date",
+                  "source": "DETERMINISTIC",
+                  "confidence": 1.0
+                },
+                {
+                  "column": "Policy_Identifier",
+                  "targetTable": "Policy",
+                  "targetColumn": "Policy_Identifier",
+                  "source": "DETERMINISTIC",
+                  "confidence": 1.0
+                },
+                {
+                  "column": "Geographic_Location_Identifier",
+                  "targetTable": "Geographic_Location",
+                  "targetColumn": "Geographic_Location_Identifier",
+                  "source": "DETERMINISTIC",
+                  "confidence": 1.0
+                },
+                {
+                  "column": "Insurable_Object_Identifier",
+                  "targetTable": "Insurable_Object",
+                  "targetColumn": "Insurable_Object_Identifier",
+                  "source": "DETERMINISTIC",
+                  "confidence": 1.0
+                }
+              ],
+              "columns": [
+                {
+                  "name": "Policy_Amount_Identifier",
+                  "dataType": "BIGINT",
+                  "description": "",
+                  "constraint": "NOT_NULL"
+                },
+                {
+                  "name": "Geographic_Location_Identifier",
+                  "dataType": "INT",
+                  "description": "",
+                  "constraint": "NOT_NULL"
+                },
+                {
+                  "name": "Policy_Identifier",
+                  "dataType": "INT",
+                  "description": "",
+                  "constraint": null
+                },
+                {
+                  "name": "Effective_Date",
+                  "dataType": "DATETIME",
+                  "description": "",
+                  "constraint": null
+                },
+                {
+                  "name": "Amount_Type_Code",
+                  "dataType": "VARCHAR",
+                  "description": "",
+                  "constraint": null
+                },
+                {
+                  "name": "Earning_Begin_Date",
+                  "dataType": "DATETIME",
+                  "description": "",
+                  "constraint": null
+                },
+                {
+                  "name": "Earning_End_Date",
+                  "dataType": "DATETIME",
+                  "description": "",
+                  "constraint": null
+                },
+                {
+                  "name": "Policy_Coverage_Detail_Identifier",
+                  "dataType": "INT",
+                  "description": "",
+                  "constraint": null
+                },
+                {
+                  "name": "Policy_Amount",
+                  "dataType": "DECIMAL",
+                  "description": "",
+                  "constraint": null
+                },
+                {
+                  "name": "Insurable_Object_Identifier",
+                  "dataType": "INT",
+                  "description": "",
+                  "constraint": null
+                },
+                {
+                  "name": "Insurance_Type_Code",
+                  "dataType": "CHAR",
+                  "description": "",
+                  "constraint": null
+                }
+              ]
+            },
+            {
+              "name": "Agreement_Party_Role",
+              "technicalMetadata": {
+                "columnCount": 5,
+                "format": "postgres"
+              },
+              "businessMetadata": {
+                "description": "",
+                "enrichmentSource": "DETERMINISTIC",
+                "reviewStatus": "APPROVED"
+              },
+              "primaryKey": {
+                "columns": [
+                  "Agreement_Identifier",
+                  "Party_Identifier",
+                  "Party_Role_Code",
+                  "Effective_Date"
+                ],
+                "source": "DETERMINISTIC",
+                "confidence": 1.0
+              },
+              "foreignKeys": [
+                {
+                  "column": "Agreement_Identifier",
+                  "targetTable": "Agreement",
+                  "targetColumn": "Agreement_Identifier",
+                  "source": "DETERMINISTIC",
+                  "confidence": 1.0
+                },
+                {
+                  "column": "Party_Identifier",
+                  "targetTable": "Party",
+                  "targetColumn": "Party_Identifier",
+                  "source": "DETERMINISTIC",
+                  "confidence": 1.0
+                },
+                {
+                  "column": "Party_Role_Code",
+                  "targetTable": "Party_Role",
+                  "targetColumn": "Party_Role_Code",
+                  "source": "DETERMINISTIC",
+                  "confidence": 1.0
+                }
+              ],
+              "columns": [
+                {
+                  "name": "Agreement_Identifier",
+                  "dataType": "INT",
+                  "description": "",
+                  "constraint": "NOT_NULL"
+                },
+                {
+                  "name": "Party_Identifier",
+                  "dataType": "BIGINT",
+                  "description": "",
+                  "constraint": "NOT_NULL"
+                },
+                {
+                  "name": "Party_Role_Code",
+                  "dataType": "VARCHAR",
+                  "description": "",
+                  "constraint": "NOT_NULL"
+                },
+                {
+                  "name": "Effective_Date",
+                  "dataType": "DATETIME",
+                  "description": "",
+                  "constraint": "NOT_NULL"
+                },
+                {
+                  "name": "Expiration_Date",
+                  "dataType": "DATETIME",
+                  "description": "",
+                  "constraint": null
+                }
+              ]
+            },
+            {
+              "name": "Premium",
+              "technicalMetadata": {
+                "columnCount": 1,
+                "format": "postgres"
+              },
+              "businessMetadata": {
+                "description": "",
+                "enrichmentSource": "DETERMINISTIC",
+                "reviewStatus": "APPROVED"
+              },
+              "primaryKey": {
+                "columns": [
+                  "Policy_Amount_Identifier"
+                ],
+                "source": "DETERMINISTIC",
+                "confidence": 1.0
+              },
+              "foreignKeys": [
+                {
+                  "column": "Policy_Amount_Identifier",
+                  "targetTable": "Policy_Amount",
+                  "targetColumn": "Policy_Amount_Identifier",
+                  "source": "DETERMINISTIC",
+                  "confidence": 1.0
+                }
+              ],
+              "columns": [
+                {
+                  "name": "Policy_Amount_Identifier",
+                  "dataType": "BIGINT",
+                  "description": "",
+                  "constraint": "NOT_NULL"
+                }
+              ]
+            },
+            {
+              "name": "Catastrophe",
+              "technicalMetadata": {
+                "columnCount": 5,
+                "format": "postgres"
+              },
+              "businessMetadata": {
+                "description": "",
+                "enrichmentSource": "DETERMINISTIC",
+                "reviewStatus": "APPROVED"
+              },
+              "primaryKey": {
+                "columns": [
+                  "Catastrophe_Identifier"
+                ],
+                "source": "DETERMINISTIC",
+                "confidence": 1.0
+              },
+              "foreignKeys": [],
+              "columns": [
+                {
+                  "name": "Catastrophe_Identifier",
+                  "dataType": "INT",
+                  "description": "",
+                  "constraint": "NOT_NULL"
+                },
+                {
+                  "name": "Catastrophe_Type_Code",
+                  "dataType": "VARCHAR",
+                  "description": "",
+                  "constraint": null
+                },
+                {
+                  "name": "Catastrophe_Name",
+                  "dataType": "VARCHAR",
+                  "description": "",
+                  "constraint": null
+                },
+                {
+                  "name": "Industry_Catastrophe_Code",
+                  "dataType": "VARCHAR",
+                  "description": "",
+                  "constraint": null
+                },
+                {
+                  "name": "Company_Catastrophe_Code",
+                  "dataType": "VARCHAR",
+                  "description": "",
+                  "constraint": null
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

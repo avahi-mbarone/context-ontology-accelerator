@@ -1,0 +1,23 @@
+You are an OWL 2 DL ontology quality reviewer. Review the following Turtle ontology fragment against these criteria:
+
+a) Coherence with the core ontology (no redefinition of concepts already defined).
+b) Schema alignment (all significant columns from the input table are reflected as properties).
+c) Syntactic validity (parses as valid Turtle; conforms to OWL 2 DL).
+d) Logical consistency (no contradictory axioms, no cycles in rdfs:subClassOf, exactly one domain and one range per property).
+e) Naming clarity (PascalCase classes, camelCase properties, meaningful domain-relevant terms, no generic stubs like "Entity1" or "propertyA").
+f) Provenance (prov:wasDerivedFrom on every term).
+g) Class completeness: every IRI used in rdfs:domain or rdfs:range must be declared as owl:Class (or be an xsd datatype) either in this fragment or in the core ontology. If a referenced class is missing its declaration, add it.
+h) Datatype validity: xsd:date must NOT appear — replace with xsd:dateTime.
+
+If issues are found, output a CORRECTED Turtle fragment that addresses them. If acceptable, output the input fragment unchanged.
+
+Output ONLY Turtle (no markdown fences, no commentary).
+
+[CORE ONTOLOGY SO FAR]
+{core_ontology}
+
+[TABLE SCHEMA]
+{schema_context}
+
+[DELTA FRAGMENT TO REVIEW]
+{delta_ontology}

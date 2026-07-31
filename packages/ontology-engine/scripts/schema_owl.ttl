@@ -1,0 +1,465 @@
+@prefix bibo: <http://purl.org/ontology/bibo/> .
+@prefix cmns-cls: <https://www.omg.org/spec/Commons/Classifiers/> .
+@prefix cmns-col: <https://www.omg.org/spec/Commons/Collections/> .
+@prefix cmns-dt: <https://www.omg.org/spec/Commons/DatesAndTimes/> .
+@prefix cmns-ge: <https://www.omg.org/spec/Commons/GeopoliticalEntities/> .
+@prefix cmns-id: <https://www.omg.org/spec/Commons/Identifiers/> .
+@prefix cmns-loc: <https://www.omg.org/spec/Commons/Locations/> .
+@prefix cmns-q: <https://www.omg.org/spec/Commons/Quantities/> .
+@prefix cmns-txt: <https://www.omg.org/spec/Commons/Text/> .
+@prefix dcat: <http://www.w3.org/ns/dcat#> .
+@prefix dct: <http://purl.org/dc/terms/> .
+@prefix dctype: <http://purl.org/dc/dcmitype/> .
+@prefix eli: <http://data.europa.eu/eli/ontology#> .
+@prefix fibo-be-corp-corp: <https://spec.edmcouncil.org/fibo/ontology/BE/Corporations/Corporations/> .
+@prefix fibo-be-le-cb: <https://spec.edmcouncil.org/fibo/ontology/BE/LegalEntities/CorporateBodies/> .
+@prefix fibo-be-le-lp: <https://spec.edmcouncil.org/fibo/ontology/BE/LegalEntities/LegalPersons/> .
+@prefix fibo-be-nfp-nfp: <https://spec.edmcouncil.org/fibo/ontology/BE/NotForProfitOrganizations/NotForProfitOrganizations/> .
+@prefix fibo-be-oac-cctl: <https://spec.edmcouncil.org/fibo/ontology/BE/OwnershipAndControl/CorporateControl/> .
+@prefix fibo-fbc-dae-dbt: <https://spec.edmcouncil.org/fibo/ontology/FBC/DebtAndEquities/Debt/> .
+@prefix fibo-fbc-pas-fpas: <https://spec.edmcouncil.org/fibo/ontology/FBC/ProductsAndServices/FinancialProductsAndServices/> .
+@prefix fibo-fnd-acc-cur: <https://spec.edmcouncil.org/fibo/ontology/FND/Accounting/CurrencyAmount/> .
+@prefix fibo-fnd-agr-ctr: <https://spec.edmcouncil.org/fibo/ontology/FND/Agreements/Contracts/> .
+@prefix fibo-fnd-arr-doc: <https://spec.edmcouncil.org/fibo/ontology/FND/Arrangements/Documents/> .
+@prefix fibo-fnd-dt-oc: <https://spec.edmcouncil.org/fibo/ontology/FND/DatesAndTimes/Occurrences/> .
+@prefix fibo-fnd-org-org: <https://spec.edmcouncil.org/fibo/ontology/FND/Organizations/Organizations/> .
+@prefix fibo-fnd-pas-pas: <https://spec.edmcouncil.org/fibo/ontology/FND/ProductsAndServices/ProductsAndServices/> .
+@prefix fibo-fnd-plc-adr: <https://spec.edmcouncil.org/fibo/ontology/FND/Places/Addresses/> .
+@prefix fibo-fnd-plc-loc: <https://spec.edmcouncil.org/fibo/ontology/FND/Places/Locations/> .
+@prefix fibo-fnd-pty-pty: <https://spec.edmcouncil.org/fibo/ontology/FND/Parties/Parties/> .
+@prefix fibo-fnd-rel-rel: <https://spec.edmcouncil.org/fibo/ontology/FND/Relations/Relations/> .
+@prefix fibo-pay-ps-ps: <https://spec.edmcouncil.org/fibo/ontology/PAY/PaymentServices/PaymentServices/> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+@prefix gleif-L1: <https://www.gleif.org/ontology/L1/> .
+@prefix gs1: <https://ref.gs1.org/voc/> .
+@prefix hydra: <http://www.w3.org/ns/hydra/core#> .
+@prefix lcc-cr: <https://www.omg.org/spec/LCC/Countries/CountryRepresentation/> .
+@prefix lrmoo: <http://iflastandards.info/ns/lrm/lrmoo/> .
+@prefix mo: <http://purl.org/ontology/mo/> .
+@prefix og: <http://ogp.me/ns#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix prov: <http://www.w3.org/ns/prov#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix sarif: <http://sarif.info/> .
+@prefix schema: <https://schema.org/> .
+@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+@prefix snomed: <http://purl.bioontology.org/ontology/SNOMEDCT/> .
+@prefix unece: <http://unece.org/vocab#> .
+@prefix vcard: <http://www.w3.org/2006/vcard/ns#> .
+@prefix void: <http://rdfs.org/ns/void#> .
+
+lrmoo:F31_Performance a rdfs:Class .
+
+snomed:105590001 a rdfs:Class .
+
+snomed:116154003 a rdfs:Class .
+
+snomed:277132007 a rdfs:Class .
+
+snomed:387713003 a rdfs:Class .
+
+snomed:410942007 a rdfs:Class .
+
+snomed:50731006 a rdfs:Class .
+
+snomed:51114001 a rdfs:Class .
+
+snomed:63653004 a rdfs:Class .
+
+dctype:Dataset a rdfs:Class .
+
+dctype:Event a rdfs:Class .
+
+dctype:Image a rdfs:Class .
+
+dctype:Text a rdfs:Class .
+
+bibo:Issue a rdfs:Class .
+
+bibo:Periodical a rdfs:Class .
+
+void:Dataset a rdfs:Class .
+
+sarif:Result a rdfs:Class .
+
+unece:AmountType a rdfs:Class .
+
+unece:BrandName a rdfs:Class .
+
+unece:Country a rdfs:Class .
+
+unece:ElectronicDocument a rdfs:Class .
+
+unece:FinancialCard a rdfs:Class .
+
+unece:GeographicalCoordinate a rdfs:Class .
+
+unece:Invoice a rdfs:Class .
+
+unece:LineTradeAgreement a rdfs:Class .
+
+unece:Offer a rdfs:Class .
+
+unece:Order a rdfs:Class .
+
+unece:PaymentMeans a rdfs:Class .
+
+unece:RequestForQuotation a rdfs:Class .
+
+unece:SpecifiedCertificate a rdfs:Class .
+
+unece:SpecifiedTradeProduct a rdfs:Class .
+
+unece:TradeAddress a rdfs:Class .
+
+unece:TradeProduct a rdfs:Class .
+
+unece:TransportMethod a rdfs:Class .
+
+vcard:VCard a rdfs:Class .
+
+dcat:Catalog a rdfs:Class .
+
+dcat:Dataset a rdfs:Class .
+
+dcat:Distribution a rdfs:Class .
+
+hydra:Error a rdfs:Class .
+
+prov:InstantaneousEvent a rdfs:Class .
+
+prov:atTime a rdfs:Class .
+
+foaf:Person a rdfs:Class .
+
+gs1:CertificationDetails a rdfs:Class .
+
+gs1:ContactPoint a rdfs:Class .
+
+gs1:Country a rdfs:Class .
+
+gs1:Organization a rdfs:Class .
+
+gs1:PostalAddress a rdfs:Class .
+
+schema:3DModel a rdfs:Class ;
+    rdfs:label "3DModel" ;
+    rdfs:comment """A 3D model represents some kind of 3D content, which may have [[encoding]]s in one or more [[MediaObject]]s. Many 3D formats are available (e.g. see [Wikipedia](https://en.wikipedia.org/wiki/Category:3D_graphics_file_formats)); specific encoding formats can be represented using the [[encodingFormat]] property applied to the relevant [[MediaObject]]. For the
+case of a single file published after Zip compression, the convention of appending '+zip' to the [[encodingFormat]] can be used. Geospatial, AR/VR, artistic/animation, gaming, engineering and scientific content can all be represented using [[3DModel]].""" ;
+    rdfs:subClassOf schema:MediaObject ;
+    schema:isPartOf <https://pending.schema.org> ;
+    schema:source <https://github.com/schemaorg/schemaorg/issues/2140> .
+
+schema:AMRadioChannel a rdfs:Class ;
+    rdfs:label "AMRadioChannel" ;
+    rdfs:comment "A radio channel that uses AM." ;
+    rdfs:subClassOf schema:RadioChannel ;
+    schema:source <https://github.com/schemaorg/schemaorg/issues/1004> .
+
+schema:APIReference a rdfs:Class ;
+    rdfs:label "APIReference" ;
+    rdfs:comment "Reference documentation for application programming interfaces (APIs)." ;
+    rdfs:subClassOf schema:TechArticle .
+
+schema:AboutPage a rdfs:Class ;
+    rdfs:label "AboutPage" ;
+    rdfs:comment "Web page type: About page." ;
+    rdfs:subClassOf schema:WebPage .
+
+schema:AcceptAction a rdfs:Class ;
+    rdfs:label "AcceptAction" ;
+    rdfs:comment "The act of committing to/adopting an object.\\n\\nRelated actions:\\n\\n* [[RejectAction]]: The antonym of AcceptAction." ;
+    rdfs:subClassOf schema:AllocateAction .
+
+schema:Accommodation a rdfs:Class ;
+    rdfs:label "Accommodation" ;
+    rdfs:comment """An accommodation is a place that can accommodate human beings, e.g. a hotel room, a camping pitch, or a meeting room. Many accommodations are for overnight stays, but this is not a mandatory requirement.
+For more specific types of accommodations not defined in schema.org, one can use [[additionalType]] with external vocabularies.
+<br /><br />
+See also the <a href="/docs/hotels.html">dedicated document on the use of schema.org for marking up hotels and other forms of accommodations</a>.
+""" ;
+    rdfs:subClassOf schema:Place ;
+    schema:contributor <https://schema.org/docs/collab/STI_Accommodation_Ontology> .
+
+schema:AccountingService a rdfs:Class ;
+    rdfs:label "AccountingService" ;
+    rdfs:comment """Accountancy business.\\n\\nAs a [[LocalBusiness]] it can be described as a [[provider]] of one or more [[Service]]\\(s).
+      """ ;
+    rdfs:subClassOf schema:FinancialService .
+
+schema:AchieveAction a rdfs:Class ;
+    rdfs:label "AchieveAction" ;
+    rdfs:comment "The act of accomplishing something via previous efforts. It is an instantaneous action rather than an ongoing process." ;
+    rdfs:subClassOf schema:Action .
+
+schema:Action a rdfs:Class ;
+    rdfs:label "Action" ;
+    rdfs:comment "An action performed by a direct agent and indirect participants upon a direct object. Optionally happens at a location with the help of an inanimate instrument. The execution of the action may produce a result. Specific action sub-type documentation specifies the exact expectation of each argument/role.\\n\\nSee also [blog post](https://blog.schema.org/2014/04/16/announcing-schema-org-actions/) and [Actions overview document](https://schema.org/docs/actions.html)." ;
+    rdfs:subClassOf schema:Thing ;
+    schema:contributor <https://schema.org/docs/collab/ActionCollabClass> .
+
+schema:ActionAccessSpecification a rdfs:Class ;
+    rdfs:label "ActionAccessSpecification" ;
+    rdfs:comment "A set of requirements that must be fulfilled in order to perform an Action." ;
+    rdfs:subClassOf schema:Intangible ;
+    schema:source <https://github.com/schemaorg/schemaorg/issues/1741> .
+
+schema:ActionStatusType a rdfs:Class ;
+    rdfs:label "ActionStatusType" ;
+    rdfs:comment "The status of an Action." ;
+    rdfs:subClassOf schema:StatusEnumeration .
+
+schema:ActivateAction a rdfs:Class ;
+    rdfs:label "ActivateAction" ;
+    rdfs:comment "The act of starting or activating a device or application (e.g. starting a timer or turning on a flashlight)." ;
+    rdfs:subClassOf schema:ControlAction .
+
+schema:AddAction a rdfs:Class ;
+    rdfs:label "AddAction" ;
+    rdfs:comment "The act of editing by adding an object to a collection." ;
+    rdfs:subClassOf schema:UpdateAction .
+
+schema:AdministrativeArea a rdfs:Class ;
+    rdfs:label "AdministrativeArea" ;
+    rdfs:comment "A geographical region, typically under the jurisdiction of a particular government." ;
+    rdfs:subClassOf schema:Place ;
+    owl:equivalentClass cmns-ge:Subdivision .
+
+schema:AdultEntertainment a rdfs:Class ;
+    rdfs:label "AdultEntertainment" ;
+    rdfs:comment "An adult entertainment establishment." ;
+    rdfs:subClassOf schema:EntertainmentBusiness .
+
+schema:AdultOrientedEnumeration a rdfs:Class ;
+    rdfs:label "AdultOrientedEnumeration" ;
+    rdfs:comment "Enumeration of considerations that make a product relevant or potentially restricted for adults only." ;
+    rdfs:subClassOf schema:Enumeration ;
+    schema:isPartOf <https://pending.schema.org> ;
+    schema:source <https://github.com/schemaorg/schemaorg/issues/2989> .
+
+schema:AdvertiserContentArticle a rdfs:Class ;
+    rdfs:label "AdvertiserContentArticle" ;
+    rdfs:comment "An [[Article]] that an external entity has paid to place or to produce to its specifications. Includes [advertorials](https://en.wikipedia.org/wiki/Advertorial), sponsored content, native advertising and other paid content." ;
+    rdfs:subClassOf schema:Article ;
+    schema:contributor <https://schema.org/docs/collab/TP> ;
+    schema:isPartOf <https://pending.schema.org> ;
+    schema:source <https://github.com/schemaorg/schemaorg/issues/1525> .
+
+schema:AggregateOffer a rdfs:Class ;
+    rdfs:label "AggregateOffer" ;
+    rdfs:comment "When a single product is associated with multiple offers (for example, the same pair of shoes is offered by different merchants), then AggregateOffer can be used.\\n\\nNote: AggregateOffers are normally expected to associate multiple offers that all share the same defined [[businessFunction]] value, or default to http://purl.org/goodrelations/v1#Sell if businessFunction is not explicitly defined." ;
+    rdfs:subClassOf schema:Offer .
+
+schema:AggregateRating a rdfs:Class ;
+    rdfs:label "AggregateRating" ;
+    rdfs:comment "The average rating based on multiple ratings or reviews." ;
+    rdfs:subClassOf schema:Rating .
+
+schema:AgreeAction a rdfs:Class ;
+    rdfs:label "AgreeAction" ;
+    rdfs:comment "The act of expressing a consistency of opinion with the object. An agent agrees to/about an object (a proposition, topic or theme) with participants." ;
+    rdfs:subClassOf schema:ReactAction .
+
+schema:Airline a rdfs:Class ;
+    rdfs:label "Airline" ;
+    rdfs:comment "An organization that provides flights for passengers." ;
+    rdfs:subClassOf schema:Organization .
+
+schema:Airport a rdfs:Class ;
+    rdfs:label "Airport" ;
+    rdfs:comment "An airport." ;
+    rdfs:subClassOf schema:CivicStructure .
+
+schema:AlignmentObject a rdfs:Class ;
+    rdfs:label "AlignmentObject" ;
+    rdfs:comment """An intangible item that describes an alignment between a learning resource and a node in an educational framework.
+Should not be used where the nature of the alignment can be described using a simple property, for example to express that a resource [[teaches]] or [[assesses]] a competency.""" ;
+    rdfs:subClassOf schema:Intangible ;
+    schema:contributor <https://schema.org/docs/collab/LRMIClass> .
+
+schema:AllocateAction a rdfs:Class ;
+    rdfs:label "AllocateAction" ;
+    rdfs:comment "The act of organizing tasks/objects/events by associating resources to it." ;
+    rdfs:subClassOf schema:OrganizeAction .
+
+schema:AmpStory a rdfs:Class ;
+    rdfs:label "AmpStory" ;
+    rdfs:comment "A creative work with a visual storytelling format intended to be viewed online, particularly on mobile devices." ;
+    rdfs:subClassOf schema:CreativeWork,
+        schema:MediaObject ;
+    schema:isPartOf <https://pending.schema.org> ;
+    schema:source <https://github.com/schemaorg/schemaorg/issues/2646> .
+
+schema:AmusementPark a rdfs:Class ;
+    rdfs:label "AmusementPark" ;
+    rdfs:comment "An amusement park." ;
+    rdfs:subClassOf schema:EntertainmentBusiness .
+
+schema:AnalysisNewsArticle a rdfs:Class ;
+    rdfs:label "AnalysisNewsArticle" ;
+    rdfs:comment "An AnalysisNewsArticle is a [[NewsArticle]] that, while based on factual reporting, incorporates the expertise of the author/producer, offering interpretations and conclusions." ;
+    rdfs:subClassOf schema:NewsArticle ;
+    schema:contributor <https://schema.org/docs/collab/TP> ;
+    schema:isPartOf <https://pending.schema.org> ;
+    schema:source <https://github.com/schemaorg/schemaorg/issues/1525> .
+
+schema:AnatomicalStructure a rdfs:Class ;
+    rdfs:label "AnatomicalStructure" ;
+    rdfs:comment "Any part of the human body, typically a component of an anatomical system. Organs, tissues, and cells are all anatomical structures." ;
+    rdfs:subClassOf schema:MedicalEntity ;
+    schema:isPartOf <https://health-lifesci.schema.org> .
+
+schema:AnatomicalSystem a rdfs:Class ;
+    rdfs:label "AnatomicalSystem" ;
+    rdfs:comment "An anatomical system is a group of anatomical structures that work together to perform a certain task. Anatomical systems, such as organ systems, are one organizing principle of anatomy, and can include circulatory, digestive, endocrine, integumentary, immune, lymphatic, muscular, nervous, reproductive, respiratory, skeletal, urinary, vestibular, and other systems." ;
+    rdfs:subClassOf schema:MedicalEntity ;
+    schema:isPartOf <https://health-lifesci.schema.org> .
+
+schema:AnimalShelter a rdfs:Class ;
+    rdfs:label "AnimalShelter" ;
+    rdfs:comment "Animal shelter." ;
+    rdfs:subClassOf schema:LocalBusiness .
+
+schema:Answer a rdfs:Class ;
+    rdfs:label "Answer" ;
+    rdfs:comment "An answer offered to a question; perhaps correct, perhaps opinionated or wrong." ;
+    rdfs:subClassOf schema:Comment ;
+    schema:contributor <https://schema.org/docs/collab/QAStackExchange> .
+
+schema:Apartment a rdfs:Class ;
+    rdfs:label "Apartment" ;
+    rdfs:comment "An apartment (in American English) or flat (in British English) is a self-contained housing unit (a type of residential real estate) that occupies only part of a building (source: Wikipedia, the free encyclopedia, see <a href=\"http://en.wikipedia.org/wiki/Apartment\">http://en.wikipedia.org/wiki/Apartment</a>)." ;
+    rdfs:subClassOf schema:Accommodation ;
+    schema:contributor <https://schema.org/docs/collab/STI_Accommodation_Ontology> .
+
+schema:ApartmentComplex a rdfs:Class ;
+    rdfs:label "ApartmentComplex" ;
+    rdfs:comment "Residence type: Apartment complex." ;
+    rdfs:subClassOf schema:Residence .
+
+schema:AppendAction a rdfs:Class ;
+    rdfs:label "AppendAction" ;
+    rdfs:comment "The act of inserting at the end if an ordered collection." ;
+    rdfs:subClassOf schema:InsertAction .
+
+schema:ApplyAction a rdfs:Class ;
+    rdfs:label "ApplyAction" ;
+    rdfs:comment "The act of registering to an organization/service without the guarantee to receive it.\\n\\nRelated actions:\\n\\n* [[RegisterAction]]: Unlike RegisterAction, ApplyAction has no guarantees that the application will be accepted." ;
+    rdfs:subClassOf schema:OrganizeAction .
+
+schema:ApprovedIndication a rdfs:Class ;
+    rdfs:label "ApprovedIndication" ;
+    rdfs:comment "An indication for a medical therapy that has been formally specified or approved by a regulatory body that regulates use of the therapy; for example, the US FDA approves indications for most drugs in the US." ;
+    rdfs:subClassOf schema:MedicalIndication ;
+    schema:isPartOf <https://health-lifesci.schema.org> .
+
+schema:Aquarium a rdfs:Class ;
+    rdfs:label "Aquarium" ;
+    rdfs:comment "Aquarium." ;
+    rdfs:subClassOf schema:CivicStructure .
+
+schema:ArchiveComponent a rdfs:Class ;
+    rdfs:label "ArchiveComponent"@en ;
+    rdfs:comment "An intangible type to be applied to any archive content, carrying with it a set of properties required to describe archival items and collections."@en ;
+    rdfs:subClassOf schema:CreativeWork ;
+    schema:isPartOf <https://pending.schema.org> ;
+    schema:source <https://github.com/schemaorg/schemaorg/issues/1758> .
+
+schema:ArchiveOrganization a rdfs:Class ;
+    rdfs:label "ArchiveOrganization"@en ;
+    rdfs:comment "An organization with archival holdings. An organization which keeps and preserves archival material and typically makes it accessible to the public."@en ;
+    rdfs:subClassOf schema:LocalBusiness ;
+    schema:isPartOf <https://pending.schema.org> ;
+    schema:source <https://github.com/schemaorg/schemaorg/issues/1758> .
+
+schema:ArriveAction a rdfs:Class ;
+    rdfs:label "ArriveAction" ;
+    rdfs:comment "The act of arriving at a place. An agent arrives at a destination from a fromLocation, optionally with participants." ;
+    rdfs:subClassOf schema:MoveAction .
+
+schema:ArtGallery a rdfs:Class ;
+    rdfs:label "ArtGallery" ;
+    rdfs:comment "An art gallery." ;
+    rdfs:subClassOf schema:EntertainmentBusiness .
+
+schema:Artery a rdfs:Class ;
+    rdfs:label "Artery" ;
+    rdfs:comment "A type of blood vessel that specifically carries blood away from the heart." ;
+    rdfs:subClassOf schema:Vessel ;
+    owl:equivalentClass snomed:51114001 ;
+    schema:isPartOf <https://health-lifesci.schema.org> .
+
+schema:Article a rdfs:Class ;
+    rdfs:label "Article" ;
+    rdfs:comment "An article, such as a news article or piece of investigative report. Newspapers and magazines have articles of many different types and this is intended to cover them all.\\n\\nSee also [blog post](https://blog.schema.org/2014/09/02/schema-org-support-for-bibliographic-relationships-and-periodicals/)." ;
+    rdfs:subClassOf schema:CreativeWork ;
+    schema:contributor <https://schema.org/docs/collab/rNews> .
+
+schema:AskAction a rdfs:Class ;
+    rdfs:label "AskAction" ;
+    rdfs:comment "The act of posing a question / favor to someone.\\n\\nRelated actions:\\n\\n* [[ReplyAction]]: Appears generally as a response to AskAction." ;
+    rdfs:subClassOf schema:CommunicateAction .
+
+schema:AskPublicNewsArticle a rdfs:Class ;
+    rdfs:label "AskPublicNewsArticle" ;
+    rdfs:comment "A [[NewsArticle]] expressing an open call by a [[NewsMediaOrganization]] asking the public for input, insights, clarifications, anecdotes, documentation, etc., on an issue, for reporting purposes." ;
+    rdfs:subClassOf schema:NewsArticle ;
+    schema:contributor <https://schema.org/docs/collab/TP> ;
+    schema:isPartOf <https://pending.schema.org> ;
+    schema:source <https://github.com/schemaorg/schemaorg/issues/1525> .
+
+schema:AssessAction a rdfs:Class ;
+    rdfs:label "AssessAction" ;
+    rdfs:comment "The act of forming one's opinion, reaction or sentiment." ;
+    rdfs:subClassOf schema:Action .
+
+schema:AssignAction a rdfs:Class ;
+    rdfs:label "AssignAction" ;
+    rdfs:comment "The act of allocating an action/event/task to some destination (someone or something)." ;
+    rdfs:subClassOf schema:AllocateAction .
+
+schema:Atlas a rdfs:Class ;
+    rdfs:label "Atlas" ;
+    rdfs:comment "A collection or bound volume of maps, charts, plates or tables, physical or in media form illustrating any subject." ;
+    rdfs:subClassOf schema:CreativeWork ;
+    schema:isPartOf <https://bib.schema.org> ;
+    schema:source <http://www.productontology.org/id/Atlas> .
+
+schema:Attorney a rdfs:Class ;
+    rdfs:label "Attorney" ;
+    rdfs:comment "Professional service: Attorney. \\n\\nThis type is deprecated - [[LegalService]] is more inclusive and less ambiguous." ;
+    rdfs:subClassOf schema:LegalService .
+
+schema:Audience a rdfs:Class ;
+    rdfs:label "Audience" ;
+    rdfs:comment "Intended audience for an item, i.e. the group for whom the item was created." ;
+    rdfs:subClassOf schema:Intangible .
+
+schema:AudioObject a rdfs:Class ;
+    rdfs:label "AudioObject" ;
+    rdfs:comment "An audio file." ;
+    rdfs:subClassOf schema:MediaObject ;
+    schema:contributor <https://schema.org/docs/collab/rNews> .
+
+schema:AudioObjectSnapshot a rdfs:Class ;
+    rdfs:label "AudioObjectSnapshot" ;
+    rdfs:comment "A specific and exact (byte-for-byte) version of an [[AudioObject]]. Two byte-for-byte identical files, for the purposes of this type, considered identical. If they have different embedded metadata the files will differ. Different external facts about the files, e.g. creator or dateCreated that aren't represented in their actual content, do not affect this notion of identity." ;
+    rdfs:subClassOf schema:AudioObject ;
+    schema:isPartOf <https://pending.schema.org> ;
+    schema:source <https://github.com/schemaorg/schemaorg/issues/2450> .
+
+schema:Audiobook a rdfs:Class ;
+    rdfs:label "Audiobook" ;
+    rdfs:comment "An audiobook." ;
+    rdfs:subClassOf schema:AudioObject,
+        schema:Book ;
+    schema:isPartOf <https://bib.schema.org> .
+
+schema:AuthenticateAction a rdfs:Class ;
+    rdfs:label "AuthenticateAction" ;
+    rdfs:comment "The action of authenticating into a device or application." ;
+    rdfs:subClassOf schema:ControlAction ;
+    schema:isPartOf <https://pending.schema.org> ;
+    schema:source <https://github.com/schemaorg/schemaorg/issues/4507> .
+

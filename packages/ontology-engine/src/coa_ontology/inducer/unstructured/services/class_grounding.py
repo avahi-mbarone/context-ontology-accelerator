@@ -1,0 +1,418 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Foundational grounding for unstructured-induced classes.
+
+The unstructured (lexical-graph) induction pipeline mints one ``owl:Class``
+per distinct source classification and, in Stage 4, dedupes those classes
+against each OTHER within the run (``class_normalizer``). It does NOT, on its
+own, align them to the namespace's loaded foundational ontologies (FIBO,
+Schema.org, uploaded ontologies, …).
+
+This module adds that alignment by reusing the shared, strategy-agnostic
+:class:`~coa_ontology.inducer.services.grounding.GroundingService`
+— the exact same recall → exact-name → LLM-rerank pipeline the structured
+``table_to_ontology`` strategy uses — via its :meth:`ground_class` entry point.
+
+Given the per-class ``(label, description, embedding vector)`` the pipeline
+already computes, :func:`ground_classes` produces a graph of grounding axioms
+that MERGE into the induced graph, mirroring the structured emission:
+
+- ``<class> rdfs:subClassOf <foundational>``       (grounded: exact/high-conf)
+- ``<class> skos:exactMatch  <foundational>``      (match_type == "exact")
+- ``<class> skos:closeMatch  <foundational>``      (match_type == "high_confidence")
+- ``<class> skos:relatedMatch <foundational>``     (match_type == "ambiguous")
+- ``<class> <ns>matchConfidence "<score>"^^xsd:float``  (annotation)
+
+Design notes:
+
+- **Additive only.** This emits a SEPARATE graph that the pipeline unions
+  into the main graph. The within-run ``skos:closeMatch`` links emitted by
+  Rule 1 (``induce_classes``) are untouched — those are class↔class dedupe
+  links; these are class↔foundational grounding links.
+- **Fail-open.** Any per-class grounding error is caught and logged; that
+  class is simply left un-grounded (novel), never failing the whole run —
+  matching the structured path's fail-loud-log / all-novel fallback.
+- **No-op when disabled.** Empty/None ``ontology_ids`` or a ``None`` service
+  → returns an empty graph and the pipeline behaves exactly as pre-grounding.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+from dataclasses import dataclass
+
+from rdflib import OWL, RDF, RDFS, XSD, Graph, Literal, Namespace, URIRef
+from rdflib.namespace import SKOS
+
+from coa_ontology.inducer.schemas import ConceptMatch
+from coa_ontology.inducer.services.grounding import GroundingService
+
+log = logging.getLogger(__name__)
+
+
+def _normalize_name_key(name: str) -> str:
+    """Build a canonical key for name matching by stripping non-alphanumerics and lowercasing.
+
+    Mirrors the web-app's ``grounding.ts::normalizeNameKey`` so the SPACED grounding
+    label ("Financial Instrument") and the Turtle's CamelCase ``rdfs:label``
+    ("FinancialInstrument") both collapse to ``financialinstrument`` and join.
+    """
+    return re.sub(r"[^a-zA-Z0-9]", "", name).lower()
+
+
+def _local_name(uri: str) -> str:
+    """Local name of an IRI — the segment after the last ``#`` or ``/``."""
+    return uri.split("#")[-1].split("/")[-1] or uri
+
+
+@dataclass
+class ClassGroundingInput:
+    """One induced class to ground against loaded ontologies.
+
+    Attributes:
+        class_iri: The minted ``owl:Class`` IRI (from the normalizer).
+        label: The class's human label (CamelCase or spaced form). Used as
+            the ``class_label`` the reranker/exact-matcher compares.
+        description: The generated ``rdfs:comment`` description, or ``""``.
+        vector: The class embedding (reused from Stage 4 so grounding does
+            not re-embed). May be empty — grounding is skipped for the class
+            when there is no usable vector.
+    """
+
+    class_iri: str
+    label: str
+    description: str
+    vector: list[float]
+
+
+def ground_classes(
+    inputs: list[ClassGroundingInput],
+    *,
+    grounding_service: GroundingService | None,
+    ontology_ids: list[str] | None,
+    model_id: str,
+    grounding_mode: str = "ENHANCED",
+    confidence_threshold: float = 0.80,
+    uri_prefix: str = "",
+) -> tuple[Graph, int, list[ConceptMatch]]:
+    """Ground each induced class against the loaded foundational ontologies.
+
+    Args:
+        inputs: The induced classes (IRI + label + description + vector).
+        grounding_service: The shared :class:`GroundingService`. ``None``
+            disables grounding entirely (returns an empty graph).
+        ontology_ids: Loaded foundational ontology IDs to ground against.
+            Empty / ``None`` disables grounding (returns an empty graph).
+        model_id: The embedding model id the class vectors were produced
+            with — passed through to ``ground_class`` for recall scoring.
+        grounding_mode: ``ENHANCED`` (embedding recall + LLM rerank) or
+            ``STANDARD`` (embedding-only). ``NONE`` also disables.
+        confidence_threshold: Passed through to the grounding service.
+        uri_prefix: The proposal namespace prefix, used to mint the
+            ``matchConfidence`` annotation-property IRI (mirrors the
+            structured builder). When empty, ``matchConfidence`` is omitted.
+
+    Returns:
+        A ``(graph, grounded_count, matches)`` tuple.
+
+        - ``graph`` holds only the grounding axioms (empty when disabled or
+          nothing matched).
+        - ``grounded_count`` is the number of classes that received an
+          exact/close/related match.
+        - ``matches`` is the per-class :class:`ConceptMatch` list — ONE entry
+          per class that produced recall candidates, whether or not the
+          reranker chose one. ``source_table`` is the class label (the review
+          UI resolves a class to its match by normalized-name key, and R2RML
+          is absent for unstructured). These are persisted as the proposal's
+          ``metadata.matches`` (→ ``matches.json``) so the review UI shows the
+          candidate count and powers the manual grounding-OVERRIDE editor —
+          exactly as for structured proposals. Empty when grounding is
+          disabled.
+    """
+    g = Graph()
+    matches: list[ConceptMatch] = []
+
+    if grounding_service is None or not ontology_ids or grounding_mode == "NONE":
+        log.info(
+            "class grounding skipped: service=%s ontology_ids=%s mode=%s",
+            "set" if grounding_service else None,
+            bool(ontology_ids),
+            grounding_mode,
+        )
+        return g, 0, matches
+
+    g.bind("owl", OWL)
+    g.bind("rdfs", RDFS)
+    g.bind("skos", SKOS)
+
+    # matchConfidence annotation property — mirrors the structured builder so
+    # the two strategies emit grounding provenance identically. Skipped when
+    # no uri_prefix is available (nothing to hang the property IRI on).
+    match_confidence: URIRef | None = None
+    if uri_prefix:
+        ns = Namespace(uri_prefix)
+        match_confidence = ns["matchConfidence"]
+        g.add((match_confidence, RDF.type, OWL.AnnotationProperty))
+
+    grounded = 0
+    for item in inputs:
+        if not item.class_iri or not item.vector:
+            continue
+        try:
+            result = grounding_service.ground_class(
+                class_label=item.label,
+                class_description=item.description,
+                concept_vector=item.vector,
+                model_id=model_id,
+                confidence_threshold=confidence_threshold,
+                grounding_mode=grounding_mode,
+                ontology_ids=ontology_ids,
+                # Don't let a class ground to ITSELF: incremental induction grounds
+                # against the namespace's own accepted ontologies, which can contain
+                # this very class (same IRI). Exclude it from recall.
+                exclude_entity_uri=item.class_iri,
+            )
+        except Exception:
+            # Fail-open: one class failing to ground must not abort the run.
+            log.exception("class grounding failed for %r — leaving novel", item.label)
+            continue
+
+        # Record a ConceptMatch for every class that had recall candidates,
+        # even when the reranker abstained (match_type=="novel"): the review
+        # UI's grounding-override editor lets a steward manually pick from
+        # these candidates, so they must be persisted regardless of the
+        # automatic decision. source_table = the class label so the UI's
+        # normalized-name resolver joins it to the induced class.
+        if result.candidates:
+            matches.append(grounding_service.to_concept_match(result))
+
+        chosen = result.chosen
+        if chosen is None or not chosen.entity_uri:
+            continue
+
+        added = _emit_grounding_axioms(
+            g,
+            class_uri=URIRef(item.class_iri),
+            match_type=result.match_type,
+            target=URIRef(chosen.entity_uri),
+            confidence=result.confidence,
+            match_confidence_prop=match_confidence,
+            relationship=result.relationship,
+        )
+        if added:
+            grounded += 1
+        # (novel with candidates: no link asserted, but the ConceptMatch was
+        # still recorded above for the override editor.)
+
+    log.info(
+        "class grounding complete: %d/%d classes grounded against %d ontology(ies); %d with candidates",
+        grounded,
+        len(inputs),
+        len(ontology_ids),
+        len(matches),
+    )
+    return g, grounded, matches
+
+
+# ── Grounding-axiom emission (shared by initial induction + override save) ──
+
+# The complete set of class→foundational grounding predicates this module
+# emits. Used both to WRITE axioms and to REMOVE the prior ones before a
+# steward's override re-writes them (so an override is a clean replace, never
+# an append that leaves a stale mapping behind).
+# Every class→foundational grounding predicate this module may emit. Used by
+# apply_overrides_to_turtle to strip prior grounding before re-emitting. MUST
+# include every SKOS relationship _emit_grounding_axioms can produce (incl.
+# broad/narrowMatch) or an override could leave a stale link behind.
+_GROUNDING_PREDICATES = (
+    RDFS.subClassOf,
+    SKOS.exactMatch,
+    SKOS.closeMatch,
+    SKOS.broadMatch,
+    SKOS.narrowMatch,
+    SKOS.relatedMatch,
+)
+
+# The SKOS predicate to emit for each reranker-chosen relationship, and whether
+# that relationship implies a forward rdfs:subClassOf (subsumption: the induced
+# class IS-A / is narrower-or-equal-to the foundational concept). narrowMatch
+# means the foundational concept is NARROWER than our class, so a forward
+# subClassOf would be BACKWARDS — we assert only the skos link. relatedMatch is
+# associative, not subsumption.
+_RELATIONSHIP_TO_SKOS: dict[str, URIRef] = {
+    "exactMatch": SKOS.exactMatch,
+    "closeMatch": SKOS.closeMatch,
+    "broadMatch": SKOS.broadMatch,
+    "narrowMatch": SKOS.narrowMatch,
+    "relatedMatch": SKOS.relatedMatch,
+}
+_SUBCLASSOF_RELATIONSHIPS = frozenset({"exactMatch", "closeMatch", "broadMatch"})
+
+
+def _is_foundational_target(target_uri: str, uri_prefix: str) -> bool:
+    """Return True when ``target_uri`` is a foundational grounding target, not an induced class.
+
+    Grounding always points at a foundational ontology IRI, which lives OUTSIDE
+    the induced namespace prefix; within-run dedupe links (skos:closeMatch to a
+    sibling induced class) and any induced↔induced subClassOf point INSIDE it.
+    When ``uri_prefix`` is empty we cannot distinguish, so treat every target as
+    foundational (preserving the pre-fix blanket-removal behavior).
+    """
+    if not uri_prefix:
+        return True
+    return not target_uri.startswith(uri_prefix)
+
+
+def _emit_grounding_axioms(
+    g: Graph,
+    *,
+    class_uri: URIRef,
+    match_type: str,
+    target: URIRef,
+    confidence: float | None,
+    match_confidence_prop: URIRef | None,
+    relationship: str | None = None,
+) -> bool:
+    """Emit the grounding axioms for one class→foundational match into ``g``.
+
+    ``match_type`` decides ACCEPTANCE (exact / high_confidence / ambiguous are
+    accepted; anything else is novel → nothing emitted). The reranker-chosen
+    ``relationship`` (exactMatch / closeMatch / broadMatch / narrowMatch /
+    relatedMatch) selects the SKOS predicate; a forward ``rdfs:subClassOf`` is
+    asserted only for subsumption-implying relationships
+    (:data:`_SUBCLASSOF_RELATIONSHIPS`) — never for narrowMatch (the foundational
+    concept is narrower than ours, so subClassOf would point the wrong way) or
+    relatedMatch (associative, not hierarchical).
+
+    When ``relationship`` is absent (e.g. STANDARD mode, older records), falls
+    back to the prior match_type→predicate mapping (exact→exactMatch,
+    high_confidence→closeMatch, ambiguous→relatedMatch) so behavior is unchanged.
+
+    Returns True when a grounding link was asserted (i.e. the class counts as
+    grounded), False for novel.
+    """
+    # #2 defensive guard: never ground a class to ITSELF, even if recall
+    # exclusion was bypassed (belt-and-suspenders to the exclude_entity_uri
+    # filter in GroundingService).
+    if str(class_uri).rstrip("/") == str(target).rstrip("/"):
+        return False
+
+    if match_type not in ("exact", "high_confidence", "ambiguous"):
+        return False
+
+    # Resolve the SKOS predicate from the reranker relationship, falling back to
+    # the legacy match_type mapping when no relationship is available.
+    skos_pred = _RELATIONSHIP_TO_SKOS.get(relationship or "")
+    if skos_pred is None:
+        if match_type == "exact":
+            relationship, skos_pred = "exactMatch", SKOS.exactMatch
+        elif match_type == "high_confidence":
+            relationship, skos_pred = "closeMatch", SKOS.closeMatch
+        else:  # ambiguous
+            relationship, skos_pred = "relatedMatch", SKOS.relatedMatch
+
+    g.add((class_uri, skos_pred, target))
+    if relationship in _SUBCLASSOF_RELATIONSHIPS:
+        g.add((class_uri, RDFS.subClassOf, target))
+    if match_confidence_prop is not None and confidence is not None:
+        g.add((class_uri, match_confidence_prop, Literal(confidence, datatype=XSD.float)))
+    return True
+
+
+def apply_overrides_to_turtle(
+    turtle: str,
+    matches: list[ConceptMatch],
+    *,
+    uri_prefix: str = "",
+) -> tuple[str, int]:
+    """Re-apply grounding decisions onto an ALREADY-INDUCED unstructured Turtle.
+
+    This is the unstructured analogue of the structured override rebuild
+    (``proposals._apply_grounding_overrides`` →
+    ``TableToOntologyStrategy._build_proposal_ontology``). The structured path
+    rebuilds the whole ontology from re-fetched DB catalog tables; unstructured
+    proposals have no tables, so instead we surgically rewrite ONLY the
+    class→foundational grounding axioms on the existing induced graph, leaving
+    every other triple (class declarations, properties, concepts, within-run
+    dedupe closeMatch links) untouched.
+
+    For each match, the target class is located by ``rdfs:label`` ==
+    ``match.source_table`` (the label carried in ``source_table``; see
+    ``ground_classes``). Its existing grounding predicates
+    (``_GROUNDING_PREDICATES`` + ``matchConfidence``) are removed and re-emitted
+    from the (already-patched) match — so an override is a clean replace and a
+    "mark novel" simply drops the link.
+
+    Args:
+        turtle: The stored induced-ontology Turtle.
+        matches: The patched ConceptMatch list (post-override), keyed by
+            ``source_table`` == class label.
+        uri_prefix: Proposal namespace prefix, for the ``matchConfidence``
+            annotation-property IRI. When empty, matchConfidence is omitted.
+
+    Returns:
+        ``(new_turtle, grounded_count)`` — the re-serialized Turtle and the
+        number of classes that carry a grounding link afterward.
+    """
+    g = Graph()
+    g.parse(data=turtle, format="turtle")
+
+    match_confidence_prop: URIRef | None = None
+    if uri_prefix:
+        match_confidence_prop = Namespace(uri_prefix)["matchConfidence"]
+        g.add((match_confidence_prop, RDF.type, OWL.AnnotationProperty))
+
+    # Map class → class IRI by NORMALIZED-NAME key (strip non-alphanumerics,
+    # lowercase — mirrors the web-app's grounding.ts::normalizeNameKey). The
+    # match's source_table is the SPACED label ("Financial Instrument") the
+    # grounding step used, while the Turtle's rdfs:label is the CamelCase form
+    # ("FinancialInstrument"); a raw string compare misses. Normalizing both
+    # sides makes them join (both → "financialinstrument"). The class IRI
+    # local-name is also indexed as a fallback for label-less classes.
+    key_to_iri: dict[str, URIRef] = {}
+    for cls in g.subjects(RDF.type, OWL.Class):
+        for lbl in g.objects(cls, RDFS.label):
+            key_to_iri.setdefault(_normalize_name_key(str(lbl)), cls)  # type: ignore[arg-type]
+        key_to_iri.setdefault(_normalize_name_key(_local_name(str(cls))), cls)  # type: ignore[arg-type]
+
+    grounded = 0
+    for m in matches:
+        if m.source_column:  # class-level matches only
+            continue
+        class_uri = key_to_iri.get(_normalize_name_key(m.source_table))
+        if class_uri is None:
+            log.warning("override: no class matching %r in Turtle; skipping", m.source_table)
+            continue
+
+        # Clean replace: drop the prior grounding axioms for this class first —
+        # but ONLY the edges pointing at a FOUNDATIONAL target (outside the
+        # induced namespace prefix). A blanket ``g.remove((class, pred, None))``
+        # would also delete WITHIN-namespace links to sibling induced classes —
+        # notably the Rule-1 within-run ``skos:closeMatch`` dedupe links (and any
+        # induced-to-induced ``rdfs:subClassOf``) — which are NOT grounding and
+        # must survive an override (the docstring promises exactly this).
+        for pred in _GROUNDING_PREDICATES:
+            for obj in list(g.objects(class_uri, pred)):
+                if _is_foundational_target(str(obj), uri_prefix):
+                    g.remove((class_uri, pred, obj))
+        if match_confidence_prop is not None:
+            g.remove((class_uri, match_confidence_prop, None))
+
+        if (
+            m.matched_class_uri
+            and m.match_type != "novel"
+            and _emit_grounding_axioms(
+                g,
+                class_uri=class_uri,
+                match_type=m.match_type,
+                target=URIRef(m.matched_class_uri),
+                confidence=m.similarity,
+                match_confidence_prop=match_confidence_prop,
+                relationship=getattr(m, "relationship", None),
+            )
+        ):
+            grounded += 1
+
+    return g.serialize(format="turtle"), grounded

@@ -1,0 +1,226 @@
+# AuthNZ Role Access Matrix
+
+## Role Hierarchy
+
+| Scope | Role | Description |
+|-------|------|-------------|
+| Global | `platform-admin` | Full access to all actions on all resources |
+| Global | `platform-viewer` | Read-only access across all namespaces |
+| Namespace | `namespace-owner` | Full access within their namespace |
+| Namespace | `namespace-maintainer` | Full access within their namespace (same as owner) |
+| Namespace | `data-steward` | Manage data assets + read/query within their namespace |
+| Namespace | `data-analyst` | Read/query only within their namespace |
+| — | (any authenticated user) | Can list namespaces |
+
+## API → Cedar Action Mapping
+
+This table reflects every operation registered on the **`ControlPlaneService`**
+Smithy service — the only API behind the Lambda authorizer
+(`packages/control-plane/.../authorization/handler.py`). `/health` is
+unauthenticated (`@optionalAuth`) and is not listed. Any route not listed here
+falls through to `denyAll` (fail-closed).
+
+### Namespace, roles & grants
+
+| API Endpoint | Method | Cedar Action | Resource Type |
+|---|---|---|---|
+| `/namespaces` | GET | `list` | Namespace |
+| `/namespaces` | POST | `manageNamespace` | Namespace |
+| `/namespaces/{namespaceId}` | GET | `viewNamespace` | Namespace |
+| `/namespaces/{namespaceId}` | PUT | `manageNamespace` | Namespace |
+| `/namespaces/{namespaceId}` | DELETE | `deleteNamespace` | Namespace |
+| `/namespaces/{namespaceId}/status` | PATCH | `setNamespaceStatus` | Namespace |
+| `/roles` | GET | `list` | Namespace |
+| `/namespaces/{namespaceId}/roles` | GET | `viewNamespace` | Namespace |
+| `/namespaces/{namespaceId}/roles/{roleId}` | GET | `viewNamespace` | Namespace |
+| `/namespaces/{namespaceId}/grants` | GET | `viewNamespace` | Namespace |
+| `/namespaces/{namespaceId}/grants` | POST | `grantPermissions` | Namespace |
+| `/namespaces/{namespaceId}/grants/{grantId}` | DELETE | `grantPermissions` | Namespace |
+| `/principals/{principalId}/grants` | GET | `list` | Namespace |
+| `/grants` | GET | `viewNamespace` | Namespace |
+| `/grants` | POST | `grantPermissions` | Namespace |
+| `/grants/{grantId}` | DELETE | `grantPermissions` | Namespace |
+
+### Unified sources (database + document)
+
+| API Endpoint | Method | Cedar Action | Resource Type |
+|---|---|---|---|
+| `/namespaces/{namespaceId}/sources` | GET | `viewNamespace` | Source |
+| `/namespaces/{namespaceId}/sources` | POST | `manageSource` | Source |
+| `/namespaces/{namespaceId}/sources/upload-urls` | POST | `manageSource` | Source |
+| `/namespaces/{namespaceId}/sources/{sourceId}` | GET | `viewNamespace` | Source |
+| `/namespaces/{namespaceId}/sources/{sourceId}` | DELETE | `manageSource` | Source |
+| `/namespaces/{namespaceId}/sources/{sourceId}/rescan` | POST | `manageSource` | Source |
+| `/namespaces/{namespaceId}/sources/{sourceId}/metadata` | PUT | `manageSource` | Source |
+| `/namespaces/{namespaceId}/sources/{sourceId}/tables` | GET | `viewNamespace` | Source |
+| `/namespaces/{namespaceId}/sources/{sourceId}/tables/{tableId}` | GET | `viewNamespace` | Source |
+| `/namespaces/{namespaceId}/sources/{sourceId}/scan/{jobId}` | GET | `viewNamespace` | Source |
+| `/namespaces/{namespaceId}/sources/{sourceId}/approve` | POST | `manageSource` | Source |
+| `/namespaces/{namespaceId}/sources/{sourceId}/reject` | POST | `manageSource` | Source |
+| `/namespaces/{namespaceId}/sources/{sourceId}/tables/{tableId}/review` | PUT | `manageSource` | Source |
+| `/namespaces/{namespaceId}/sources/{sourceId}/tables/{tableId}/metadata` | PATCH | `manageSource` | Source |
+| `…/tables/{tableId}/columns/{columnName}/review` | PUT | `manageSource` | Source |
+| `…/tables/{tableId}/columns/{columnName}/metadata` | PATCH | `manageSource` | Source |
+| `/namespaces/{namespaceId}/sources/{sourceId}/tables/{tableId}/keys` | PATCH | `manageSource` | Source |
+
+### Metric service
+
+| API Endpoint | Method | Cedar Action | Resource Type |
+|---|---|---|---|
+| `/namespaces/{namespaceId}/metrics` | GET | `readMetric` | Metric |
+| `/namespaces/{namespaceId}/metrics` | POST | `manageMetric` | Metric |
+| `/namespaces/{namespaceId}/metrics/{name}` | GET | `readMetric` | Metric |
+| `/namespaces/{namespaceId}/metrics/{name}` | PUT | `manageMetric` | Metric |
+| `/namespaces/{namespaceId}/metrics/{name}` | DELETE | `manageMetric` | Metric |
+| `/namespaces/{namespaceId}/metrics/validate` | POST | `manageMetric` | Metric |
+| `/namespaces/{namespaceId}/bulk-delete-metrics` | POST | `manageMetric` | Metric |
+| `/namespaces/{namespaceId}/import-osi` | POST | `manageMetric` | Metric |
+| `/namespaces/{namespaceId}/import-osi/upload-url` | POST | `manageMetric` | Metric |
+| `/namespaces/{namespaceId}/import-jobs/{jobId}` | GET | `readMetric` | Metric |
+| `/namespaces/{namespaceId}/export-osi` | GET | `readMetric` | Metric |
+
+### Ontology induction, graph & catalog
+
+| API Endpoint | Method | Cedar Action | Resource Type |
+|---|---|---|---|
+| `/namespaces/{namespaceId}/induce` | POST | `manageOntology` | Ontology |
+| `/namespaces/{namespaceId}/induce/jobs` | GET | `viewNamespace` | Ontology |
+| `/namespaces/{namespaceId}/induce/jobs/{jobId}` | GET | `viewNamespace` | Ontology |
+| `/namespaces/{namespaceId}/induce/datasources/induced` | GET | `viewNamespace` | Ontology |
+| `/namespaces/{namespaceId}/proposals` | GET | `viewNamespace` | OntologyProposal |
+| `/namespaces/{namespaceId}/proposals/{proposalId}` | GET | `viewNamespace` | OntologyProposal |
+| `/namespaces/{namespaceId}/proposals/{proposalId}/accept` | POST | `manageOntology` | OntologyProposal |
+| `/namespaces/{namespaceId}/proposals/{proposalId}/cancel` | POST | `manageOntology` | OntologyProposal |
+| `/namespaces/{namespaceId}/proposals/{proposalId}/validate` | POST | `manageOntology` | OntologyProposal |
+| `/namespaces/{namespaceId}/proposals/{proposalId}/validate/jobs/{jobId}` | GET | `viewNamespace` | OntologyProposal |
+| `/namespaces/{namespaceId}/proposals/update` | POST | `manageOntology` | OntologyProposal |
+| `/namespaces/{namespaceId}/proposals/reject` | POST | `manageOntology` | OntologyProposal |
+| `/namespaces/{namespaceId}/ontologies` | GET | `viewNamespace` | Ontology |
+| `/namespaces/{namespaceId}/graph/search` | GET | `viewNamespace` | Ontology |
+| `/namespaces/{namespaceId}/graph/class` | GET | `viewNamespace` | Ontology |
+| `/namespaces/{namespaceId}/graph/object-property` | GET | `viewNamespace` | Ontology |
+| `/namespaces/{namespaceId}/graph/datatype-property` | GET | `viewNamespace` | Ontology |
+
+!!! note "`query` and `searchDocuments`"
+    The `query` and `searchDocuments` Cedar actions are **not** invoked by the
+    control-plane API authorizer — no `ControlPlaneService` route maps to them.
+    They are evaluated on the serve / context-manager path (the Playground/agent
+    runtime), which uses its own JWT authorizer. They remain in the schema and
+    seed policies because that path shares the same role model.
+
+## Role × Action Access Matrix
+
+✅ = Allowed | ❌ = Denied
+
+| Cedar Action | platform-admin | platform-viewer | namespace-owner | namespace-maintainer | data-steward | data-analyst | (authenticated) |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| `list` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ (Namespace only) |
+| `viewNamespace` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
+| `query` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
+| `readMetric` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
+| `searchDocuments` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
+| `manageSource` | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ❌ |
+| `manageOntology` | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ❌ |
+| `manageMetric` | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ❌ |
+| `manageNamespace` | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| `setNamespaceStatus` | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| `deleteNamespace` | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| `grantPermissions` | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| `manageRoles` | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ |
+
+## Scope Notes
+
+- **Global roles** (`platform-admin`, `platform-viewer`) apply across all namespaces unconditionally.
+- **Namespace roles** are scoped via `resourceUID` — they only grant access when the resource's `id` or `namespace` attribute matches the namespace the role was granted on.
+- For every namespace-scoped route, the authorizer sets **both** the evaluated resource `id` **and** its `namespace` attribute to the `{namespaceId}` from the path. This lets owner/maintainer policies (which match on `resource.id`) and data-steward/data-analyst policies (which match on `resource.namespace`) resolve against the same namespace. Platform routes (`/grants`, `/roles`, `/principals/...`) use `"*"`, which no namespace-scoped role can satisfy — so only global roles apply there.
+- **Resource types are per-route.** Each route is evaluated against its proper Cedar entity type — `Source` (unified database/document sources), `Metric`, `Ontology`, `OntologyProposal`, or `Namespace` — rather than always `Namespace`. Authorization is still **namespace-scoped**: role grants target a namespace (`resourceUID = namespaceId`), and the evaluated `id`/`namespace` are the namespace id. The typed resources document intent and provide the foundation for future per-resource (resource-id-level) policies; no current policy keys on a sub-resource id.
+- The `default.cedar` policy grants `list` on `Namespace` resources to all authenticated users (allows listing namespaces; API-level filtering restricts what's returned).
+- `namespace-owner` and `namespace-maintainer` are functionally identical (both use `permit(principal, action, resource)` with a resource ID match).
+- **Platform grants** (`/grants`) manage `platform-admin`/`platform-viewer` bindings. The authorizer maps the write operations (`POST`, `DELETE`) to `grantPermissions` with `resource_id="*"`, so only `platform-admin` (whose `global_admin.cedar` policy permits all actions) is allowed — a `namespace-owner` is matched by a specific `resourceUID` and never satisfies `"*"`. The read operation (`GET`) maps to `viewNamespace`, so `platform-viewer` may also list platform grants.
+
+## Archived Namespace Mutation Guard
+
+A namespace in **`ARCHIVED`** status is frozen: its data is retained for audit,
+but no **mutating** action may be performed against it or its child resources.
+This is enforced by a Cedar `forbid` policy (`seed/archived_namespace_guard.cedar`)
+that **overrides every `permit`** — including `platform-admin` and
+`namespace-owner`. Archived-state immutability is a hard invariant, not a
+role-overridable default.
+
+**Blocked while `ARCHIVED`:** `manageSource`, `manageMetric`, `manageOntology`,
+`manageNamespace`, `grantPermissions`, `manageRoles`.
+
+**Still allowed while `ARCHIVED`:**
+
+- All reads — `viewNamespace`, `list`, `query`, `readMetric`, `searchDocuments`
+  (queries against archived namespaces are intentionally permitted).
+- `setNamespaceStatus` — so the namespace can be reactivated (`ARCHIVED → ACTIVE`).
+  This is why the status endpoint maps to its own action rather than
+  `manageNamespace`.
+- `deleteNamespace` — deletion is only legal from `ARCHIVED`.
+
+**How it works:** for a mutating route carrying a `{namespaceId}`, the authorizer
+reads the namespace's status from the Namespaces table and passes it to Cedar as
+`context.namespaceStatus`. The guard fires when that value is `"ARCHIVED"`. Reads
+and lifecycle actions skip the status fetch entirely, so they incur no extra
+latency and remain available. If the status lookup fails, the request is denied
+(fail-closed).
+
+> **Propagation:** the API Gateway authorizer result is cached per token for
+> `resultTtlInSeconds = 60`. As with role changes, archiving therefore takes
+> effect within ~60s for principals with a warm cached decision.
+
+
+
+## Data-Level Authorization (SQL Firewall)
+
+The matrix above describes **action-level** authorization — which Cedar actions a principal may invoke on which resources. The system also enforces a second, independent layer of **data-level** authorization at query execution time. Both layers run on every authenticated query.
+
+| Layer | Enforced where | What it controls | Mechanism |
+|---|---|---|---|
+| **Action-level (Cedar)** | API Gateway Lambda authorizer | Which API operations the principal may invoke on which namespace (e.g., "may alice run `query` against namespace `demo`?") | Cedar policies + RBAC (`ResourceRoleMappings`) |
+| **Data-level (SQL Firewall)** | `context-manager` at query execution (`tier2/sql_firewall.py`) | Which **tables** and **columns** the principal may read once a query has been authorized at the action level | `tableAllowlist`, `columnDenylist`, `allowedMetrics` carried on the principal's grant |
+
+The two layers compose: the request must be permitted at **both** layers to reach data.
+
+```
+client query
+   │
+   ▼
+API Gateway ──► Lambda Authorizer ──► Cedar policy evaluation
+   │                                    │
+   │                                    ├─ deny → 403 (action denied)
+   │                                    └─ allow ▼
+   │
+   ▼
+context-manager (Tier 1 / Tier 2 resolution)
+   │
+   ▼
+SQL Firewall ──► safety check (SELECT-only, dangerous funcs)
+   │
+   ├─ unsafe → UnsafeSQLError
+   │
+   └─ safe ──► table allowlist / column denylist (from grant)
+                │
+                ├─ deny → empty result + denial reason
+                └─ allow → execute query
+```
+
+### Examples
+
+| Scenario | Cedar (action) | SQL Firewall (data) | Outcome |
+|---|---|---|---|
+| `data-analyst` on `demo` runs `SELECT * FROM orders` | ✅ `query` allowed | ✅ no restrictions on grant | Query runs |
+| Same principal, grant has `tableAllowlist: ["customers"]` | ✅ `query` allowed | ❌ `orders` not in allowlist | Denied at firewall |
+| Same principal, grant has `columnDenylist: {"customers": ["ssn"]}`, query is `SELECT name FROM customers` | ✅ `query` allowed | ✅ `ssn` not referenced | Query runs |
+| Same principal, query is `SELECT * FROM customers` | ✅ `query` allowed | ❌ `SELECT *` may expose `ssn` | Denied at firewall |
+| `data-analyst` calls `manageSource` | ❌ action denied | (not reached) | 403 from authorizer |
+
+### Key properties
+
+- **Independent enforcement points.** The Cedar layer runs at the edge (authorizer Lambda); the data layer runs deep in the request flow inside `context-manager`. Bypassing one does not bypass the other.
+- **Sparse, opt-in.** Data-level restrictions are optional fields on a grant. When they are absent, only the Cedar layer applies — every query allowed at the action level is also allowed at the data layer.
+- **Case-insensitive comparisons.** SQL identifiers are case-insensitive for unquoted names; the firewall normalizes both query references and profile entries to lower-case so casing variations cannot bypass the rules.
+- **Fail-closed.** Parse failures, `SELECT *` over a restricted table, or malformed grant profiles all deny. See `packages/context-manager/src/coa_serve/tier2/sql_firewall.py`.
+
+For the field schema and DynamoDB persistence, see [Grants API — Data Access Restrictions](../README.md#grants-api--data-access-restrictions) and the `ResourceRoleMappings` table docs.

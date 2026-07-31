@@ -1,0 +1,172 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+import * as cdk from "aws-cdk-lib";
+import { Template, Match } from "aws-cdk-lib/assertions";
+import { WebStack } from "../../lib/stacks/foundation";
+import { DEFAULT_RESOURCE_PREFIX } from "../../lib/constants";
+
+const BASE_PROPS = {
+  authority: "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_test",
+  clientId: "test-client-id",
+  userPoolId: "us-east-1_test",
+};
+
+/**
+ * Regression coverage for the ExplicitAuthFlows drift bug: the
+ * UpdateCognitoCallbacks custom resource calls Cognito's updateUserPoolClient,
+ * which is a FULL REPLACEMENT of the client's auth flows. If this list doesn't
+ * mirror idp-authentication-stack.ts's addClient() config, a dev deploy of the
+ * web stack silently strips ALLOW_USER_PASSWORD_AUTH after the auth stack
+ * correctly enabled it — breaking integ-test/CLI Cognito sign-in with no
+ * CloudFormation error (the custom resource "succeeds").
+ */
+describe("WebStack (Cognito ExplicitAuthFlows parity)", () => {
+  /**
+   * The custom resource's `parameters` are serialized as either:
+   * - a plain JSON **string** — when `siteUrl` has no runtime token (e.g. a
+   *   static custom domain), CDK can fully resolve the value at synth time; or
+   * - an `Fn::Join` of string literals + intrinsics (e.g. `Fn::GetAtt` for the
+   *   generated CloudFront domain) — when `siteUrl` depends on a token only
+   *   known at deploy time.
+   * Neither is safe to `JSON.parse` unconditionally (the Fn::Join form isn't
+   * JSON), so normalize both into a searchable string: pass the plain string
+   * through as-is, or concatenate only the literal parts of an Fn::Join
+   * (skipping intrinsic objects like Fn::GetAtt).
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function joinedCallLiterals(customResource: any): string {
+    const call = (customResource.Properties.Update ??
+      customResource.Properties.Create) as
+      | string
+      | { "Fn::Join"?: [string, unknown[]] };
+    if (typeof call === "string") return call;
+    const parts = call["Fn::Join"]?.[1] ?? [];
+    return parts.filter((p): p is string => typeof p === "string").join("");
+  }
+
+  test("dev: UpdateCognitoCallbacks includes ALLOW_USER_PASSWORD_AUTH", () => {
+    const app = new cdk.App({
+      context: { resource_prefix: DEFAULT_RESOURCE_PREFIX, env: "dev" },
+    });
+    const template = Template.fromStack(
+      new WebStack(app, "TestWebDev", BASE_PROPS),
+    );
+
+    const customResource = Object.values(
+      template.findResources("Custom::AWS"),
+    )[0];
+    const literals = joinedCallLiterals(customResource);
+    expect(literals).toContain(
+      '"ExplicitAuthFlows":["ALLOW_USER_SRP_AUTH","ALLOW_REFRESH_TOKEN_AUTH","ALLOW_USER_PASSWORD_AUTH"]',
+    );
+  });
+
+  test("prod: UpdateCognitoCallbacks does NOT include ALLOW_USER_PASSWORD_AUTH", () => {
+    const app = new cdk.App({
+      context: { resource_prefix: DEFAULT_RESOURCE_PREFIX, env: "prod" },
+    });
+    const template = Template.fromStack(
+      new WebStack(app, "TestWebProd", BASE_PROPS),
+    );
+
+    const customResource = Object.values(
+      template.findResources("Custom::AWS"),
+    )[0];
+    const literals = joinedCallLiterals(customResource);
+    expect(literals).toContain(
+      '"ExplicitAuthFlows":["ALLOW_USER_SRP_AUTH","ALLOW_REFRESH_TOKEN_AUTH"]',
+    );
+    expect(literals).not.toContain("ALLOW_USER_PASSWORD_AUTH");
+  });
+
+  test("customDomain still patches Cognito callbacks with the custom UI domain (auth flows unaffected)", () => {
+    // NOTE: unlike the pre-customDomain-feature behavior (a bare string that
+    // short-circuited all patching), WebStack now always patches Cognito
+    // callbacks — customDomain only changes the *siteUrl* used in those
+    // callbacks (custom UI domain vs. generated CloudFront domain). This test
+    // guards that ExplicitAuthFlows parity (this suite's actual concern)
+    // still holds when a custom domain is configured, not just the default path.
+    const app = new cdk.App({
+      context: { resource_prefix: DEFAULT_RESOURCE_PREFIX, env: "dev" },
+    });
+    const template = Template.fromStack(
+      new WebStack(app, "TestWebCustomDomain", {
+        ...BASE_PROPS,
+        customDomain: {
+          uiDomainName: "app.example.com",
+          uiCertificateArn:
+            "arn:aws:acm:us-east-1:123456789012:certificate/ui-cert",
+          apiDomainName: "api.example.com",
+          apiCertificateArn:
+            "arn:aws:acm:us-east-1:123456789012:certificate/api-cert",
+          hostedZoneId: "Z123456ABCDEFG",
+        },
+      }),
+    );
+
+    const customResource = Object.values(
+      template.findResources("Custom::AWS"),
+    )[0];
+    const literals = joinedCallLiterals(customResource);
+    expect(literals).toContain("https://app.example.com/authenticate/");
+    expect(literals).toContain(
+      '"ExplicitAuthFlows":["ALLOW_USER_SRP_AUTH","ALLOW_REFRESH_TOKEN_AUTH","ALLOW_USER_PASSWORD_AUTH"]',
+    );
+  });
+});
+
+describe("WebStack CloudFront WAF WebACL", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function crCall(cr: any): string {
+    const call = cr.Properties.Update ?? cr.Properties.Create;
+    return typeof call === "string" ? call : "";
+  }
+
+  test("uses a provided CloudFront WebACL ARN directly (no SSM reader)", () => {
+    const app = new cdk.App({
+      context: { resource_prefix: DEFAULT_RESOURCE_PREFIX, env: "dev" },
+    });
+    const arn =
+      "arn:aws:wafv2:us-east-1:123456789012:global/webacl/byo-cf/def";
+    const template = Template.fromStack(
+      new WebStack(app, "TestWebByoWaf", { ...BASE_PROPS, webAclId: arn }),
+    );
+
+    template.hasResourceProperties("AWS::CloudFront::Distribution", {
+      DistributionConfig: Match.objectLike({ WebACLId: arn }),
+    });
+    // No custom resource performs an SSM getParameter on the BYO path.
+    const readers = Object.values(
+      template.findResources("Custom::AWS"),
+    ).filter((cr) => crCall(cr).includes("getParameter"));
+    expect(readers).toHaveLength(0);
+  });
+
+  test("auto-create path reads the WebACL ARN from us-east-1 SSM via a custom resource", () => {
+    const app = new cdk.App({
+      context: { resource_prefix: DEFAULT_RESOURCE_PREFIX, env: "dev" },
+    });
+    const template = Template.fromStack(
+      new WebStack(app, "TestWebAutoWaf", {
+        ...BASE_PROPS,
+        autoWebAclParam: {
+          name: "/coa/edge/cloudfront-web-acl-arn",
+          region: "us-east-1",
+        },
+      }),
+    );
+
+    const readers = Object.values(
+      template.findResources("Custom::AWS"),
+    ).filter((cr) => {
+      const call = crCall(cr);
+      return (
+        call.includes("getParameter") &&
+        call.includes("/coa/edge/cloudfront-web-acl-arn") &&
+        call.includes("us-east-1")
+      );
+    });
+    expect(readers).toHaveLength(1);
+  });
+});

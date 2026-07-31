@@ -1,0 +1,80 @@
+#!/usr/bin/env sh
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+set -eu
+
+echo "=== SCL Dev Environment Setup ==="
+
+# Check UV
+if ! command -v uv &> /dev/null; then
+    echo "Installing UV..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+else
+    echo "✓ UV $(uv --version) found"
+fi
+
+# Check pnpm
+if ! command -v pnpm &> /dev/null; then
+    echo "Installing pnpm..."
+    npm install -g pnpm
+else
+    echo "✓ pnpm $(pnpm --version) found"
+fi
+
+# Check Java 17+
+if command -v java &> /dev/null; then
+    JAVA_VER=$(java -version 2>&1 | head -1 | awk -F '"' '{print $2}' | cut -d. -f1)
+    if [ "$JAVA_VER" -ge 17 ]; then
+        echo "✓ Java $JAVA_VER found"
+    else
+        echo "⚠ Java 17+ required for Smithy (found $JAVA_VER)"
+    fi
+else
+    echo "⚠ Java not found — required for Smithy code generation"
+fi
+
+# Check Gradle
+if command -v gradle &> /dev/null; then
+    echo "✓ Gradle found"
+else
+    echo "⚠ Gradle not found — required for Smithy code generation"
+    echo "  Install via: brew install gradle  (macOS)"
+fi
+
+# Unset VIRTUAL_ENV to avoid interference from other activated environments
+unset VIRTUAL_ENV
+
+# Sync UV workspace (Python)
+echo ""
+echo "Syncing UV workspace..."
+uv sync --all-packages
+
+# Install Node dependencies via pnpm (TS packages: infra, web-app, ts-shared)
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+echo ""
+echo "Installing Node dependencies..."
+cd "$REPO_ROOT" && pnpm install
+
+# Install pre-commit hooks
+echo ""
+echo "Installing pre-commit hooks..."
+if git config --get core.hooksPath &> /dev/null; then
+    HOOKS_PATH=$(git config --get core.hooksPath)
+    echo "⚠ Skipping pre-commit install: core.hooksPath is set to '$HOOKS_PATH' (likely git-defender)."
+    echo "  Run 'make lint' manually before committing, or configure pre-commit to run via git-defender."
+else
+    if command -v pre-commit &> /dev/null; then
+        pre-commit install
+        echo "✓ Pre-commit hooks installed"
+    else
+        echo "Installing pre-commit..."
+        uv tool install pre-commit
+        pre-commit install
+    fi
+fi
+
+echo ""
+echo "=== Setup complete! ==="
+echo "Run 'make docker-up' to start local services."
+echo "Run 'make test' to run tests."

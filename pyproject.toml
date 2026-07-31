@@ -1,0 +1,68 @@
+[project]
+name = "coa"
+# Single source of truth is the repo-root VERSION file. Do not edit by hand —
+# bump VERSION and run `make version` (verified by `make lint`).
+version = "0.1.0"
+description = "Context Ontology Accelerator for AWS"
+requires-python = ">=3.12"
+license = {text = "Apache-2.0"}
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=6.0",
+    "pytest-xdist>=3.0",
+    "ruff>=0.8",
+    "mypy==1.20.1",
+    "types-requests>=2.32.0",
+    "types-PyYAML>=6.0",
+    "boto3-stubs>=1.35",
+    "moto[dynamodb,sqs]>=5.0",
+]
+
+[tool.uv.workspace]
+members = [
+    "packages/control-plane",
+    "packages/context-manager",
+    "packages/data-layer",
+    "packages/ontology-engine",
+    "packages/metric-service",
+    "packages/vkg",
+    "packages/mcp-server",
+    "packages/sources",
+    "libs/common",
+    "smithy-generated/control-plane-python-server",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+asyncio_mode = "auto"
+markers = [
+    "unit: Unit tests",
+    "integ: Integration tests",
+    "security: Security integration tests (authentication, authorization, input validation, SQL firewall)",
+    "slow: Billable load-test rungs (500+) — manual only",
+]
+
+[tool.mypy]
+plugins = ["pydantic.mypy"]
+# Print a traceback on mypy internal errors so transient crashes (e.g. under
+# concurrent `nx run-many` lint) are diagnosable instead of just emitting the
+# generic "INTERNAL ERROR" banner with no location.
+show_traceback = true
+
+[tool.coverage.run]
+source = ["packages", "libs"]
+omit = [
+    "**/tests/**",
+    "**/__pycache__/**",
+    "**/demo/**",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+
+[tool.coverage.html]
+directory = "htmlcov"

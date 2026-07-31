@@ -1,0 +1,351 @@
+# Demo configuration — copy to config.yaml and customize
+# cp config-example.yaml config.yaml
+
+# Service URLs (shared by setup.py and demo.py)
+#
+# The ontology-engine is a consolidated FastAPI app — all routers (ontology
+# catalog, embeddings, induction, proposals, validation) run under one port.
+# Keep data-catalog pointing at the mock catalog fixture service on :8003.
+services:
+  ontology-catalog:    "http://localhost:8001"
+  embedding-generator: "http://localhost:8001"
+  data-catalog:        "http://localhost:8003"
+  ontology-inducer:    "http://localhost:8001"
+  ontology-validation: "http://localhost:8001"
+
+# Default values for demo.py induction prompts
+induction_defaults:
+  ontology_uri_prefix: "https://example.com/ontology/retail#"
+  label: "Retail Domain Ontology"
+  confidence_threshold: 0.65
+  # 0.65 is conservative enough to avoid spurious matches but gives
+  # foundational grounding a realistic shot. At 0.80 (the old default),
+  # schema:identifier vs column "catastropheIdentifier" scored ~0.62
+  # — below threshold — so every ID/date/name column came back as novel
+  # even though there was a clear foundational match. Lower threshold +
+  # the match_type classifier (exact ≥0.95, high_confidence ≥ threshold,
+  # ambiguous ≥ 0.50, else novel) produces a more honest breakdown.
+  # Which induction pipeline to run server-side.
+  #   table_to_ontology: pure embedding-similarity match; ~15-30s on 13 tables.
+  #   rigor_ontology:    LLM-generated Turtle fragments (RAG + judge); ~2-8 min.
+  strategy: "table_to_ontology"
+  # Scoring strategy tunes the matcher within a pipeline (orthogonal to strategy).
+  scoring_strategy: "lexical"       # "lexical" | "structural_fusion"
+  structural_weight: 0.05           # weight for structural signal in fusion
+  namespace: "default"
+
+foundational_ontologies:
+
+  - uri: "https://schema.org/"
+    title: Schema.org
+    description: Vocabulary for structured data on the web
+    format: turtle
+    license: CC-BY-SA-3.0
+    license_tier: attribution
+    source_url: https://schema.org/version/latest/schemaorg-current-https.ttl
+    domain_tags: [general, web, commerce]
+    sample_classes:
+      - class_uri: "https://schema.org/Thing"
+        labels: [Thing]
+        comments: [The most generic type of item]
+      - class_uri: "https://schema.org/Person"
+        labels: [Person]
+        comments: ["A person (alive, dead, undead, or fictional)"]
+      - class_uri: "https://schema.org/Organization"
+        labels: [Organization]
+        comments: ["An organization such as a school, NGO, corporation, club, etc."]
+      - class_uri: "https://schema.org/Product"
+        labels: [Product]
+        comments: [Any offered product or service]
+      - class_uri: "https://schema.org/Place"
+        labels: [Place]
+        comments: ["Entities that have a somewhat fixed, physical extension"]
+      - class_uri: "https://schema.org/Event"
+        labels: [Event]
+        comments: [An event happening at a certain time and location]
+      - class_uri: "https://schema.org/CreativeWork"
+        labels: [Creative Work]
+        comments: [The most generic kind of creative work]
+      - class_uri: "https://schema.org/Action"
+        labels: [Action]
+        comments: [An action performed by a direct agent]
+      - class_uri: "https://schema.org/Offer"
+        labels: [Offer]
+        comments: [An offer to transfer some rights to an item or to provide a service]
+      - class_uri: "https://schema.org/PostalAddress"
+        labels: [Postal Address]
+        comments: [The mailing address]
+      - class_uri: "https://schema.org/Order"
+        labels: [Order]
+        comments: [An order is a confirmation of a transaction]
+      - class_uri: "https://schema.org/Invoice"
+        labels: [Invoice]
+        comments: [A statement of the money due for goods or services]
+      # P&C Insurance extensions
+      - class_uri: "https://schema.org/Vehicle"
+        labels: [Vehicle]
+        comments: [A vehicle is a device that is designed or used to transport people or cargo]
+      - class_uri: "https://schema.org/FinancialProduct"
+        labels: [Financial Product]
+        comments: [A product provided to consumers and businesses by financial institutions]
+      - class_uri: "https://schema.org/Service"
+        labels: [Service]
+        comments: [A service provided by an organization, e.g. insurance, maintenance]
+      - class_uri: "https://schema.org/MonetaryAmount"
+        labels: [Monetary Amount]
+        comments: [A monetary value or range — prices, premiums, deductibles]
+    # sample_properties is optional but recommended — setup.py embeds these
+    # so the induction pipeline can match induced properties (e.g. column-level
+    # concepts) against known ones. On top of anything listed here, the engine
+    # AUTO-EXTRACTS every property in the source ontology whose domain or range
+    # is one of the sample_classes above (via /fetch extract_properties_for_classes).
+    # So this block is for curated overrides or high-value properties we want
+    # embedded even if auto-extract misses them.
+    sample_properties:
+      - property_uri: "https://schema.org/name"
+        labels: [name]
+        comments: [The name of the item]
+        domain: "https://schema.org/Thing"
+        range: "xsd:string"
+      - property_uri: "https://schema.org/identifier"
+        labels: [identifier]
+        comments: [The identifier property represents any kind of identifier]
+        domain: "https://schema.org/Thing"
+        range: "xsd:string"
+      - property_uri: "https://schema.org/startDate"
+        labels: [start date]
+        comments: [The start date and time of the item (in ISO 8601 date format)]
+        domain: "https://schema.org/Event"
+        range: "xsd:dateTime"
+      - property_uri: "https://schema.org/endDate"
+        labels: [end date]
+        comments: [The end date and time of the item (in ISO 8601 date format)]
+        domain: "https://schema.org/Event"
+        range: "xsd:dateTime"
+      - property_uri: "https://schema.org/address"
+        labels: [address]
+        comments: [Physical address of the item]
+        domain: "https://schema.org/Thing"
+        range: "https://schema.org/PostalAddress"
+
+  - uri: "http://purl.org/dc/terms/"
+    title: Dublin Core Terms
+    description: Metadata terms for resource description
+    format: rdf-xml
+    license: CC-BY-4.0
+    license_tier: attribution
+    source_url: https://www.dublincore.org/specifications/dublin-core/dcmi-terms/dublin_core_terms.rdf
+    domain_tags: [metadata, general]
+    sample_classes:
+      - class_uri: "http://purl.org/dc/terms/Agent"
+        labels: [Agent]
+        comments: [A resource that acts or has the power to act]
+      - class_uri: "http://purl.org/dc/terms/BibliographicResource"
+        labels: [Bibliographic Resource]
+        comments: ["A book, article, or other documentary resource"]
+      - class_uri: "http://purl.org/dc/terms/Location"
+        labels: [Location]
+        comments: [A spatial region or named place]
+      - class_uri: "http://purl.org/dc/terms/Standard"
+        labels: [Standard]
+        comments: [A reference point against which other things can be evaluated]
+
+  - uri: "http://xmlns.com/foaf/0.1/"
+    title: FOAF
+    description: "Friend of a Friend — people and social networks"
+    format: rdf-xml
+    license: CC-BY-1.0
+    license_tier: attribution
+    source_url: http://xmlns.com/foaf/spec/index.rdf
+    domain_tags: [social, people]
+    sample_classes:
+      - class_uri: "http://xmlns.com/foaf/0.1/Person"
+        labels: [Person]
+        comments: [A person]
+      - class_uri: "http://xmlns.com/foaf/0.1/Organization"
+        labels: [Organization]
+        comments: [An organization]
+      - class_uri: "http://xmlns.com/foaf/0.1/Group"
+        labels: [Group]
+        comments: [A class of Agents]
+      - class_uri: "http://xmlns.com/foaf/0.1/Document"
+        labels: [Document]
+        comments: [A document]
+      - class_uri: "http://xmlns.com/foaf/0.1/Agent"
+        labels: [Agent]
+        comments: ["An agent (eg. person, group, software or physical artifact)"]
+
+  - uri: "http://www.w3.org/ns/prov#"
+    title: PROV-O
+    description: W3C Provenance Ontology
+    format: turtle
+    license: W3C
+    license_tier: unrestricted
+    source_url: http://www.w3.org/ns/prov-o
+    domain_tags: [provenance, lineage]
+    sample_classes:
+      - class_uri: "http://www.w3.org/ns/prov#Entity"
+        labels: [Entity]
+        comments: ["A physical, digital, conceptual, or other kind of thing with some fixed aspects"]
+      - class_uri: "http://www.w3.org/ns/prov#Activity"
+        labels: [Activity]
+        comments: [Something that occurs over a period of time and acts upon or with entities]
+      - class_uri: "http://www.w3.org/ns/prov#Agent"
+        labels: [Agent]
+        comments: [Something that bears some form of responsibility for an activity taking place]
+
+  - uri: "https://spec.edmcouncil.org/fibo/ontology/FND/Agreements/Agreements/"
+    title: FIBO Agreements
+    description: FIBO Foundations — Agreements module (obligor, obligee, beneficiary)
+    format: turtle
+    license: MIT
+    license_tier: unrestricted
+    source_url: https://spec.edmcouncil.org/fibo/ontology/master/latest/FND/Agreements/Agreements.ttl
+    domain_tags: [finance, agreements, insurance]
+    sample_classes:
+      - class_uri: "https://spec.edmcouncil.org/fibo/ontology/FND/Agreements/Agreements/Agreement"
+        labels: [Agreement]
+        comments: [A mutual understanding between two or more parties about their rights and duties]
+      - class_uri: "https://spec.edmcouncil.org/fibo/ontology/FND/Agreements/Agreements/Beneficiary"
+        labels: [Beneficiary]
+        comments: [A party named to receive funds or benefits under an agreement]
+      - class_uri: "https://spec.edmcouncil.org/fibo/ontology/FND/Agreements/Agreements/Obligor"
+        labels: [Obligor]
+        comments: [A party bound by a legal obligation, such as a policyholder paying premiums]
+      - class_uri: "https://spec.edmcouncil.org/fibo/ontology/FND/Agreements/Agreements/Obligee"
+        labels: [Obligee]
+        comments: [A party to whom an obligation is owed, such as an insurer paying claims]
+
+  - uri: "https://spec.edmcouncil.org/fibo/ontology/FND/Agreements/Contracts/"
+    title: FIBO Contracts
+    description: FIBO Foundations — Contracts (policies are specialized contracts)
+    format: turtle
+    license: MIT
+    license_tier: unrestricted
+    source_url: https://spec.edmcouncil.org/fibo/ontology/master/latest/FND/Agreements/Contracts.ttl
+    domain_tags: [finance, contracts, insurance]
+    sample_classes:
+      - class_uri: "https://spec.edmcouncil.org/fibo/ontology/FND/Agreements/Contracts/Contract"
+        labels: [Contract]
+        comments: ["A voluntary, deliberate agreement between competent parties"]
+      - class_uri: "https://spec.edmcouncil.org/fibo/ontology/FND/Agreements/Contracts/BilateralContract"
+        labels: [Bilateral Contract]
+        comments: [A contract with mutual obligations between two parties — like most insurance policies]
+      - class_uri: "https://spec.edmcouncil.org/fibo/ontology/FND/Agreements/Contracts/AssignableContract"
+        labels: [Assignable Contract]
+        comments: [A contract whose rights and obligations can be transferred to another party]
+      - class_uri: "https://spec.edmcouncil.org/fibo/ontology/FND/Agreements/Contracts/CollateralAgreement"
+        labels: [Collateral Agreement]
+        comments: [An agreement securing performance of obligations with assets]
+
+  - uri: "https://spec.edmcouncil.org/fibo/ontology/FBC/ProductsAndServices/ClientsAndAccounts/"
+    title: FIBO Clients and Accounts
+    description: FIBO Financial Business and Commerce — Clients and Accounts
+    format: turtle
+    license: MIT
+    license_tier: unrestricted
+    source_url: https://spec.edmcouncil.org/fibo/ontology/master/latest/FBC/ProductsAndServices/ClientsAndAccounts.ttl
+    domain_tags: [finance, accounts]
+    sample_classes:
+      - class_uri: "https://spec.edmcouncil.org/fibo/ontology/FBC/ProductsAndServices/ClientsAndAccounts/Account"
+        labels: [Account]
+        comments: [A formal banking, brokerage, or insurance relationship]
+      - class_uri: "https://spec.edmcouncil.org/fibo/ontology/FBC/ProductsAndServices/ClientsAndAccounts/AccountHolder"
+        labels: [Account Holder]
+        comments: [A party that holds an account with a financial institution — analogous to Customer / Policyholder]
+      - class_uri: "https://spec.edmcouncil.org/fibo/ontology/FBC/ProductsAndServices/ClientsAndAccounts/AccountProvider"
+        labels: [Account Provider]
+        comments: [An institution that provides accounts to clients — analogous to an insurer]
+
+  - uri: "https://spec.edmcouncil.org/fibo/ontology/FBC/ProductsAndServices/FinancialProductsAndServices/"
+    title: FIBO Financial Products and Services
+    description: FIBO Financial Business and Commerce — Financial Products and Services
+    format: turtle
+    license: MIT
+    license_tier: unrestricted
+    source_url: https://spec.edmcouncil.org/fibo/ontology/master/latest/FBC/ProductsAndServices/FinancialProductsAndServices.ttl
+    domain_tags: [finance, products]
+    sample_classes:
+      - class_uri: "https://spec.edmcouncil.org/fibo/ontology/FBC/ProductsAndServices/FinancialProductsAndServices/FinancialProduct"
+        labels: [Financial Product]
+        comments: [A product provided by financial institutions — insurance policies qualify]
+      - class_uri: "https://spec.edmcouncil.org/fibo/ontology/FBC/ProductsAndServices/FinancialProductsAndServices/FinancialService"
+        labels: [Financial Service]
+        comments: [A service provided by financial institutions — like claims handling]
+      - class_uri: "https://spec.edmcouncil.org/fibo/ontology/FBC/ProductsAndServices/FinancialProductsAndServices/FinancialServiceProvider"
+        labels: [Financial Service Provider]
+        comments: [An institution providing financial services — insurers, brokers, banks]
+      - class_uri: "https://spec.edmcouncil.org/fibo/ontology/FBC/ProductsAndServices/FinancialProductsAndServices/Broker"
+        labels: [Broker]
+        comments: [An agent who negotiates and executes transactions for others — insurance agents qualify]
+
+# ─────────────────────────────────────────────────────────────────────
+# Customer-provided ontologies (Tier 2)
+# ─────────────────────────────────────────────────────────────────────
+#
+# The foundational ontologies above (Schema.org, Dublin Core, FOAF, PROV-O,
+# FIBO Foundations) give broad cross-industry grounding — but they don't
+# model YOUR specific business domain. That's the gap customer_ontologies
+# fills.
+#
+# In a real deployment, a customer brings their own domain ontology: ACORD
+# for insurance, FHIR/HL7 for healthcare, SNOMED-CT for clinical terms, an
+# internal corporate data dictionary, etc. These register the same way as
+# foundational ontologies (same embedding pipeline, same grounding API)
+# but are tagged ontology_type=customer_provided so match reports can
+# distinguish tiers — a grounding to the customer's own ontology is
+# typically worth more than a generic Schema.org match.
+#
+# The demo uses the swigroup/P-C-Ontology (Koutsomitropoulos 2017) as a
+# stand-in for ACME's in-house P&C domain model. It's an academic publication
+# based on the same OMG P&C Data Model as our demo DDL, so coverage is
+# inherently high — a realistic approximation of a real customer bringing
+# their own domain ontology to the pipeline.
+#
+# What a "customer_provided" ontology does differently at runtime:
+#   - Tier label stored on the catalog record (ontology_type=customer_provided)
+#   - setup.py Step 2 logs "Customer tier:" separately from "Foundational tier:"
+#   - demo.py Step 4 breaks down matches by tier: grounded_customer vs
+#     grounded_foundational vs novel
+#   - golden_compare scorecard shows separate grounding columns per tier
+#   - extract_all_properties defaults to True (the customer brought this
+#     ontology; we use its whole property set rather than filtering to
+#     just the sample_classes listed below). Override with
+#     `extract_all_properties: false` on the entry to opt in to filtering.
+
+customer_ontologies:
+
+  - uri: "http://www.swigroup.org/ontologies/p-c-ontology#"
+    title: ACME P&C Domain Ontology (via swigroup)
+    description: Customer-provided insurance-domain ontology for ACME Insurance (demo stand-in)
+    ontology_type: customer_provided
+    format: rdf-xml
+    license: Academic / research use
+    license_tier: attribution
+    source_url: https://raw.githubusercontent.com/swigroup/P-C-Ontology/master/p-c-ontology.owl
+    domain_tags: [insurance, p_and_c, claims, customer]
+    sample_classes:
+      - class_uri: "http://www.swigroup.org/ontologies/p-c-ontology#Claim"
+        labels: [Claim]
+        comments: [A request for payment by an insured party under an insurance policy]
+      - class_uri: "http://www.swigroup.org/ontologies/p-c-ontology#Policy"
+        labels: [Policy]
+        comments: [An insurance policy — contract between insurer and insured]
+      - class_uri: "http://www.swigroup.org/ontologies/p-c-ontology#Coverage"
+        labels: [Coverage]
+        comments: [The scope of protection provided under a policy]
+      - class_uri: "http://www.swigroup.org/ontologies/p-c-ontology#Premium"
+        labels: [Premium]
+        comments: [Amount paid for insurance coverage]
+      - class_uri: "http://www.swigroup.org/ontologies/p-c-ontology#ClaimPayment"
+        labels: [Claim Payment]
+        comments: [Payment made in settlement of a claim]
+      - class_uri: "http://www.swigroup.org/ontologies/p-c-ontology#ClaimReserve"
+        labels: [Claim Reserve]
+        comments: [Accounting reserve held against expected claim payments]
+      - class_uri: "http://www.swigroup.org/ontologies/p-c-ontology#ClaimExpense"
+        labels: [Claim Expense]
+        comments: [Expense associated with processing a claim]
+      - class_uri: "http://www.swigroup.org/ontologies/p-c-ontology#Insured"
+        labels: [Insured]
+        comments: [Party covered by an insurance policy]

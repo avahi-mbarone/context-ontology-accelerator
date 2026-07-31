@@ -1,0 +1,39 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nrwl/nx/master/packages/nx/schemas/nx-schema.json",
+  "namedInputs": {
+    "default": ["{projectRoot}/**/*", "!{projectRoot}/**/*.md"],
+    "python": [
+      "{projectRoot}/src/**/*.py",
+      "{projectRoot}/tests/**/*.py",
+      "{projectRoot}/pyproject.toml"
+    ],
+    "typescript": [
+      "{projectRoot}/src/**/*.ts",
+      "{projectRoot}/src/**/*.tsx",
+      "{projectRoot}/tsconfig.json",
+      "{projectRoot}/package.json"
+    ]
+  },
+  "targetDefaults": {
+    "build": {
+      "dependsOn": ["^build"],
+      "cache": true
+    },
+    "test": {
+      "dependsOn": ["build"],
+      "cache": true
+    },
+    "lint": {
+      "dependsOn": ["^build"],
+      "cache": true
+    },
+    "format": {
+      "cache": false
+    }
+  },
+  "plugins": [
+    {
+      "plugin": "nx/plugins/package-json"
+    }
+  ]
+}

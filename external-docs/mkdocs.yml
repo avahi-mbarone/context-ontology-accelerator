@@ -1,0 +1,44 @@
+site_name: Context Ontology Accelerator
+theme:
+  name: material
+  palette:
+    primary: indigo
+    accent: amber
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - toc.integrate
+
+nav:
+  - Home: index.md
+  - User Guide:
+    - Deploying Context Ontology Accelerator: user-guide/deploying.md
+    - Namespaces: user-guide/namespaces.md
+    - Sources: user-guide/sources.md
+    - Ontologies: user-guide/ontologies.md
+    - Metrics: user-guide/metrics.md
+    - Serve: user-guide/serve.md
+  - Platform Guides:
+    - Authentication Setup: guides/platform/authentication-setup.md
+    - Namespace Management: guides/platform/namespace-management.md
+    - Role & Permission Management: guides/platform/role-permission-management.md
+    - Agent Access: guides/platform/agent-access.md
+    - Cedar Policy Authoring: guides/platform/cedar-policy-authoring.md
+  - Data Source Guides:
+    - Structured Data Sources: guides/structured-data/index.md
+    - Cross-Account Data Sources: guides/structured-data/cross-account-sources.md
+  - Developer:
+    - Getting Started: getting-started.md
+    - Package Guide: package-guide.md
+    - Cross-Network Connectivity: cross-network-connectivity.md
+
+markdown_extensions:
+  - admonition
+  - codehilite
+  - toc:
+      permalink: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format

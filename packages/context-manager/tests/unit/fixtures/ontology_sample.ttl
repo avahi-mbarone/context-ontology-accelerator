@@ -1,0 +1,56 @@
+# Sample published-ontology Turtle fixture for the OntologyFileSource unit test.
+#
+# Mirrors the shape of the RDF ontology graph the OntologyGraphSource reads over
+# SPARQL (urn:orion:{namespace}:published): owl:Class node types with rdfs:label,
+# owl:ObjectProperty edge types with rdfs:label + rdfs:domain/rdfs:range pointing
+# at those classes. It deliberately includes:
+#   - a datatype property (must NOT appear as an edge type), and
+#   - an object property with no domain/range (must appear in edge_types but
+#     contribute no edge_map triple),
+# so the unit test pins both the include and exclude behaviour.
+
+@prefix owl:   <http://www.w3.org/2002/07/owl#> .
+@prefix rdf:   <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:  <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:   <http://www.w3.org/2001/XMLSchema#> .
+@prefix orion: <urn:orion:ontology:> .
+
+# ── Node types (owl:Class) ──────────────────────────────────────────
+<urn:orion:class:Company> a owl:Class ;
+    rdfs:label "Company" ;
+    rdfs:comment "A business entity." .
+
+<urn:orion:class:FinancialReport> a owl:Class ;
+    rdfs:label "FinancialReport" ;
+    rdfs:comment "A periodic financial disclosure." .
+
+<urn:orion:class:Person> a owl:Class ;
+    rdfs:label "Person" ;
+    rdfs:comment "An individual." .
+
+# ── Edge types (owl:ObjectProperty) with directional domain → range ──
+<urn:orion:class:Company/ObjectProperty/competes_with> a owl:ObjectProperty ;
+    rdfs:label "COMPETES_WITH" ;
+    rdfs:domain <urn:orion:class:Company> ;
+    rdfs:range <urn:orion:class:Company> .
+
+<urn:orion:class:Company/ObjectProperty/has_financials> a owl:ObjectProperty ;
+    rdfs:label "HAS_FINANCIALS" ;
+    rdfs:domain <urn:orion:class:Company> ;
+    rdfs:range <urn:orion:class:FinancialReport> .
+
+<urn:orion:class:Person/ObjectProperty/works_for> a owl:ObjectProperty ;
+    rdfs:label "WORKS_FOR" ;
+    rdfs:domain <urn:orion:class:Person> ;
+    rdfs:range <urn:orion:class:Company> .
+
+# Object property with no declared domain/range — surfaces as an edge type but
+# contributes no directional edge_map triple.
+<urn:orion:class:Company/ObjectProperty/related_to> a owl:ObjectProperty ;
+    rdfs:label "RELATED_TO" .
+
+# ── Datatype property — must be EXCLUDED from edge types ─────────────
+<urn:orion:prop:revenue> a owl:DatatypeProperty ;
+    rdfs:label "revenue" ;
+    rdfs:domain <urn:orion:class:FinancialReport> ;
+    rdfs:range xsd:decimal .

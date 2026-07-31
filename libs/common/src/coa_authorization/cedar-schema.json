@@ -1,0 +1,208 @@
+{
+  "SCL": {
+    "entityTypes": {
+      "User": {
+        "shape": {
+          "type": "Record",
+          "attributes": {
+            "userId": { "type": "String", "required": true },
+            "groups": { "type": "Set", "element": { "type": "String" } },
+            "globalRoles": { "type": "Set", "element": { "type": "String" } },
+            "resourceRoles": {
+              "type": "Set",
+              "element": {
+                "type": "Record",
+                "attributes": {
+                  "role": { "type": "String", "required": true },
+                  "resourceUID": { "type": "String", "required": true }
+                }
+              }
+            }
+          }
+        }
+      },
+      "Namespace": {
+        "shape": {
+          "type": "Record",
+          "attributes": {
+            "id": { "type": "String", "required": true },
+            "namespace": { "type": "String", "required": true },
+            "status": { "type": "String" }
+          }
+        }
+      },
+      "Source": {
+        "shape": {
+          "type": "Record",
+          "attributes": {
+            "id": { "type": "String", "required": true },
+            "namespace": { "type": "String", "required": true }
+          }
+        }
+      },
+      "Metric": {
+        "shape": {
+          "type": "Record",
+          "attributes": {
+            "id": { "type": "String", "required": true },
+            "namespace": { "type": "String", "required": true }
+          }
+        }
+      },
+      "Ontology": {
+        "shape": {
+          "type": "Record",
+          "attributes": {
+            "id": { "type": "String", "required": true },
+            "namespace": { "type": "String", "required": true },
+            "version": { "type": "String" }
+          }
+        }
+      },
+      "OntologyProposal": {
+        "shape": {
+          "type": "Record",
+          "attributes": {
+            "id": { "type": "String", "required": true },
+            "namespace": { "type": "String", "required": true }
+          }
+        }
+      }
+    },
+    "actions": {
+      "viewNamespace": {
+        "appliesTo": {
+          "principalTypes": ["User"],
+          "resourceTypes": ["Namespace", "Source", "Metric", "Ontology", "OntologyProposal"]
+        }
+      },
+      "manageNamespace": {
+        "appliesTo": {
+          "principalTypes": ["User"],
+          "resourceTypes": ["Namespace"],
+          "context": {
+            "type": "Record",
+            "attributes": {
+              "namespaceStatus": { "type": "String" }
+            }
+          }
+        }
+      },
+      "setNamespaceStatus": {
+        "appliesTo": {
+          "principalTypes": ["User"],
+          "resourceTypes": ["Namespace"]
+        }
+      },
+      "deleteNamespace": {
+        "appliesTo": {
+          "principalTypes": ["User"],
+          "resourceTypes": ["Namespace"]
+        }
+      },
+      "list": {
+        "appliesTo": {
+          "principalTypes": ["User"],
+          "resourceTypes": ["Namespace", "Source", "Metric", "Ontology"]
+        }
+      },
+      "query": {
+        "appliesTo": {
+          "principalTypes": ["User"],
+          "resourceTypes": ["Namespace", "Source"],
+          "context": {
+            "type": "Record",
+            "attributes": {
+              "columns": { "type": "Set", "element": { "type": "String" } },
+              "namespace": { "type": "String", "required": true }
+            }
+          }
+        }
+      },
+      "readMetric": {
+        "appliesTo": {
+          "principalTypes": ["User"],
+          "resourceTypes": ["Namespace", "Metric"]
+        }
+      },
+      "searchDocuments": {
+        "appliesTo": {
+          "principalTypes": ["User"],
+          "resourceTypes": ["Namespace", "Source"]
+        }
+      },
+      "translateQuery": {
+        "appliesTo": {
+          "principalTypes": ["User"],
+          "resourceTypes": ["Namespace"]
+        }
+      },
+      "traverseGraph": {
+        "appliesTo": {
+          "principalTypes": ["User"],
+          "resourceTypes": ["Namespace"]
+        }
+      },
+      "manageSource": {
+        "appliesTo": {
+          "principalTypes": ["User"],
+          "resourceTypes": ["Namespace", "Source"],
+          "context": {
+            "type": "Record",
+            "attributes": {
+              "namespaceStatus": { "type": "String" }
+            }
+          }
+        }
+      },
+      "manageMetric": {
+        "appliesTo": {
+          "principalTypes": ["User"],
+          "resourceTypes": ["Namespace", "Metric"],
+          "context": {
+            "type": "Record",
+            "attributes": {
+              "namespaceStatus": { "type": "String" }
+            }
+          }
+        }
+      },
+      "manageOntology": {
+        "appliesTo": {
+          "principalTypes": ["User"],
+          "resourceTypes": ["Namespace", "Ontology", "OntologyProposal"],
+          "context": {
+            "type": "Record",
+            "attributes": {
+              "namespaceStatus": { "type": "String" }
+            }
+          }
+        }
+      },
+      "grantPermissions": {
+        "appliesTo": {
+          "principalTypes": ["User"],
+          "resourceTypes": ["Namespace"],
+          "context": {
+            "type": "Record",
+            "attributes": {
+              "namespaceStatus": { "type": "String" }
+            }
+          }
+        }
+      },
+      "manageRoles": {
+        "appliesTo": {
+          "principalTypes": ["User"],
+          "resourceTypes": ["Namespace"],
+          "context": {
+            "type": "Record",
+            "attributes": {
+              "namespaceStatus": { "type": "String" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,22 @@
+# kg-build runtime deps (standalone Docker image, built with plain pip).
+#
+# The boto3 trio is pinned EXACTLY to eliminate pip backtracking (~50 metadata
+# downloads per build). These are known-good versions for the current
+# graphrag-lexical-graph pin (validated end-to-end: doc ingest succeeded
+# 2026-07-10). This image builds via standalone pip, NOT the uv workspace, so
+# the exact patch may differ from uv.lock's boto3 (1.43.x); both are compatible
+# with graphrag 3.18.7 now that the aiobotocore botocore<1.41 cap is gone. Bump
+# in lockstep when upgrading graphrag-lexical-graph.
+boto3==1.43.45
+botocore==1.43.45
+s3transfer==0.19.0
+graphrag-lexical-graph==3.18.7
+# Pin the LlamaIndex OpenSearch vector-store stack EXACTLY. These were left
+# floating and a rebuild pulled newer releases whose VectorStoreFactory /
+# VectorIndexing integration broke against graphrag-lexical-graph
+# ("'VectorIndexing' object has no attribute 'vector_store'"), failing every
+# doc-kg-build. These are the last-known-good versions (ingest succeeded on
+# 2026-07-06). Bump in lockstep with graphrag-lexical-graph, not independently.
+opensearch-py==3.2.0
+llama-index-vector-stores-opensearch==1.2.0
+llama-index-core==0.14.23

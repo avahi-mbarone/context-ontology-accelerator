@@ -1,0 +1,95 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+import { Node } from "constructs";
+import {
+  CTX_RESOURCE_PREFIX,
+  CTX_ENV,
+  CTX_PROJECT_TAG,
+  CTX_GRAPH_BASE_URI,
+  CTX_EVENT_SOURCE_PREFIX,
+  DEFAULT_RESOURCE_PREFIX,
+  DEFAULT_ENV,
+  DEFAULT_PROJECT_TAG,
+  DEFAULT_GRAPH_BASE_URI,
+  DEFAULT_URN_PREFIX,
+  DEFAULT_VOCAB_PREFIX,
+  DEFAULT_DZ_TYPE_PREFIX,
+} from "./constants";
+
+/** Resolved context values available to any stack or construct. */
+export interface ResolvedContext {
+  readonly prefix: string;
+  readonly envName: string;
+  readonly projectTag: string;
+  readonly ssmPrefix: string;
+  /** Base authority for knowledge-graph IRIs (e.g. "http://coa.amazon.com"). */
+  readonly graphBaseUri: string;
+  /** URN scheme prefix (e.g. "coa" → urn:coa:...). */
+  readonly urnPrefix: string;
+  /** RDF vocab short prefix (e.g. "coa" → coa:isMapped). */
+  readonly vocabPrefix: string;
+  /**
+   * EventBridge source prefix. Tracks `resource_prefix` so co-located
+   * deployments don't cross-trigger on the shared account-global bus
+   * (e.g. "scl" → scl.ontology). Override with `event_source_prefix`.
+   */
+  readonly eventSourcePrefix: string;
+  /** DataZone type name prefix in PascalCase (e.g. "Coa" → CoaTableMetadata). */
+  readonly dzTypePrefix: string;
+}
+
+/** Read resource_prefix and env from CDK context with defaults. */
+export function resolveContext(node: Node): ResolvedContext {
+  const prefix =
+    (node.tryGetContext(CTX_RESOURCE_PREFIX) as string) ??
+    DEFAULT_RESOURCE_PREFIX;
+  const envName = (node.tryGetContext(CTX_ENV) as string) ?? DEFAULT_ENV;
+  const projectTag =
+    (node.tryGetContext(CTX_PROJECT_TAG) as string) ?? DEFAULT_PROJECT_TAG;
+  const graphBaseUri =
+    (node.tryGetContext(CTX_GRAPH_BASE_URI) as string) ??
+    DEFAULT_GRAPH_BASE_URI;
+  // EventBridge source DOES track `prefix` (unlike the other brand tokens
+  // below). An event source is a ROUTING attribute on a transient message, not
+  // a persisted identifier: nothing is written into a data store keyed by it, so
+  // deriving it per-deployment orphans nothing. It has to be deployment-scoped
+  // because the bus it lands on (`default`) is ACCOUNT-GLOBAL and shared — two
+  // deployments in one account+region emitting the same source means each one's
+  // rules match the OTHER's events. That is not hypothetical: it provisioned
+  // duplicate per-namespace VKG services that only the originating deployment's
+  // teardown could ever delete, leaking ECS services and failing
+  // test_namespace_delete_deregisters_vkg. The explicit `event_source_prefix`
+  // context override is retained for the deliberate cross-deployment-interop
+  // case (one deployment consuming another's events).
+  const eventSourcePrefix =
+    (node.tryGetContext(CTX_EVENT_SOURCE_PREFIX) as string) ?? prefix;
+  // The remaining data-plane identifiers are intentionally NOT derived from
+  // `prefix`. They are written into Neptune RDF and DataZone metadata, so they
+  // must stay stable across deployments and prefixes — a prefix change would
+  // re-mint every IRI and orphan the graph data already stored. See the BRAND
+  // block in libs/ts-shared/src/constants.ts. They are safe to keep static
+  // because each lives inside a container that is ALREADY prefix-isolated (its
+  // own Neptune cluster, its own DataZone domain), unlike the shared event bus.
+  // `prefix` governs physical resource names via prefixed()/ssmPrefix.
+  const urnPrefix = DEFAULT_URN_PREFIX;
+  const vocabPrefix = DEFAULT_VOCAB_PREFIX;
+  const dzTypePrefix = DEFAULT_DZ_TYPE_PREFIX;
+  return {
+    prefix,
+    envName,
+    projectTag,
+    ssmPrefix: `/${prefix}`,
+    graphBaseUri,
+    urnPrefix,
+    vocabPrefix,
+    eventSourcePrefix,
+    dzTypePrefix,
+  };
+}
+
+/** Return `{prefix}-{env}-{name}`. */
+export function prefixed(node: Node, name: string): string {
+  const { prefix, envName } = resolveContext(node);
+  return `${prefix}-${envName}-${name}`;
+}

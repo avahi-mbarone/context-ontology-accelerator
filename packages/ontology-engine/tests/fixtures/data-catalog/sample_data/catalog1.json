@@ -1,0 +1,598 @@
+{
+  "namespaceId": "ns-sales-domain",
+  "sources": [
+    {
+      "datasourceId": "ds-abc123",
+      "sourceType": "JDBC_DATABASE",
+      "databases": [
+        {
+          "name": "sales_prod",
+          "description": "Production sales transaction database",
+          "tables": [
+            {
+              "name": "orders",
+              "technicalMetadata": {
+                "columnCount": 12,
+                "partitionKeys": ["order_date"],
+                "format": "parquet",
+                "location": "s3://sales-data/orders/"
+              },
+              "businessMetadata": {
+                "description": "Customer purchase orders with line items and fulfillment status",
+                "synonyms": ["purchases", "transactions", "sales orders"],
+                "glossaryTerms": ["Order Management", "Revenue"],
+                "tags": ["financial", "customer-facing", "PII"],
+                "enrichmentSource": "AI_GENERATED",
+                "reviewStatus": "APPROVED"
+              },
+              "primaryKey": {
+                "columns": ["order_id"],
+                "source": "DETERMINISTIC",
+                "confidence": 1.0
+              },
+              "foreignKeys": [
+                {
+                  "column": "customer_id",
+                  "targetTable": "customers",
+                  "targetColumn": "id",
+                  "source": "AI_INFERRED",
+                  "confidence": 0.92
+                }
+              ],
+              "columns": [
+                {
+                  "name": "order_id",
+                  "type": "bigint",
+                  "nullable": false,
+                  "businessMetadata": {
+                    "description": "Unique identifier for a customer order",
+                    "synonyms": ["order number", "purchase ID"],
+                    "glossaryTerms": ["Order Management"],
+                    "tags": ["identifier"],
+                    "enrichmentSource": "AI_GENERATED",
+                    "reviewStatus": "APPROVED"
+                  }
+                },
+                {
+                  "name": "customer_id",
+                  "type": "bigint",
+                  "nullable": false,
+                  "businessMetadata": {
+                    "description": "Unique identifier for the customer who placed the order",
+                    "synonyms": ["buyer ID", "client ID"],
+                    "glossaryTerms": ["Customer"],
+                    "tags": ["PII", "join-key"],
+                    "enrichmentSource": "AI_GENERATED",
+                    "reviewStatus": "APPROVED"
+                  }
+                },
+                {
+                  "name": "order_date",
+                  "type": "date",
+                  "nullable": false,
+                  "businessMetadata": {
+                    "description": "Date when the order was placed",
+                    "synonyms": ["purchase date", "transaction date"],
+                    "glossaryTerms": ["Order Management"],
+                    "tags": ["temporal", "partition-key"],
+                    "enrichmentSource": "AI_GENERATED",
+                    "reviewStatus": "APPROVED"
+                  }
+                },
+                {
+                  "name": "total_amount",
+                  "type": "decimal(10,2)",
+                  "nullable": false,
+                  "businessMetadata": {
+                    "description": "Total monetary value of the order including all line items",
+                    "synonyms": ["order total", "purchase amount"],
+                    "glossaryTerms": ["Revenue"],
+                    "tags": ["financial", "metric"],
+                    "enrichmentSource": "AI_GENERATED",
+                    "reviewStatus": "APPROVED"
+                  }
+                },
+                {
+                  "name": "status",
+                  "type": "varchar(20)",
+                  "nullable": false,
+                  "businessMetadata": {
+                    "description": "Current fulfillment status of the order",
+                    "synonyms": ["order status", "fulfillment state"],
+                    "glossaryTerms": ["Order Management"],
+                    "tags": ["categorical", "workflow"],
+                    "enrichmentSource": "AI_GENERATED",
+                    "reviewStatus": "APPROVED"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "customers",
+              "technicalMetadata": {
+                "columnCount": 8,
+                "partitionKeys": [],
+                "format": "parquet",
+                "location": "s3://sales-data/customers/"
+              },
+              "businessMetadata": {
+                "description": "Customer master data including contact information and account details",
+                "synonyms": ["clients", "buyers", "accounts"],
+                "glossaryTerms": ["Customer Management", "CRM"],
+                "tags": ["PII", "master-data"],
+                "enrichmentSource": "AI_GENERATED",
+                "reviewStatus": "APPROVED"
+              },
+              "primaryKey": {
+                "columns": ["id"],
+                "source": "DETERMINISTIC",
+                "confidence": 1.0
+              },
+              "foreignKeys": [],
+              "columns": [
+                {
+                  "name": "id",
+                  "type": "bigint",
+                  "nullable": false,
+                  "businessMetadata": {
+                    "description": "Unique identifier for a customer",
+                    "synonyms": ["customer ID", "account ID"],
+                    "glossaryTerms": ["Customer Management"],
+                    "tags": ["identifier"],
+                    "enrichmentSource": "AI_GENERATED",
+                    "reviewStatus": "APPROVED"
+                  }
+                },
+                {
+                  "name": "email",
+                  "type": "varchar(255)",
+                  "nullable": false,
+                  "businessMetadata": {
+                    "description": "Primary email address for customer communications",
+                    "synonyms": ["email address", "contact email"],
+                    "glossaryTerms": ["Customer Management"],
+                    "tags": ["PII", "contact-info"],
+                    "enrichmentSource": "AI_GENERATED",
+                    "reviewStatus": "APPROVED"
+                  }
+                },
+                {
+                  "name": "name",
+                  "type": "varchar(100)",
+                  "nullable": false,
+                  "businessMetadata": {
+                    "description": "Full name of the customer",
+                    "synonyms": ["customer name", "account holder"],
+                    "glossaryTerms": ["Customer Management"],
+                    "tags": ["PII"],
+                    "enrichmentSource": "AI_GENERATED",
+                    "reviewStatus": "APPROVED"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "datasourceId": "ds-ice456",
+      "sourceType": "GLUE_DATABASE",
+      "databases": [
+        {
+          "name": "analytics_iceberg",
+          "description": "Analytics data lake with Iceberg tables for product and inventory metrics",
+          "tables": [
+            {
+              "name": "products",
+              "technicalMetadata": {
+                "columnCount": 15,
+                "partitionKeys": ["category"],
+                "format": "iceberg",
+                "location": "s3://analytics-lake/products/"
+              },
+              "businessMetadata": {
+                "description": "Product catalog with pricing, categorization, and inventory attributes",
+                "synonyms": ["items", "SKUs", "merchandise"],
+                "glossaryTerms": ["Product Management", "Catalog"],
+                "tags": ["master-data", "catalog"],
+                "enrichmentSource": "AI_GENERATED",
+                "reviewStatus": "APPROVED"
+              },
+              "primaryKey": {
+                "columns": ["product_id"],
+                "source": "AI_INFERRED",
+                "confidence": 0.97
+              },
+              "foreignKeys": [],
+              "columns": [
+                {
+                  "name": "product_id",
+                  "type": "string",
+                  "nullable": false,
+                  "businessMetadata": {
+                    "description": "Unique identifier for a product in the catalog",
+                    "synonyms": ["SKU", "item ID"],
+                    "glossaryTerms": ["Product Management"],
+                    "tags": ["identifier"],
+                    "enrichmentSource": "AI_GENERATED",
+                    "reviewStatus": "APPROVED"
+                  }
+                },
+                {
+                  "name": "name",
+                  "type": "string",
+                  "nullable": false,
+                  "businessMetadata": {
+                    "description": "Display name of the product",
+                    "synonyms": ["product name", "item name"],
+                    "glossaryTerms": ["Product Management"],
+                    "tags": ["display"],
+                    "enrichmentSource": "AI_GENERATED",
+                    "reviewStatus": "APPROVED"
+                  }
+                },
+                {
+                  "name": "category",
+                  "type": "string",
+                  "nullable": false,
+                  "businessMetadata": {
+                    "description": "Top-level product category for classification and reporting",
+                    "synonyms": ["product category", "department"],
+                    "glossaryTerms": ["Product Management", "Catalog"],
+                    "tags": ["categorical", "partition-key"],
+                    "enrichmentSource": "AI_GENERATED",
+                    "reviewStatus": "APPROVED"
+                  }
+                },
+                {
+                  "name": "unit_price",
+                  "type": "decimal(10,2)",
+                  "nullable": false,
+                  "businessMetadata": {
+                    "description": "Current retail price per unit",
+                    "synonyms": ["price", "list price", "retail price"],
+                    "glossaryTerms": ["Pricing", "Revenue"],
+                    "tags": ["financial", "metric"],
+                    "enrichmentSource": "AI_GENERATED",
+                    "reviewStatus": "APPROVED"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "inventory_snapshots",
+              "technicalMetadata": {
+                "columnCount": 6,
+                "partitionKeys": ["snapshot_date"],
+                "format": "iceberg",
+                "location": "s3://analytics-lake/inventory_snapshots/"
+              },
+              "businessMetadata": {
+                "description": "Daily inventory level snapshots by product and warehouse location",
+                "synonyms": ["stock levels", "inventory counts"],
+                "glossaryTerms": ["Inventory Management", "Supply Chain"],
+                "tags": ["operational", "time-series"],
+                "enrichmentSource": "AI_GENERATED",
+                "reviewStatus": "APPROVED"
+              },
+              "primaryKey": {
+                "columns": ["product_id", "warehouse_id", "snapshot_date"],
+                "source": "AI_INFERRED",
+                "confidence": 0.85
+              },
+              "foreignKeys": [
+                {
+                  "column": "product_id",
+                  "targetTable": "products",
+                  "targetColumn": "product_id",
+                  "source": "AI_INFERRED",
+                  "confidence": 0.94
+                }
+              ],
+              "columns": [
+                {
+                  "name": "product_id",
+                  "type": "string",
+                  "nullable": false,
+                  "businessMetadata": {
+                    "description": "Product identifier linking to the product catalog",
+                    "synonyms": ["SKU", "item ID"],
+                    "glossaryTerms": ["Product Management"],
+                    "tags": ["identifier", "join-key"],
+                    "enrichmentSource": "AI_GENERATED",
+                    "reviewStatus": "APPROVED"
+                  }
+                },
+                {
+                  "name": "warehouse_id",
+                  "type": "string",
+                  "nullable": false,
+                  "businessMetadata": {
+                    "description": "Identifier for the warehouse or fulfillment center",
+                    "synonyms": ["location ID", "FC ID"],
+                    "glossaryTerms": ["Supply Chain"],
+                    "tags": ["identifier"],
+                    "enrichmentSource": "AI_GENERATED",
+                    "reviewStatus": "APPROVED"
+                  }
+                },
+                {
+                  "name": "snapshot_date",
+                  "type": "date",
+                  "nullable": false,
+                  "businessMetadata": {
+                    "description": "Date of the inventory snapshot",
+                    "synonyms": ["count date", "as-of date"],
+                    "glossaryTerms": ["Inventory Management"],
+                    "tags": ["temporal", "partition-key"],
+                    "enrichmentSource": "AI_GENERATED",
+                    "reviewStatus": "APPROVED"
+                  }
+                },
+                {
+                  "name": "quantity_on_hand",
+                  "type": "int",
+                  "nullable": false,
+                  "businessMetadata": {
+                    "description": "Number of units physically available in the warehouse",
+                    "synonyms": ["stock count", "available units"],
+                    "glossaryTerms": ["Inventory Management"],
+                    "tags": ["metric", "operational"],
+                    "enrichmentSource": "AI_GENERATED",
+                    "reviewStatus": "APPROVED"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "datasourceId": "ds-def789",
+      "sourceType": "GLUE_DATABASE",
+      "databases": [
+        {
+          "name": "claims_federated",
+          "description": "Healthcare claims data federated from Redshift with curated SageMaker Catalog metadata",
+          "tables": [
+            {
+              "name": "claims",
+              "technicalMetadata": {
+                "columnCount": 18,
+                "partitionKeys": [],
+                "format": "redshift",
+                "location": "redshift://claims-cluster/claims_federated/claims"
+              },
+              "businessMetadata": {
+                "description": "Insurance claims submitted by healthcare providers for patient services",
+                "synonyms": ["insurance claims", "medical claims", "billing claims"],
+                "glossaryTerms": ["Claims Processing", "Revenue Cycle"],
+                "tags": ["PHI", "financial", "regulated"],
+                "enrichmentSource": "CATALOG_EXISTING",
+                "reviewStatus": "APPROVED"
+              },
+              "primaryKey": {
+                "columns": ["claim_id"],
+                "source": "DETERMINISTIC",
+                "confidence": 1.0
+              },
+              "foreignKeys": [
+                {
+                  "column": "patient_id",
+                  "targetTable": "patients",
+                  "targetColumn": "patient_id",
+                  "source": "DETERMINISTIC",
+                  "confidence": 1.0
+                },
+                {
+                  "column": "provider_id",
+                  "targetTable": "providers",
+                  "targetColumn": "provider_id",
+                  "source": "DETERMINISTIC",
+                  "confidence": 1.0
+                }
+              ],
+              "columns": [
+                {
+                  "name": "claim_id",
+                  "type": "varchar(36)",
+                  "nullable": false,
+                  "businessMetadata": {
+                    "description": "Unique identifier for an insurance claim",
+                    "synonyms": ["claim number", "claim reference"],
+                    "glossaryTerms": ["Claims Processing"],
+                    "tags": ["identifier"],
+                    "enrichmentSource": "CATALOG_EXISTING",
+                    "reviewStatus": "APPROVED"
+                  }
+                },
+                {
+                  "name": "patient_id",
+                  "type": "varchar(36)",
+                  "nullable": false,
+                  "businessMetadata": {
+                    "description": "Identifier for the patient receiving care",
+                    "synonyms": ["member ID", "enrollee ID"],
+                    "glossaryTerms": ["Patient Management"],
+                    "tags": ["PHI", "join-key"],
+                    "enrichmentSource": "CATALOG_EXISTING",
+                    "reviewStatus": "APPROVED"
+                  }
+                },
+                {
+                  "name": "provider_id",
+                  "type": "varchar(36)",
+                  "nullable": false,
+                  "businessMetadata": {
+                    "description": "Identifier for the healthcare provider who rendered services",
+                    "synonyms": ["doctor ID", "facility ID", "NPI"],
+                    "glossaryTerms": ["Provider Network"],
+                    "tags": ["identifier", "join-key"],
+                    "enrichmentSource": "CATALOG_EXISTING",
+                    "reviewStatus": "APPROVED"
+                  }
+                },
+                {
+                  "name": "diagnosis_code",
+                  "type": "varchar(10)",
+                  "nullable": false,
+                  "businessMetadata": {
+                    "description": "ICD-10 diagnosis code for the primary condition treated",
+                    "synonyms": ["ICD code", "diagnosis"],
+                    "glossaryTerms": ["Clinical Coding", "Claims Processing"],
+                    "tags": ["clinical", "coded-value"],
+                    "enrichmentSource": "AI_GENERATED",
+                    "reviewStatus": "APPROVED"
+                  }
+                },
+                {
+                  "name": "billed_amount",
+                  "type": "decimal(12,2)",
+                  "nullable": false,
+                  "businessMetadata": {
+                    "description": "Total amount billed by the provider for services rendered",
+                    "synonyms": ["charge amount", "submitted amount"],
+                    "glossaryTerms": ["Revenue Cycle", "Claims Processing"],
+                    "tags": ["financial", "metric"],
+                    "enrichmentSource": "CATALOG_EXISTING",
+                    "reviewStatus": "APPROVED"
+                  }
+                },
+                {
+                  "name": "claim_status",
+                  "type": "varchar(20)",
+                  "nullable": false,
+                  "businessMetadata": {
+                    "description": "Current adjudication status of the claim",
+                    "synonyms": ["status", "adjudication state"],
+                    "glossaryTerms": ["Claims Processing"],
+                    "tags": ["categorical", "workflow"],
+                    "enrichmentSource": "AI_GENERATED",
+                    "reviewStatus": "APPROVED"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "patients",
+              "technicalMetadata": {
+                "columnCount": 10,
+                "partitionKeys": [],
+                "format": "redshift",
+                "location": "redshift://claims-cluster/claims_federated/patients"
+              },
+              "businessMetadata": {
+                "description": "Patient demographic and enrollment information",
+                "synonyms": ["members", "enrollees", "beneficiaries"],
+                "glossaryTerms": ["Patient Management", "Enrollment"],
+                "tags": ["PHI", "master-data", "regulated"],
+                "enrichmentSource": "CATALOG_EXISTING",
+                "reviewStatus": "APPROVED"
+              },
+              "primaryKey": {
+                "columns": ["patient_id"],
+                "source": "DETERMINISTIC",
+                "confidence": 1.0
+              },
+              "foreignKeys": [],
+              "columns": [
+                {
+                  "name": "patient_id",
+                  "type": "varchar(36)",
+                  "nullable": false,
+                  "businessMetadata": {
+                    "description": "Unique identifier for a patient",
+                    "synonyms": ["member ID", "enrollee ID"],
+                    "glossaryTerms": ["Patient Management"],
+                    "tags": ["PHI", "identifier"],
+                    "enrichmentSource": "CATALOG_EXISTING",
+                    "reviewStatus": "APPROVED"
+                  }
+                },
+                {
+                  "name": "date_of_birth",
+                  "type": "date",
+                  "nullable": false,
+                  "businessMetadata": {
+                    "description": "Patient date of birth used for age calculation and eligibility",
+                    "synonyms": ["DOB", "birth date"],
+                    "glossaryTerms": ["Patient Management"],
+                    "tags": ["PHI", "temporal"],
+                    "enrichmentSource": "CATALOG_EXISTING",
+                    "reviewStatus": "APPROVED"
+                  }
+                },
+                {
+                  "name": "plan_id",
+                  "type": "varchar(20)",
+                  "nullable": false,
+                  "businessMetadata": {
+                    "description": "Insurance plan the patient is enrolled in",
+                    "synonyms": ["coverage plan", "benefit plan"],
+                    "glossaryTerms": ["Enrollment", "Benefits"],
+                    "tags": ["categorical", "join-key"],
+                    "enrichmentSource": "AI_GENERATED",
+                    "reviewStatus": "APPROVED"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "providers",
+              "technicalMetadata": {
+                "columnCount": 8,
+                "partitionKeys": [],
+                "format": "redshift",
+                "location": "redshift://claims-cluster/claims_federated/providers"
+              },
+              "businessMetadata": {
+                "description": "Healthcare provider directory with credentials and network status",
+                "synonyms": ["doctors", "facilities", "practitioners"],
+                "glossaryTerms": ["Provider Network"],
+                "tags": ["master-data", "reference"],
+                "enrichmentSource": "CATALOG_EXISTING",
+                "reviewStatus": "APPROVED"
+              },
+              "primaryKey": {
+                "columns": ["provider_id"],
+                "source": "DETERMINISTIC",
+                "confidence": 1.0
+              },
+              "foreignKeys": [],
+              "columns": [
+                {
+                  "name": "provider_id",
+                  "type": "varchar(36)",
+                  "nullable": false,
+                  "businessMetadata": {
+                    "description": "Unique identifier for a healthcare provider",
+                    "synonyms": ["NPI", "provider number"],
+                    "glossaryTerms": ["Provider Network"],
+                    "tags": ["identifier"],
+                    "enrichmentSource": "CATALOG_EXISTING",
+                    "reviewStatus": "APPROVED"
+                  }
+                },
+                {
+                  "name": "specialty",
+                  "type": "varchar(100)",
+                  "nullable": true,
+                  "businessMetadata": {
+                    "description": "Medical specialty or area of practice",
+                    "synonyms": ["practice area", "discipline"],
+                    "glossaryTerms": ["Provider Network"],
+                    "tags": ["categorical"],
+                    "enrichmentSource": "AI_GENERATED",
+                    "reviewStatus": "APPROVED"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

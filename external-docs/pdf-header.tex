@@ -1,0 +1,31 @@
+% Explicit package declarations
+\usepackage{fontspec}
+\usepackage{xcolor}
+\usepackage{amssymb}
+
+% Emoji/symbol replacements (cross-platform, no OS-specific fonts)
+\newcommand{\arrowsym}{$\rightarrow$}
+\newcommand{\checksym}{\textcolor[rgb]{0.2,0.7,0.2}{$\checkmark$}}
+\newcommand{\crosssym}{\textcolor[rgb]{0.8,0.2,0.2}{$\times$}}
+
+% Allow line breaks in inline code (\texttt) at underscores, hyphens, slashes
+\usepackage{etoolbox}
+\let\origtexttt\texttt
+\renewcommand{\texttt}[1]{%
+  \origtexttt{\hyphenchar\font=45\relax\sloppy #1}%
+}
+
+% Insert \allowbreak after underscores inside tt
+\makeatletter
+\let\orig@underscore\_
+\AtBeginEnvironment{longtable}{%
+  \small\sloppy
+  \def\_{\orig@underscore\hspace{0pt}}%
+}
+\makeatother
+
+% Table row spacing
+\renewcommand{\arraystretch}{1.4}
+
+% Global overflow prevention
+\setlength{\emergencystretch}{3em}

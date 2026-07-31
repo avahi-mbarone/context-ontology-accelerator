@@ -1,0 +1,18 @@
+[PrefixDeclaration]
+:       http://example.org/insurance#
+owl:    http://www.w3.org/2002/07/owl#
+rdf:    http://www.w3.org/1999/02/22-rdf-syntax-ns#
+rdfs:   http://www.w3.org/2000/01/rdf-schema#
+xsd:    http://www.w3.org/2001/XMLSchema#
+
+[MappingDeclaration] @collection [[
+
+mappingId   claim-mapping
+target      :claim{claim_id} a :Claim ; :claimId {claim_id}^^xsd:string ; :claimAmount {amount}^^xsd:decimal ; :claimStatus {status}^^xsd:string ; :filedDate {filed_date}^^xsd:string ; :forPolicy :policy{customer_id} .
+source      SELECT claim_id, customer_id, CAST(amount AS DECIMAL) as amount, status, filed_date FROM claims
+
+mappingId   customer-mapping
+target      :customer{customer_id} a :Customer ; :customerId {customer_id}^^xsd:string .
+source      SELECT DISTINCT customer_id FROM claims
+
+]]

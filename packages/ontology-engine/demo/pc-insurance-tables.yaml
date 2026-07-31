@@ -1,0 +1,444 @@
+tables:
+- name: Claim
+  columns:
+  - name: Claim_Identifier
+    ordinalPosition: 1
+    dataType: INT
+    constraint: NOT_NULL
+  - name: Catastrophe_Identifier
+    ordinalPosition: 2
+    dataType: INT
+  - name: Claim_Description
+    ordinalPosition: 3
+    dataType: VARCHAR
+    dataLength: 5000
+  - name: Claims_Made_Date
+    ordinalPosition: 4
+    dataType: DATETIME
+  - name: Company_Claim_Number
+    ordinalPosition: 5
+    dataType: VARCHAR
+    dataLength: 20
+  - name: Company_Subclaim_Number
+    ordinalPosition: 6
+    dataType: VARCHAR
+    dataLength: 5
+  - name: Insurable_Object_Identifier
+    ordinalPosition: 7
+    dataType: INT
+  - name: Occurrence_Identifier
+    ordinalPosition: 8
+    dataType: INT
+  - name: Entry_Into_Claims_Made_Program_Date
+    ordinalPosition: 9
+    dataType: DATETIME
+  - name: Claim_Open_Date
+    ordinalPosition: 10
+    dataType: DATETIME
+  - name: Claim_Close_Date
+    ordinalPosition: 11
+    dataType: DATETIME
+  - name: Claim_Reopen_Date
+    ordinalPosition: 12
+    dataType: DATETIME
+  - name: Claim_Status_Code
+    ordinalPosition: 13
+    dataType: VARCHAR
+    dataLength: 5
+  - name: Claim_Reported_Date
+    ordinalPosition: 14
+    dataType: DATETIME
+  primaryKey:
+  - Claim_Identifier
+  foreignKeys:
+  - columns:
+    - Catastrophe_Identifier
+    referredTable: Catastrophe
+    referredColumns:
+    - Catastrophe_Identifier
+  - columns:
+    - Claim_Identifier
+    referredTable: Claim
+    referredColumns:
+    - Claim_Identifier
+  - columns:
+    - Insurable_Object_Identifier
+    referredTable: Insurable_Object
+    referredColumns:
+    - Insurable_Object_Identifier
+  - columns:
+    - Occurrence_Identifier
+    referredTable: Occurrence
+    referredColumns:
+    - Occurrence_Identifier
+- name: Claim_Amount
+  columns:
+  - name: Claim_Amount_Identifier
+    ordinalPosition: 1
+    dataType: BIGINT
+    constraint: NOT_NULL
+  - name: Claim_Identifier
+    ordinalPosition: 2
+    dataType: INT
+    constraint: NOT_NULL
+  - name: Claim_Offer_Identifier
+    ordinalPosition: 3
+    dataType: INT
+  - name: Amount_Type_Code
+    ordinalPosition: 4
+    dataType: VARCHAR
+    dataLength: 20
+  - name: Event_Date
+    ordinalPosition: 5
+    dataType: DATETIME
+  - name: Claim_Amount
+    ordinalPosition: 6
+    dataType: DECIMAL
+    precision: 15
+    scale: 2
+  - name: Insurance_Type_Code
+    ordinalPosition: 7
+    dataType: CHAR
+    dataLength: 1
+  primaryKey:
+  - Claim_Amount_Identifier
+  foreignKeys:
+  - columns:
+    - Claim_Offer_Identifier
+    referredTable: Claim_Offer
+    referredColumns:
+    - Claim_Offer_Identifier
+  - columns:
+    - Claim_Identifier
+    referredTable: Claim
+    referredColumns:
+    - Claim_Identifier
+- name: Loss_Payment
+  columns:
+  - name: Claim_Amount_Identifier
+    ordinalPosition: 1
+    dataType: BIGINT
+    constraint: NOT_NULL
+  primaryKey:
+  - Claim_Amount_Identifier
+  foreignKeys:
+  - columns:
+    - Claim_Amount_Identifier
+    referredTable: Claim_Payment
+    referredColumns:
+    - Claim_Amount_Identifier
+- name: Loss_Reserve
+  columns:
+  - name: Claim_Amount_Identifier
+    ordinalPosition: 1
+    dataType: BIGINT
+    constraint: NOT_NULL
+  primaryKey:
+  - Claim_Amount_Identifier
+  foreignKeys:
+  - columns:
+    - Claim_Amount_Identifier
+    referredTable: Claim_Reserve
+    referredColumns:
+    - Claim_Amount_Identifier
+- name: Expense_Payment
+  columns:
+  - name: Claim_Amount_Identifier
+    ordinalPosition: 1
+    dataType: BIGINT
+    constraint: NOT_NULL
+  primaryKey:
+  - Claim_Amount_Identifier
+  foreignKeys:
+  - columns:
+    - Claim_Amount_Identifier
+    referredTable: Claim_Payment
+    referredColumns:
+    - Claim_Amount_Identifier
+- name: Expense_Reserve
+  columns:
+  - name: Claim_Amount_Identifier
+    ordinalPosition: 1
+    dataType: BIGINT
+    constraint: NOT_NULL
+  primaryKey:
+  - Claim_Amount_Identifier
+  foreignKeys:
+  - columns:
+    - Claim_Amount_Identifier
+    referredTable: Claim_Reserve
+    referredColumns:
+    - Claim_Amount_Identifier
+- name: Claim_Coverage
+  columns:
+  - name: Claim_Identifier
+    ordinalPosition: 1
+    dataType: INT
+    constraint: NOT_NULL
+  - name: Effective_Date
+    ordinalPosition: 2
+    dataType: DATETIME
+    constraint: NOT_NULL
+  - name: Policy_Coverage_Detail_Identifier
+    ordinalPosition: 3
+    dataType: INT
+    constraint: NOT_NULL
+  primaryKey:
+  - Claim_Identifier
+  - Effective_Date
+  - Policy_Coverage_Detail_Identifier
+  foreignKeys:
+  - columns:
+    - Claim_Identifier
+    referredTable: Claim
+    referredColumns:
+    - Claim_Identifier
+  - columns:
+    - Effective_Date
+    - Policy_Coverage_Detail_Identifier
+    referredTable: Policy_Coverage_Detail
+    referredColumns:
+    - Effective_Date
+    - Policy_Coverage_Detail_Identifier
+- name: Policy_Coverage_Detail
+  columns:
+  - name: Effective_Date
+    ordinalPosition: 1
+    dataType: DATETIME
+    constraint: NOT_NULL
+  - name: Policy_Coverage_Detail_Identifier
+    ordinalPosition: 2
+    dataType: INT
+    constraint: NOT_NULL
+  - name: Coverage_Identifier
+    ordinalPosition: 3
+    dataType: INT
+    constraint: NOT_NULL
+  - name: Insurable_Object_Identifier
+    ordinalPosition: 4
+    dataType: INT
+    constraint: NOT_NULL
+  - name: Policy_Identifier
+    ordinalPosition: 5
+    dataType: INT
+    constraint: NOT_NULL
+  - name: Coverage_Part_Code
+    ordinalPosition: 6
+    dataType: VARCHAR
+    dataLength: 20
+    constraint: NOT_NULL
+  - name: Coverage_Description
+    ordinalPosition: 7
+    dataType: VARCHAR
+    dataLength: 2000
+  - name: Expiration_Date
+    ordinalPosition: 8
+    dataType: DATETIME
+  - name: Coverage_Inclusion_Exclusion_Code
+    ordinalPosition: 9
+    dataType: CHAR
+    dataLength: 1
+  primaryKey:
+  - Effective_Date
+  - Policy_Coverage_Detail_Identifier
+  foreignKeys:
+  - columns:
+    - Insurable_Object_Identifier
+    referredTable: Insurable_Object
+    referredColumns:
+    - Insurable_Object_Identifier
+  - columns:
+    - Coverage_Identifier
+    referredTable: Coverage
+    referredColumns:
+    - Coverage_Identifier
+  - columns:
+    - Coverage_Part_Code
+    - Policy_Identifier
+    referredTable: Policy_Coverage_Part
+    referredColumns:
+    - Coverage_Part_Code
+    - Policy_Identifier
+- name: Policy
+  columns:
+  - name: Policy_Identifier
+    ordinalPosition: 1
+    dataType: INT
+    constraint: NOT_NULL
+  - name: Effective_Date
+    ordinalPosition: 2
+    dataType: DATETIME
+  - name: Expiration_Date
+    ordinalPosition: 3
+    dataType: DATETIME
+  - name: Policy_Number
+    ordinalPosition: 4
+    dataType: VARCHAR
+    dataLength: 50
+  - name: Status_Code
+    ordinalPosition: 5
+    dataType: VARCHAR
+    dataLength: 20
+  - name: Geographic_Location_Identifier
+    ordinalPosition: 6
+    dataType: INT
+  primaryKey:
+  - Policy_Identifier
+  foreignKeys:
+  - columns:
+    - Geographic_Location_Identifier
+    referredTable: Geographic_Location
+    referredColumns:
+    - Geographic_Location_Identifier
+  - columns:
+    - Policy_Identifier
+    referredTable: Agreement
+    referredColumns:
+    - Agreement_Identifier
+- name: Policy_Amount
+  columns:
+  - name: Policy_Amount_Identifier
+    ordinalPosition: 1
+    dataType: BIGINT
+    constraint: NOT_NULL
+  - name: Geographic_Location_Identifier
+    ordinalPosition: 2
+    dataType: INT
+    constraint: NOT_NULL
+  - name: Policy_Identifier
+    ordinalPosition: 3
+    dataType: INT
+  - name: Effective_Date
+    ordinalPosition: 4
+    dataType: DATETIME
+  - name: Amount_Type_Code
+    ordinalPosition: 5
+    dataType: VARCHAR
+    dataLength: 5
+  - name: Earning_Begin_Date
+    ordinalPosition: 6
+    dataType: DATETIME
+  - name: Earning_End_Date
+    ordinalPosition: 7
+    dataType: DATETIME
+  - name: Policy_Coverage_Detail_Identifier
+    ordinalPosition: 8
+    dataType: INT
+  - name: Policy_Amount
+    ordinalPosition: 9
+    dataType: DECIMAL
+    precision: 15
+    scale: 2
+  - name: Insurable_Object_Identifier
+    ordinalPosition: 10
+    dataType: INT
+  - name: Insurance_Type_Code
+    ordinalPosition: 11
+    dataType: CHAR
+    dataLength: 1
+  primaryKey:
+  - Policy_Amount_Identifier
+  foreignKeys:
+  - columns:
+    - Effective_Date
+    - Policy_Coverage_Detail_Identifier
+    referredTable: Policy_Coverage_Detail
+    referredColumns:
+    - Effective_Date
+    - Policy_Coverage_Detail_Identifier
+  - columns:
+    - Policy_Identifier
+    referredTable: Policy
+    referredColumns:
+    - Policy_Identifier
+  - columns:
+    - Geographic_Location_Identifier
+    referredTable: Geographic_Location
+    referredColumns:
+    - Geographic_Location_Identifier
+  - columns:
+    - Insurable_Object_Identifier
+    referredTable: Insurable_Object
+    referredColumns:
+    - Insurable_Object_Identifier
+- name: Agreement_Party_Role
+  columns:
+  - name: Agreement_Identifier
+    ordinalPosition: 1
+    dataType: INT
+    constraint: NOT_NULL
+  - name: Party_Identifier
+    ordinalPosition: 2
+    dataType: BIGINT
+    constraint: NOT_NULL
+  - name: Party_Role_Code
+    ordinalPosition: 3
+    dataType: VARCHAR
+    dataLength: 20
+    constraint: NOT_NULL
+  - name: Effective_Date
+    ordinalPosition: 4
+    dataType: DATETIME
+    constraint: NOT_NULL
+  - name: Expiration_Date
+    ordinalPosition: 5
+    dataType: DATETIME
+  primaryKey:
+  - Agreement_Identifier
+  - Party_Identifier
+  - Party_Role_Code
+  - Effective_Date
+  foreignKeys:
+  - columns:
+    - Agreement_Identifier
+    referredTable: Agreement
+    referredColumns:
+    - Agreement_Identifier
+  - columns:
+    - Party_Identifier
+    referredTable: Party
+    referredColumns:
+    - Party_Identifier
+  - columns:
+    - Party_Role_Code
+    referredTable: Party_Role
+    referredColumns:
+    - Party_Role_Code
+- name: Premium
+  columns:
+  - name: Policy_Amount_Identifier
+    ordinalPosition: 1
+    dataType: BIGINT
+    constraint: NOT_NULL
+  primaryKey:
+  - Policy_Amount_Identifier
+  foreignKeys:
+  - columns:
+    - Policy_Amount_Identifier
+    referredTable: Policy_Amount
+    referredColumns:
+    - Policy_Amount_Identifier
+- name: Catastrophe
+  columns:
+  - name: Catastrophe_Identifier
+    ordinalPosition: 1
+    dataType: INT
+    constraint: NOT_NULL
+  - name: Catastrophe_Type_Code
+    ordinalPosition: 2
+    dataType: VARCHAR
+    dataLength: 20
+  - name: Catastrophe_Name
+    ordinalPosition: 3
+    dataType: VARCHAR
+    dataLength: 100
+  - name: Industry_Catastrophe_Code
+    ordinalPosition: 4
+    dataType: VARCHAR
+    dataLength: 20
+  - name: Company_Catastrophe_Code
+    ordinalPosition: 5
+    dataType: VARCHAR
+    dataLength: 20
+  primaryKey:
+  - Catastrophe_Identifier

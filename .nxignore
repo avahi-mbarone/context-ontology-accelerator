@@ -1,0 +1,14 @@
+# external-docs (nx project "coa-docs") is the standalone Vite docs site.
+# It is intentionally NOT part of the root pnpm workspace (it has its own
+# pnpm-lock.yaml) and is built/deployed independently by the `pages` CI job
+# (ci/pages.yml). Without this ignore, nx's package-json plugin would still
+# discover it as a project, so `pnpm nx run-many -t build` (cdk-synth-main,
+# deploy-dev, etc.) would try to build it without its deps installed and fail
+# with "tsc: not found". Keep it out of the nx project graph.
+external-docs
+
+# Agent git worktrees live INSIDE the repo at .claude/worktrees/<id>. Each is a
+# full checkout, so nx's package-json plugin discovers duplicate projects
+# (infra, web-app, ts-shared, root) and fails the graph with
+# MultipleProjectsWithSameNameError. Keep transient worktrees out of the graph.
+.claude/worktrees

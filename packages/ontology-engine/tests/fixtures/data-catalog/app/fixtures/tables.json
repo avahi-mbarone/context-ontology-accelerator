@@ -1,0 +1,1688 @@
+[
+  {
+    "id": "tbl-001",
+    "name": "customers",
+    "displayName": "Customers",
+    "fullyQualifiedName": "retail_postgres.retail_prod.public.customers",
+    "description": "Core customer entity table. Stores profile, contact, and segmentation data for all registered customers.",
+    "tableType": "Regular",
+    "databaseSchema": {
+      "id": "schema-001",
+      "type": "databaseSchema",
+      "name": "public",
+      "fullyQualifiedName": "retail_postgres.retail_prod.public"
+    },
+    "columns": [
+      {
+        "name": "customer_id",
+        "dataType": "INT",
+        "description": "Unique identifier for the customer.",
+        "constraint": "PRIMARY_KEY",
+        "ordinalPosition": 1
+      },
+      {
+        "name": "email",
+        "dataType": "VARCHAR",
+        "dataLength": 255,
+        "description": "Customer email address. Used as login identifier.",
+        "constraint": "UNIQUE",
+        "ordinalPosition": 2,
+        "tags": [
+          {
+            "tagFQN": "PII.Sensitive",
+            "source": "Classification"
+          }
+        ]
+      },
+      {
+        "name": "first_name",
+        "dataType": "VARCHAR",
+        "dataLength": 100,
+        "description": "Customer first name.",
+        "ordinalPosition": 3,
+        "tags": [
+          {
+            "tagFQN": "PII.NonSensitive",
+            "source": "Classification"
+          }
+        ]
+      },
+      {
+        "name": "last_name",
+        "dataType": "VARCHAR",
+        "dataLength": 100,
+        "description": "Customer last name.",
+        "ordinalPosition": 4,
+        "tags": [
+          {
+            "tagFQN": "PII.NonSensitive",
+            "source": "Classification"
+          }
+        ]
+      },
+      {
+        "name": "phone",
+        "dataType": "VARCHAR",
+        "dataLength": 20,
+        "description": "Primary contact phone number.",
+        "ordinalPosition": 5,
+        "tags": [
+          {
+            "tagFQN": "PII.Sensitive",
+            "source": "Classification"
+          }
+        ]
+      },
+      {
+        "name": "customer_segment",
+        "dataType": "VARCHAR",
+        "dataLength": 50,
+        "description": "Business segmentation tier: 'standard', 'premium', 'enterprise'.",
+        "ordinalPosition": 6
+      },
+      {
+        "name": "lifetime_value",
+        "dataType": "DECIMAL",
+        "precision": 12,
+        "scale": 2,
+        "description": "Calculated total revenue attributed to this customer over their lifetime.",
+        "ordinalPosition": 7
+      },
+      {
+        "name": "created_at",
+        "dataType": "TIMESTAMP",
+        "description": "Timestamp when the customer record was created.",
+        "ordinalPosition": 8
+      },
+      {
+        "name": "updated_at",
+        "dataType": "TIMESTAMP",
+        "description": "Timestamp of last modification to the customer record.",
+        "ordinalPosition": 9
+      }
+    ],
+    "tableConstraints": [],
+    "tags": [
+      {
+        "tagFQN": "Domain.Retail",
+        "source": "Classification"
+      },
+      {
+        "tagFQN": "Confidentiality.Restricted",
+        "source": "Classification"
+      }
+    ]
+  },
+  {
+    "id": "tbl-002",
+    "name": "orders",
+    "displayName": "Orders",
+    "fullyQualifiedName": "retail_postgres.retail_prod.public.orders",
+    "description": "Transactional order records. Each row represents a single customer order with status tracking and financial totals.",
+    "tableType": "Regular",
+    "databaseSchema": {
+      "id": "schema-001",
+      "type": "databaseSchema",
+      "name": "public",
+      "fullyQualifiedName": "retail_postgres.retail_prod.public"
+    },
+    "columns": [
+      {
+        "name": "order_id",
+        "dataType": "INT",
+        "description": "Unique order identifier.",
+        "constraint": "PRIMARY_KEY",
+        "ordinalPosition": 1
+      },
+      {
+        "name": "customer_id",
+        "dataType": "INT",
+        "description": "Foreign key to customers table.",
+        "constraint": "NOT_NULL",
+        "ordinalPosition": 2
+      },
+      {
+        "name": "order_date",
+        "dataType": "TIMESTAMP",
+        "description": "Date and time the order was placed.",
+        "constraint": "NOT_NULL",
+        "ordinalPosition": 3
+      },
+      {
+        "name": "status",
+        "dataType": "VARCHAR",
+        "dataLength": 30,
+        "description": "Current order status: 'pending', 'confirmed', 'shipped', 'delivered', 'cancelled', 'returned'.",
+        "ordinalPosition": 4
+      },
+      {
+        "name": "subtotal",
+        "dataType": "DECIMAL",
+        "precision": 10,
+        "scale": 2,
+        "description": "Sum of line item prices before tax and shipping.",
+        "ordinalPosition": 5
+      },
+      {
+        "name": "tax_amount",
+        "dataType": "DECIMAL",
+        "precision": 10,
+        "scale": 2,
+        "description": "Total tax applied to the order.",
+        "ordinalPosition": 6
+      },
+      {
+        "name": "shipping_amount",
+        "dataType": "DECIMAL",
+        "precision": 10,
+        "scale": 2,
+        "description": "Shipping cost charged for the order.",
+        "ordinalPosition": 7
+      },
+      {
+        "name": "total_amount",
+        "dataType": "DECIMAL",
+        "precision": 10,
+        "scale": 2,
+        "description": "Final order total (subtotal + tax + shipping).",
+        "ordinalPosition": 8
+      },
+      {
+        "name": "shipping_address_id",
+        "dataType": "INT",
+        "description": "Foreign key to addresses table for delivery destination.",
+        "ordinalPosition": 9
+      },
+      {
+        "name": "created_at",
+        "dataType": "TIMESTAMP",
+        "description": "Record creation timestamp.",
+        "ordinalPosition": 10
+      }
+    ],
+    "tableConstraints": [
+      {
+        "constraintType": "FOREIGN_KEY",
+        "columns": [
+          "customer_id"
+        ],
+        "referredColumns": [
+          "retail_postgres.retail_prod.public.customers.customer_id"
+        ],
+        "relationshipType": "MANY_TO_ONE"
+      },
+      {
+        "constraintType": "FOREIGN_KEY",
+        "columns": [
+          "shipping_address_id"
+        ],
+        "referredColumns": [
+          "retail_postgres.retail_prod.public.addresses.address_id"
+        ],
+        "relationshipType": "MANY_TO_ONE"
+      }
+    ],
+    "tags": [
+      {
+        "tagFQN": "Domain.Retail",
+        "source": "Classification"
+      }
+    ]
+  },
+  {
+    "id": "tbl-003",
+    "name": "order_items",
+    "displayName": "Order Line Items",
+    "fullyQualifiedName": "retail_postgres.retail_prod.public.order_items",
+    "description": "Individual line items within an order. Links orders to products with quantity and pricing.",
+    "tableType": "Regular",
+    "databaseSchema": {
+      "id": "schema-001",
+      "type": "databaseSchema",
+      "name": "public",
+      "fullyQualifiedName": "retail_postgres.retail_prod.public"
+    },
+    "columns": [
+      {
+        "name": "order_item_id",
+        "dataType": "INT",
+        "description": "Unique line item identifier.",
+        "constraint": "PRIMARY_KEY",
+        "ordinalPosition": 1
+      },
+      {
+        "name": "order_id",
+        "dataType": "INT",
+        "description": "Foreign key to orders table.",
+        "constraint": "NOT_NULL",
+        "ordinalPosition": 2
+      },
+      {
+        "name": "product_id",
+        "dataType": "INT",
+        "description": "Foreign key to products table.",
+        "constraint": "NOT_NULL",
+        "ordinalPosition": 3
+      },
+      {
+        "name": "quantity",
+        "dataType": "INT",
+        "description": "Number of units ordered.",
+        "ordinalPosition": 4
+      },
+      {
+        "name": "unit_price",
+        "dataType": "DECIMAL",
+        "precision": 10,
+        "scale": 2,
+        "description": "Price per unit at time of purchase.",
+        "ordinalPosition": 5
+      },
+      {
+        "name": "discount_amount",
+        "dataType": "DECIMAL",
+        "precision": 10,
+        "scale": 2,
+        "description": "Discount applied to this line item.",
+        "ordinalPosition": 6
+      },
+      {
+        "name": "line_total",
+        "dataType": "DECIMAL",
+        "precision": 10,
+        "scale": 2,
+        "description": "Computed total: (quantity * unit_price) - discount_amount.",
+        "ordinalPosition": 7
+      }
+    ],
+    "tableConstraints": [
+      {
+        "constraintType": "FOREIGN_KEY",
+        "columns": [
+          "order_id"
+        ],
+        "referredColumns": [
+          "retail_postgres.retail_prod.public.orders.order_id"
+        ],
+        "relationshipType": "MANY_TO_ONE"
+      },
+      {
+        "constraintType": "FOREIGN_KEY",
+        "columns": [
+          "product_id"
+        ],
+        "referredColumns": [
+          "retail_postgres.retail_prod.public.products.product_id"
+        ],
+        "relationshipType": "MANY_TO_ONE"
+      }
+    ],
+    "tags": []
+  },
+  {
+    "id": "tbl-004",
+    "name": "products",
+    "displayName": "Products",
+    "fullyQualifiedName": "retail_postgres.retail_prod.public.products",
+    "description": "Product catalog. Contains product details, pricing, and category classification.",
+    "tableType": "Regular",
+    "databaseSchema": {
+      "id": "schema-001",
+      "type": "databaseSchema",
+      "name": "public",
+      "fullyQualifiedName": "retail_postgres.retail_prod.public"
+    },
+    "columns": [
+      {
+        "name": "product_id",
+        "dataType": "INT",
+        "description": "Unique product identifier.",
+        "constraint": "PRIMARY_KEY",
+        "ordinalPosition": 1
+      },
+      {
+        "name": "sku",
+        "dataType": "VARCHAR",
+        "dataLength": 50,
+        "description": "Stock keeping unit code. Unique across all products.",
+        "constraint": "UNIQUE",
+        "ordinalPosition": 2
+      },
+      {
+        "name": "name",
+        "dataType": "VARCHAR",
+        "dataLength": 255,
+        "description": "Product display name.",
+        "constraint": "NOT_NULL",
+        "ordinalPosition": 3
+      },
+      {
+        "name": "description",
+        "dataType": "TEXT",
+        "description": "Full product description for catalog display.",
+        "ordinalPosition": 4
+      },
+      {
+        "name": "category_id",
+        "dataType": "INT",
+        "description": "Foreign key to product_categories table.",
+        "ordinalPosition": 5
+      },
+      {
+        "name": "brand",
+        "dataType": "VARCHAR",
+        "dataLength": 100,
+        "description": "Product brand or manufacturer name.",
+        "ordinalPosition": 6
+      },
+      {
+        "name": "unit_price",
+        "dataType": "DECIMAL",
+        "precision": 10,
+        "scale": 2,
+        "description": "Current retail price per unit.",
+        "ordinalPosition": 7
+      },
+      {
+        "name": "cost_price",
+        "dataType": "DECIMAL",
+        "precision": 10,
+        "scale": 2,
+        "description": "Wholesale cost per unit from supplier.",
+        "ordinalPosition": 8
+      },
+      {
+        "name": "weight_kg",
+        "dataType": "DECIMAL",
+        "precision": 8,
+        "scale": 3,
+        "description": "Product weight in kilograms for shipping calculations.",
+        "ordinalPosition": 9
+      },
+      {
+        "name": "is_active",
+        "dataType": "BOOLEAN",
+        "description": "Whether the product is currently available for sale.",
+        "ordinalPosition": 10
+      },
+      {
+        "name": "created_at",
+        "dataType": "TIMESTAMP",
+        "description": "Record creation timestamp.",
+        "ordinalPosition": 11
+      }
+    ],
+    "tableConstraints": [
+      {
+        "constraintType": "FOREIGN_KEY",
+        "columns": [
+          "category_id"
+        ],
+        "referredColumns": [
+          "retail_postgres.retail_prod.public.product_categories.category_id"
+        ],
+        "relationshipType": "MANY_TO_ONE"
+      }
+    ],
+    "tags": [
+      {
+        "tagFQN": "Domain.Retail",
+        "source": "Classification"
+      }
+    ]
+  },
+  {
+    "id": "tbl-005",
+    "name": "product_categories",
+    "displayName": "Product Categories",
+    "fullyQualifiedName": "retail_postgres.retail_prod.public.product_categories",
+    "description": "Hierarchical product categorization. Supports nested categories via parent_category_id self-reference.",
+    "tableType": "Regular",
+    "databaseSchema": {
+      "id": "schema-001",
+      "type": "databaseSchema",
+      "name": "public",
+      "fullyQualifiedName": "retail_postgres.retail_prod.public"
+    },
+    "columns": [
+      {
+        "name": "category_id",
+        "dataType": "INT",
+        "description": "Unique category identifier.",
+        "constraint": "PRIMARY_KEY",
+        "ordinalPosition": 1
+      },
+      {
+        "name": "name",
+        "dataType": "VARCHAR",
+        "dataLength": 100,
+        "description": "Category display name.",
+        "constraint": "NOT_NULL",
+        "ordinalPosition": 2
+      },
+      {
+        "name": "parent_category_id",
+        "dataType": "INT",
+        "description": "Self-referencing FK for category hierarchy. NULL for top-level categories.",
+        "ordinalPosition": 3
+      },
+      {
+        "name": "depth",
+        "dataType": "INT",
+        "description": "Nesting depth in the category tree. 0 = root.",
+        "ordinalPosition": 4
+      }
+    ],
+    "tableConstraints": [
+      {
+        "constraintType": "FOREIGN_KEY",
+        "columns": [
+          "parent_category_id"
+        ],
+        "referredColumns": [
+          "retail_postgres.retail_prod.public.product_categories.category_id"
+        ],
+        "relationshipType": "MANY_TO_ONE"
+      }
+    ],
+    "tags": []
+  },
+  {
+    "id": "tbl-006",
+    "name": "addresses",
+    "displayName": "Addresses",
+    "fullyQualifiedName": "retail_postgres.retail_prod.public.addresses",
+    "description": "Customer addresses for billing and shipping. A customer may have multiple addresses.",
+    "tableType": "Regular",
+    "databaseSchema": {
+      "id": "schema-001",
+      "type": "databaseSchema",
+      "name": "public",
+      "fullyQualifiedName": "retail_postgres.retail_prod.public"
+    },
+    "columns": [
+      {
+        "name": "address_id",
+        "dataType": "INT",
+        "description": "Unique address identifier.",
+        "constraint": "PRIMARY_KEY",
+        "ordinalPosition": 1
+      },
+      {
+        "name": "customer_id",
+        "dataType": "INT",
+        "description": "Foreign key to customers table.",
+        "constraint": "NOT_NULL",
+        "ordinalPosition": 2
+      },
+      {
+        "name": "address_type",
+        "dataType": "VARCHAR",
+        "dataLength": 20,
+        "description": "Type of address: 'billing', 'shipping', 'both'.",
+        "ordinalPosition": 3
+      },
+      {
+        "name": "street_line_1",
+        "dataType": "VARCHAR",
+        "dataLength": 255,
+        "description": "Primary street address.",
+        "ordinalPosition": 4,
+        "tags": [
+          {
+            "tagFQN": "PII.Sensitive",
+            "source": "Classification"
+          }
+        ]
+      },
+      {
+        "name": "street_line_2",
+        "dataType": "VARCHAR",
+        "dataLength": 255,
+        "description": "Secondary address line (apt, suite, etc.).",
+        "ordinalPosition": 5
+      },
+      {
+        "name": "city",
+        "dataType": "VARCHAR",
+        "dataLength": 100,
+        "description": "City name.",
+        "ordinalPosition": 6
+      },
+      {
+        "name": "state_province",
+        "dataType": "VARCHAR",
+        "dataLength": 100,
+        "description": "State or province.",
+        "ordinalPosition": 7
+      },
+      {
+        "name": "postal_code",
+        "dataType": "VARCHAR",
+        "dataLength": 20,
+        "description": "Postal or ZIP code.",
+        "ordinalPosition": 8
+      },
+      {
+        "name": "country_code",
+        "dataType": "VARCHAR",
+        "dataLength": 2,
+        "description": "ISO 3166-1 alpha-2 country code.",
+        "ordinalPosition": 9
+      },
+      {
+        "name": "is_default",
+        "dataType": "BOOLEAN",
+        "description": "Whether this is the customer's default address for its type.",
+        "ordinalPosition": 10
+      }
+    ],
+    "tableConstraints": [
+      {
+        "constraintType": "FOREIGN_KEY",
+        "columns": [
+          "customer_id"
+        ],
+        "referredColumns": [
+          "retail_postgres.retail_prod.public.customers.customer_id"
+        ],
+        "relationshipType": "MANY_TO_ONE"
+      }
+    ],
+    "tags": [
+      {
+        "tagFQN": "Confidentiality.Restricted",
+        "source": "Classification"
+      }
+    ]
+  },
+  {
+    "id": "tbl-007",
+    "name": "inventory_levels",
+    "displayName": "Inventory Levels",
+    "fullyQualifiedName": "retail_postgres.retail_prod.inventory.inventory_levels",
+    "description": "Current stock levels per product per warehouse location. Updated in near-real-time by the warehouse management system.",
+    "tableType": "Regular",
+    "databaseSchema": {
+      "id": "schema-002",
+      "type": "databaseSchema",
+      "name": "inventory",
+      "fullyQualifiedName": "retail_postgres.retail_prod.inventory"
+    },
+    "columns": [
+      {
+        "name": "inventory_id",
+        "dataType": "INT",
+        "description": "Unique inventory record identifier.",
+        "constraint": "PRIMARY_KEY",
+        "ordinalPosition": 1
+      },
+      {
+        "name": "product_id",
+        "dataType": "INT",
+        "description": "Foreign key to products table.",
+        "constraint": "NOT_NULL",
+        "ordinalPosition": 2
+      },
+      {
+        "name": "warehouse_code",
+        "dataType": "VARCHAR",
+        "dataLength": 20,
+        "description": "Warehouse location code (e.g., 'SEA-01', 'ORD-02').",
+        "ordinalPosition": 3
+      },
+      {
+        "name": "quantity_on_hand",
+        "dataType": "INT",
+        "description": "Current physical stock count.",
+        "ordinalPosition": 4
+      },
+      {
+        "name": "quantity_reserved",
+        "dataType": "INT",
+        "description": "Units reserved for pending orders but not yet shipped.",
+        "ordinalPosition": 5
+      },
+      {
+        "name": "quantity_available",
+        "dataType": "INT",
+        "description": "Computed: quantity_on_hand - quantity_reserved.",
+        "ordinalPosition": 6
+      },
+      {
+        "name": "reorder_point",
+        "dataType": "INT",
+        "description": "Stock level that triggers a reorder from the supplier.",
+        "ordinalPosition": 7
+      },
+      {
+        "name": "last_counted_at",
+        "dataType": "TIMESTAMP",
+        "description": "Timestamp of last physical inventory count.",
+        "ordinalPosition": 8
+      }
+    ],
+    "tableConstraints": [
+      {
+        "constraintType": "FOREIGN_KEY",
+        "columns": [
+          "product_id"
+        ],
+        "referredColumns": [
+          "retail_postgres.retail_prod.public.products.product_id"
+        ],
+        "relationshipType": "MANY_TO_ONE"
+      },
+      {
+        "constraintType": "UNIQUE",
+        "columns": [
+          "product_id",
+          "warehouse_code"
+        ]
+      }
+    ],
+    "tags": [
+      {
+        "tagFQN": "Domain.SupplyChain",
+        "source": "Classification"
+      }
+    ]
+  },
+  {
+    "id": "tbl-008",
+    "name": "fact_daily_sales",
+    "displayName": "Daily Sales Fact",
+    "fullyQualifiedName": "snowflake_prod.analytics_warehouse.sales_mart.fact_daily_sales",
+    "description": "Aggregated daily sales fact table. Grain: one row per product per day. Pre-computed from transactional order data.",
+    "tableType": "Regular",
+    "databaseSchema": {
+      "id": "schema-003",
+      "type": "databaseSchema",
+      "name": "sales_mart",
+      "fullyQualifiedName": "snowflake_prod.analytics_warehouse.sales_mart"
+    },
+    "columns": [
+      {
+        "name": "sale_date",
+        "dataType": "DATE",
+        "description": "Calendar date of the aggregated sales.",
+        "constraint": "NOT_NULL",
+        "ordinalPosition": 1
+      },
+      {
+        "name": "product_id",
+        "dataType": "INT",
+        "description": "Dimension key to product.",
+        "constraint": "NOT_NULL",
+        "ordinalPosition": 2
+      },
+      {
+        "name": "customer_segment",
+        "dataType": "VARCHAR",
+        "dataLength": 50,
+        "description": "Customer segment at time of purchase.",
+        "ordinalPosition": 3
+      },
+      {
+        "name": "units_sold",
+        "dataType": "INT",
+        "description": "Total units sold for this product on this date.",
+        "ordinalPosition": 4
+      },
+      {
+        "name": "gross_revenue",
+        "dataType": "DECIMAL",
+        "precision": 12,
+        "scale": 2,
+        "description": "Total revenue before discounts and returns.",
+        "ordinalPosition": 5
+      },
+      {
+        "name": "discount_total",
+        "dataType": "DECIMAL",
+        "precision": 12,
+        "scale": 2,
+        "description": "Total discounts applied.",
+        "ordinalPosition": 6
+      },
+      {
+        "name": "net_revenue",
+        "dataType": "DECIMAL",
+        "precision": 12,
+        "scale": 2,
+        "description": "Revenue after discounts: gross_revenue - discount_total.",
+        "ordinalPosition": 7
+      },
+      {
+        "name": "order_count",
+        "dataType": "INT",
+        "description": "Number of distinct orders contributing to this row.",
+        "ordinalPosition": 8
+      }
+    ],
+    "tableConstraints": [
+      {
+        "constraintType": "PRIMARY_KEY",
+        "columns": [
+          "sale_date",
+          "product_id",
+          "customer_segment"
+        ]
+      }
+    ],
+    "tags": [
+      {
+        "tagFQN": "Domain.Analytics",
+        "source": "Classification"
+      }
+    ]
+  },
+  {
+    "id": "pc-001",
+    "name": "Claim",
+    "fullyQualifiedName": "pc_postgres.pc_insurance.claims.Claim",
+    "tableType": "Regular",
+    "databaseSchema": {
+      "id": "schema-pc-001",
+      "type": "databaseSchema",
+      "name": "claims",
+      "fullyQualifiedName": "pc_postgres.pc_insurance.claims"
+    },
+    "columns": [
+      {
+        "name": "Claim_Identifier",
+        "dataType": "INT",
+        "ordinalPosition": 1,
+        "constraint": "NOT_NULL"
+      },
+      {
+        "name": "Catastrophe_Identifier",
+        "dataType": "INT",
+        "ordinalPosition": 2
+      },
+      {
+        "name": "Claim_Description",
+        "dataType": "VARCHAR",
+        "ordinalPosition": 3,
+        "dataLength": 5000
+      },
+      {
+        "name": "Claims_Made_Date",
+        "dataType": "DATETIME",
+        "ordinalPosition": 4
+      },
+      {
+        "name": "Company_Claim_Number",
+        "dataType": "VARCHAR",
+        "ordinalPosition": 5,
+        "dataLength": 20
+      },
+      {
+        "name": "Company_Subclaim_Number",
+        "dataType": "VARCHAR",
+        "ordinalPosition": 6,
+        "dataLength": 5
+      },
+      {
+        "name": "Insurable_Object_Identifier",
+        "dataType": "INT",
+        "ordinalPosition": 7
+      },
+      {
+        "name": "Occurrence_Identifier",
+        "dataType": "INT",
+        "ordinalPosition": 8
+      },
+      {
+        "name": "Entry_Into_Claims_Made_Program_Date",
+        "dataType": "DATETIME",
+        "ordinalPosition": 9
+      },
+      {
+        "name": "Claim_Open_Date",
+        "dataType": "DATETIME",
+        "ordinalPosition": 10
+      },
+      {
+        "name": "Claim_Close_Date",
+        "dataType": "DATETIME",
+        "ordinalPosition": 11
+      },
+      {
+        "name": "Claim_Reopen_Date",
+        "dataType": "DATETIME",
+        "ordinalPosition": 12
+      },
+      {
+        "name": "Claim_Status_Code",
+        "dataType": "VARCHAR",
+        "ordinalPosition": 13,
+        "dataLength": 5
+      },
+      {
+        "name": "Claim_Reported_Date",
+        "dataType": "DATETIME",
+        "ordinalPosition": 14
+      }
+    ],
+    "tableConstraints": [
+      {
+        "constraintType": "PRIMARY_KEY",
+        "columns": [
+          "Claim_Identifier"
+        ]
+      },
+      {
+        "constraintType": "FOREIGN_KEY",
+        "columns": [
+          "Catastrophe_Identifier"
+        ],
+        "referredColumns": [
+          "pc_postgres.pc_insurance.claims.Catastrophe.Catastrophe_Identifier"
+        ]
+      },
+      {
+        "constraintType": "FOREIGN_KEY",
+        "columns": [
+          "Claim_Identifier"
+        ],
+        "referredColumns": [
+          "pc_postgres.pc_insurance.claims.Claim.Claim_Identifier"
+        ]
+      },
+      {
+        "constraintType": "FOREIGN_KEY",
+        "columns": [
+          "Insurable_Object_Identifier"
+        ],
+        "referredColumns": [
+          "pc_postgres.pc_insurance.claims.Insurable_Object.Insurable_Object_Identifier"
+        ]
+      },
+      {
+        "constraintType": "FOREIGN_KEY",
+        "columns": [
+          "Occurrence_Identifier"
+        ],
+        "referredColumns": [
+          "pc_postgres.pc_insurance.claims.Occurrence.Occurrence_Identifier"
+        ]
+      }
+    ],
+    "tags": []
+  },
+  {
+    "id": "pc-002",
+    "name": "Claim_Amount",
+    "fullyQualifiedName": "pc_postgres.pc_insurance.claims.Claim_Amount",
+    "tableType": "Regular",
+    "databaseSchema": {
+      "id": "schema-pc-001",
+      "type": "databaseSchema",
+      "name": "claims",
+      "fullyQualifiedName": "pc_postgres.pc_insurance.claims"
+    },
+    "columns": [
+      {
+        "name": "Claim_Amount_Identifier",
+        "dataType": "BIGINT",
+        "ordinalPosition": 1,
+        "constraint": "NOT_NULL"
+      },
+      {
+        "name": "Claim_Identifier",
+        "dataType": "INT",
+        "ordinalPosition": 2,
+        "constraint": "NOT_NULL"
+      },
+      {
+        "name": "Claim_Offer_Identifier",
+        "dataType": "INT",
+        "ordinalPosition": 3
+      },
+      {
+        "name": "Amount_Type_Code",
+        "dataType": "VARCHAR",
+        "ordinalPosition": 4,
+        "dataLength": 20
+      },
+      {
+        "name": "Event_Date",
+        "dataType": "DATETIME",
+        "ordinalPosition": 5
+      },
+      {
+        "name": "Claim_Amount",
+        "dataType": "DECIMAL",
+        "ordinalPosition": 6,
+        "precision": 15,
+        "scale": 2
+      },
+      {
+        "name": "Insurance_Type_Code",
+        "dataType": "CHAR",
+        "ordinalPosition": 7,
+        "dataLength": 1
+      }
+    ],
+    "tableConstraints": [
+      {
+        "constraintType": "PRIMARY_KEY",
+        "columns": [
+          "Claim_Amount_Identifier"
+        ]
+      },
+      {
+        "constraintType": "FOREIGN_KEY",
+        "columns": [
+          "Claim_Offer_Identifier"
+        ],
+        "referredColumns": [
+          "pc_postgres.pc_insurance.claims.Claim_Offer.Claim_Offer_Identifier"
+        ]
+      },
+      {
+        "constraintType": "FOREIGN_KEY",
+        "columns": [
+          "Claim_Identifier"
+        ],
+        "referredColumns": [
+          "pc_postgres.pc_insurance.claims.Claim.Claim_Identifier"
+        ]
+      }
+    ],
+    "tags": []
+  },
+  {
+    "id": "pc-003",
+    "name": "Loss_Payment",
+    "fullyQualifiedName": "pc_postgres.pc_insurance.claims.Loss_Payment",
+    "tableType": "Regular",
+    "databaseSchema": {
+      "id": "schema-pc-001",
+      "type": "databaseSchema",
+      "name": "claims",
+      "fullyQualifiedName": "pc_postgres.pc_insurance.claims"
+    },
+    "columns": [
+      {
+        "name": "Claim_Amount_Identifier",
+        "dataType": "BIGINT",
+        "ordinalPosition": 1,
+        "constraint": "NOT_NULL"
+      }
+    ],
+    "tableConstraints": [
+      {
+        "constraintType": "PRIMARY_KEY",
+        "columns": [
+          "Claim_Amount_Identifier"
+        ]
+      },
+      {
+        "constraintType": "FOREIGN_KEY",
+        "columns": [
+          "Claim_Amount_Identifier"
+        ],
+        "referredColumns": [
+          "pc_postgres.pc_insurance.claims.Claim_Payment.Claim_Amount_Identifier"
+        ]
+      }
+    ],
+    "tags": []
+  },
+  {
+    "id": "pc-004",
+    "name": "Loss_Reserve",
+    "fullyQualifiedName": "pc_postgres.pc_insurance.claims.Loss_Reserve",
+    "tableType": "Regular",
+    "databaseSchema": {
+      "id": "schema-pc-001",
+      "type": "databaseSchema",
+      "name": "claims",
+      "fullyQualifiedName": "pc_postgres.pc_insurance.claims"
+    },
+    "columns": [
+      {
+        "name": "Claim_Amount_Identifier",
+        "dataType": "BIGINT",
+        "ordinalPosition": 1,
+        "constraint": "NOT_NULL"
+      }
+    ],
+    "tableConstraints": [
+      {
+        "constraintType": "PRIMARY_KEY",
+        "columns": [
+          "Claim_Amount_Identifier"
+        ]
+      },
+      {
+        "constraintType": "FOREIGN_KEY",
+        "columns": [
+          "Claim_Amount_Identifier"
+        ],
+        "referredColumns": [
+          "pc_postgres.pc_insurance.claims.Claim_Reserve.Claim_Amount_Identifier"
+        ]
+      }
+    ],
+    "tags": []
+  },
+  {
+    "id": "pc-005",
+    "name": "Expense_Payment",
+    "fullyQualifiedName": "pc_postgres.pc_insurance.claims.Expense_Payment",
+    "tableType": "Regular",
+    "databaseSchema": {
+      "id": "schema-pc-001",
+      "type": "databaseSchema",
+      "name": "claims",
+      "fullyQualifiedName": "pc_postgres.pc_insurance.claims"
+    },
+    "columns": [
+      {
+        "name": "Claim_Amount_Identifier",
+        "dataType": "BIGINT",
+        "ordinalPosition": 1,
+        "constraint": "NOT_NULL"
+      }
+    ],
+    "tableConstraints": [
+      {
+        "constraintType": "PRIMARY_KEY",
+        "columns": [
+          "Claim_Amount_Identifier"
+        ]
+      },
+      {
+        "constraintType": "FOREIGN_KEY",
+        "columns": [
+          "Claim_Amount_Identifier"
+        ],
+        "referredColumns": [
+          "pc_postgres.pc_insurance.claims.Claim_Payment.Claim_Amount_Identifier"
+        ]
+      }
+    ],
+    "tags": []
+  },
+  {
+    "id": "pc-006",
+    "name": "Expense_Reserve",
+    "fullyQualifiedName": "pc_postgres.pc_insurance.claims.Expense_Reserve",
+    "tableType": "Regular",
+    "databaseSchema": {
+      "id": "schema-pc-001",
+      "type": "databaseSchema",
+      "name": "claims",
+      "fullyQualifiedName": "pc_postgres.pc_insurance.claims"
+    },
+    "columns": [
+      {
+        "name": "Claim_Amount_Identifier",
+        "dataType": "BIGINT",
+        "ordinalPosition": 1,
+        "constraint": "NOT_NULL"
+      }
+    ],
+    "tableConstraints": [
+      {
+        "constraintType": "PRIMARY_KEY",
+        "columns": [
+          "Claim_Amount_Identifier"
+        ]
+      },
+      {
+        "constraintType": "FOREIGN_KEY",
+        "columns": [
+          "Claim_Amount_Identifier"
+        ],
+        "referredColumns": [
+          "pc_postgres.pc_insurance.claims.Claim_Reserve.Claim_Amount_Identifier"
+        ]
+      }
+    ],
+    "tags": []
+  },
+  {
+    "id": "pc-007",
+    "name": "Claim_Coverage",
+    "fullyQualifiedName": "pc_postgres.pc_insurance.claims.Claim_Coverage",
+    "tableType": "Regular",
+    "databaseSchema": {
+      "id": "schema-pc-001",
+      "type": "databaseSchema",
+      "name": "claims",
+      "fullyQualifiedName": "pc_postgres.pc_insurance.claims"
+    },
+    "columns": [
+      {
+        "name": "Claim_Identifier",
+        "dataType": "INT",
+        "ordinalPosition": 1,
+        "constraint": "NOT_NULL"
+      },
+      {
+        "name": "Effective_Date",
+        "dataType": "DATETIME",
+        "ordinalPosition": 2,
+        "constraint": "NOT_NULL"
+      },
+      {
+        "name": "Policy_Coverage_Detail_Identifier",
+        "dataType": "INT",
+        "ordinalPosition": 3,
+        "constraint": "NOT_NULL"
+      }
+    ],
+    "tableConstraints": [
+      {
+        "constraintType": "PRIMARY_KEY",
+        "columns": [
+          "Claim_Identifier",
+          "Effective_Date",
+          "Policy_Coverage_Detail_Identifier"
+        ]
+      },
+      {
+        "constraintType": "FOREIGN_KEY",
+        "columns": [
+          "Claim_Identifier"
+        ],
+        "referredColumns": [
+          "pc_postgres.pc_insurance.claims.Claim.Claim_Identifier"
+        ]
+      },
+      {
+        "constraintType": "FOREIGN_KEY",
+        "columns": [
+          "Effective_Date",
+          "Policy_Coverage_Detail_Identifier"
+        ],
+        "referredColumns": [
+          "pc_postgres.pc_insurance.claims.Policy_Coverage_Detail.Effective_Date",
+          "pc_postgres.pc_insurance.claims.Policy_Coverage_Detail.Policy_Coverage_Detail_Identifier"
+        ]
+      }
+    ],
+    "tags": []
+  },
+  {
+    "id": "pc-008",
+    "name": "Policy_Coverage_Detail",
+    "fullyQualifiedName": "pc_postgres.pc_insurance.claims.Policy_Coverage_Detail",
+    "tableType": "Regular",
+    "databaseSchema": {
+      "id": "schema-pc-001",
+      "type": "databaseSchema",
+      "name": "claims",
+      "fullyQualifiedName": "pc_postgres.pc_insurance.claims"
+    },
+    "columns": [
+      {
+        "name": "Effective_Date",
+        "dataType": "DATETIME",
+        "ordinalPosition": 1,
+        "constraint": "NOT_NULL"
+      },
+      {
+        "name": "Policy_Coverage_Detail_Identifier",
+        "dataType": "INT",
+        "ordinalPosition": 2,
+        "constraint": "NOT_NULL"
+      },
+      {
+        "name": "Coverage_Identifier",
+        "dataType": "INT",
+        "ordinalPosition": 3,
+        "constraint": "NOT_NULL"
+      },
+      {
+        "name": "Insurable_Object_Identifier",
+        "dataType": "INT",
+        "ordinalPosition": 4,
+        "constraint": "NOT_NULL"
+      },
+      {
+        "name": "Policy_Identifier",
+        "dataType": "INT",
+        "ordinalPosition": 5,
+        "constraint": "NOT_NULL"
+      },
+      {
+        "name": "Coverage_Part_Code",
+        "dataType": "VARCHAR",
+        "ordinalPosition": 6,
+        "dataLength": 20,
+        "constraint": "NOT_NULL"
+      },
+      {
+        "name": "Coverage_Description",
+        "dataType": "VARCHAR",
+        "ordinalPosition": 7,
+        "dataLength": 2000
+      },
+      {
+        "name": "Expiration_Date",
+        "dataType": "DATETIME",
+        "ordinalPosition": 8
+      },
+      {
+        "name": "Coverage_Inclusion_Exclusion_Code",
+        "dataType": "CHAR",
+        "ordinalPosition": 9,
+        "dataLength": 1
+      }
+    ],
+    "tableConstraints": [
+      {
+        "constraintType": "PRIMARY_KEY",
+        "columns": [
+          "Effective_Date",
+          "Policy_Coverage_Detail_Identifier"
+        ]
+      },
+      {
+        "constraintType": "FOREIGN_KEY",
+        "columns": [
+          "Insurable_Object_Identifier"
+        ],
+        "referredColumns": [
+          "pc_postgres.pc_insurance.claims.Insurable_Object.Insurable_Object_Identifier"
+        ]
+      },
+      {
+        "constraintType": "FOREIGN_KEY",
+        "columns": [
+          "Coverage_Identifier"
+        ],
+        "referredColumns": [
+          "pc_postgres.pc_insurance.claims.Coverage.Coverage_Identifier"
+        ]
+      },
+      {
+        "constraintType": "FOREIGN_KEY",
+        "columns": [
+          "Coverage_Part_Code",
+          "Policy_Identifier"
+        ],
+        "referredColumns": [
+          "pc_postgres.pc_insurance.claims.Policy_Coverage_Part.Coverage_Part_Code",
+          "pc_postgres.pc_insurance.claims.Policy_Coverage_Part.Policy_Identifier"
+        ]
+      }
+    ],
+    "tags": []
+  },
+  {
+    "id": "pc-009",
+    "name": "Policy",
+    "fullyQualifiedName": "pc_postgres.pc_insurance.claims.Policy",
+    "tableType": "Regular",
+    "databaseSchema": {
+      "id": "schema-pc-001",
+      "type": "databaseSchema",
+      "name": "claims",
+      "fullyQualifiedName": "pc_postgres.pc_insurance.claims"
+    },
+    "columns": [
+      {
+        "name": "Policy_Identifier",
+        "dataType": "INT",
+        "ordinalPosition": 1,
+        "constraint": "NOT_NULL"
+      },
+      {
+        "name": "Effective_Date",
+        "dataType": "DATETIME",
+        "ordinalPosition": 2
+      },
+      {
+        "name": "Expiration_Date",
+        "dataType": "DATETIME",
+        "ordinalPosition": 3
+      },
+      {
+        "name": "Policy_Number",
+        "dataType": "VARCHAR",
+        "ordinalPosition": 4,
+        "dataLength": 50
+      },
+      {
+        "name": "Status_Code",
+        "dataType": "VARCHAR",
+        "ordinalPosition": 5,
+        "dataLength": 20
+      },
+      {
+        "name": "Geographic_Location_Identifier",
+        "dataType": "INT",
+        "ordinalPosition": 6
+      }
+    ],
+    "tableConstraints": [
+      {
+        "constraintType": "PRIMARY_KEY",
+        "columns": [
+          "Policy_Identifier"
+        ]
+      },
+      {
+        "constraintType": "FOREIGN_KEY",
+        "columns": [
+          "Geographic_Location_Identifier"
+        ],
+        "referredColumns": [
+          "pc_postgres.pc_insurance.claims.Geographic_Location.Geographic_Location_Identifier"
+        ]
+      },
+      {
+        "constraintType": "FOREIGN_KEY",
+        "columns": [
+          "Policy_Identifier"
+        ],
+        "referredColumns": [
+          "pc_postgres.pc_insurance.claims.Agreement.Agreement_Identifier"
+        ]
+      }
+    ],
+    "tags": []
+  },
+  {
+    "id": "pc-010",
+    "name": "Policy_Amount",
+    "fullyQualifiedName": "pc_postgres.pc_insurance.claims.Policy_Amount",
+    "tableType": "Regular",
+    "databaseSchema": {
+      "id": "schema-pc-001",
+      "type": "databaseSchema",
+      "name": "claims",
+      "fullyQualifiedName": "pc_postgres.pc_insurance.claims"
+    },
+    "columns": [
+      {
+        "name": "Policy_Amount_Identifier",
+        "dataType": "BIGINT",
+        "ordinalPosition": 1,
+        "constraint": "NOT_NULL"
+      },
+      {
+        "name": "Geographic_Location_Identifier",
+        "dataType": "INT",
+        "ordinalPosition": 2,
+        "constraint": "NOT_NULL"
+      },
+      {
+        "name": "Policy_Identifier",
+        "dataType": "INT",
+        "ordinalPosition": 3
+      },
+      {
+        "name": "Effective_Date",
+        "dataType": "DATETIME",
+        "ordinalPosition": 4
+      },
+      {
+        "name": "Amount_Type_Code",
+        "dataType": "VARCHAR",
+        "ordinalPosition": 5,
+        "dataLength": 5
+      },
+      {
+        "name": "Earning_Begin_Date",
+        "dataType": "DATETIME",
+        "ordinalPosition": 6
+      },
+      {
+        "name": "Earning_End_Date",
+        "dataType": "DATETIME",
+        "ordinalPosition": 7
+      },
+      {
+        "name": "Policy_Coverage_Detail_Identifier",
+        "dataType": "INT",
+        "ordinalPosition": 8
+      },
+      {
+        "name": "Policy_Amount",
+        "dataType": "DECIMAL",
+        "ordinalPosition": 9,
+        "precision": 15,
+        "scale": 2
+      },
+      {
+        "name": "Insurable_Object_Identifier",
+        "dataType": "INT",
+        "ordinalPosition": 10
+      },
+      {
+        "name": "Insurance_Type_Code",
+        "dataType": "CHAR",
+        "ordinalPosition": 11,
+        "dataLength": 1
+      }
+    ],
+    "tableConstraints": [
+      {
+        "constraintType": "PRIMARY_KEY",
+        "columns": [
+          "Policy_Amount_Identifier"
+        ]
+      },
+      {
+        "constraintType": "FOREIGN_KEY",
+        "columns": [
+          "Effective_Date",
+          "Policy_Coverage_Detail_Identifier"
+        ],
+        "referredColumns": [
+          "pc_postgres.pc_insurance.claims.Policy_Coverage_Detail.Effective_Date",
+          "pc_postgres.pc_insurance.claims.Policy_Coverage_Detail.Policy_Coverage_Detail_Identifier"
+        ]
+      },
+      {
+        "constraintType": "FOREIGN_KEY",
+        "columns": [
+          "Policy_Identifier"
+        ],
+        "referredColumns": [
+          "pc_postgres.pc_insurance.claims.Policy.Policy_Identifier"
+        ]
+      },
+      {
+        "constraintType": "FOREIGN_KEY",
+        "columns": [
+          "Geographic_Location_Identifier"
+        ],
+        "referredColumns": [
+          "pc_postgres.pc_insurance.claims.Geographic_Location.Geographic_Location_Identifier"
+        ]
+      },
+      {
+        "constraintType": "FOREIGN_KEY",
+        "columns": [
+          "Insurable_Object_Identifier"
+        ],
+        "referredColumns": [
+          "pc_postgres.pc_insurance.claims.Insurable_Object.Insurable_Object_Identifier"
+        ]
+      }
+    ],
+    "tags": []
+  },
+  {
+    "id": "pc-011",
+    "name": "Agreement_Party_Role",
+    "fullyQualifiedName": "pc_postgres.pc_insurance.claims.Agreement_Party_Role",
+    "tableType": "Regular",
+    "databaseSchema": {
+      "id": "schema-pc-001",
+      "type": "databaseSchema",
+      "name": "claims",
+      "fullyQualifiedName": "pc_postgres.pc_insurance.claims"
+    },
+    "columns": [
+      {
+        "name": "Agreement_Identifier",
+        "dataType": "INT",
+        "ordinalPosition": 1,
+        "constraint": "NOT_NULL"
+      },
+      {
+        "name": "Party_Identifier",
+        "dataType": "BIGINT",
+        "ordinalPosition": 2,
+        "constraint": "NOT_NULL"
+      },
+      {
+        "name": "Party_Role_Code",
+        "dataType": "VARCHAR",
+        "ordinalPosition": 3,
+        "dataLength": 20,
+        "constraint": "NOT_NULL"
+      },
+      {
+        "name": "Effective_Date",
+        "dataType": "DATETIME",
+        "ordinalPosition": 4,
+        "constraint": "NOT_NULL"
+      },
+      {
+        "name": "Expiration_Date",
+        "dataType": "DATETIME",
+        "ordinalPosition": 5
+      }
+    ],
+    "tableConstraints": [
+      {
+        "constraintType": "PRIMARY_KEY",
+        "columns": [
+          "Agreement_Identifier",
+          "Party_Identifier",
+          "Party_Role_Code",
+          "Effective_Date"
+        ]
+      },
+      {
+        "constraintType": "FOREIGN_KEY",
+        "columns": [
+          "Agreement_Identifier"
+        ],
+        "referredColumns": [
+          "pc_postgres.pc_insurance.claims.Agreement.Agreement_Identifier"
+        ]
+      },
+      {
+        "constraintType": "FOREIGN_KEY",
+        "columns": [
+          "Party_Identifier"
+        ],
+        "referredColumns": [
+          "pc_postgres.pc_insurance.claims.Party.Party_Identifier"
+        ]
+      },
+      {
+        "constraintType": "FOREIGN_KEY",
+        "columns": [
+          "Party_Role_Code"
+        ],
+        "referredColumns": [
+          "pc_postgres.pc_insurance.claims.Party_Role.Party_Role_Code"
+        ]
+      }
+    ],
+    "tags": []
+  },
+  {
+    "id": "pc-012",
+    "name": "Premium",
+    "fullyQualifiedName": "pc_postgres.pc_insurance.claims.Premium",
+    "tableType": "Regular",
+    "databaseSchema": {
+      "id": "schema-pc-001",
+      "type": "databaseSchema",
+      "name": "claims",
+      "fullyQualifiedName": "pc_postgres.pc_insurance.claims"
+    },
+    "columns": [
+      {
+        "name": "Policy_Amount_Identifier",
+        "dataType": "BIGINT",
+        "ordinalPosition": 1,
+        "constraint": "NOT_NULL"
+      }
+    ],
+    "tableConstraints": [
+      {
+        "constraintType": "PRIMARY_KEY",
+        "columns": [
+          "Policy_Amount_Identifier"
+        ]
+      },
+      {
+        "constraintType": "FOREIGN_KEY",
+        "columns": [
+          "Policy_Amount_Identifier"
+        ],
+        "referredColumns": [
+          "pc_postgres.pc_insurance.claims.Policy_Amount.Policy_Amount_Identifier"
+        ]
+      }
+    ],
+    "tags": []
+  },
+  {
+    "id": "pc-013",
+    "name": "Catastrophe",
+    "fullyQualifiedName": "pc_postgres.pc_insurance.claims.Catastrophe",
+    "tableType": "Regular",
+    "databaseSchema": {
+      "id": "schema-pc-001",
+      "type": "databaseSchema",
+      "name": "claims",
+      "fullyQualifiedName": "pc_postgres.pc_insurance.claims"
+    },
+    "columns": [
+      {
+        "name": "Catastrophe_Identifier",
+        "dataType": "INT",
+        "ordinalPosition": 1,
+        "constraint": "NOT_NULL"
+      },
+      {
+        "name": "Catastrophe_Type_Code",
+        "dataType": "VARCHAR",
+        "ordinalPosition": 2,
+        "dataLength": 20
+      },
+      {
+        "name": "Catastrophe_Name",
+        "dataType": "VARCHAR",
+        "ordinalPosition": 3,
+        "dataLength": 100
+      },
+      {
+        "name": "Industry_Catastrophe_Code",
+        "dataType": "VARCHAR",
+        "ordinalPosition": 4,
+        "dataLength": 20
+      },
+      {
+        "name": "Company_Catastrophe_Code",
+        "dataType": "VARCHAR",
+        "ordinalPosition": 5,
+        "dataLength": 20
+      }
+    ],
+    "tableConstraints": [
+      {
+        "constraintType": "PRIMARY_KEY",
+        "columns": [
+          "Catastrophe_Identifier"
+        ]
+      }
+    ],
+    "tags": []
+  }
+]
