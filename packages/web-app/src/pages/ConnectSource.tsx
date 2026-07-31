@@ -1,0 +1,1473 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+import React, { useCallback, useMemo, useRef, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
+import Wizard from "@cloudscape-design/components/wizard";
+import type { WizardProps } from "@cloudscape-design/components/wizard";
+import Alert from "@cloudscape-design/components/alert";
+import Box from "@cloudscape-design/components/box";
+import Button from "@cloudscape-design/components/button";
+import Checkbox from "@cloudscape-design/components/checkbox";
+import Container from "@cloudscape-design/components/container";
+import ExpandableSection from "@cloudscape-design/components/expandable-section";
+import FileUpload from "@cloudscape-design/components/file-upload";
+import FormField from "@cloudscape-design/components/form-field";
+import Header from "@cloudscape-design/components/header";
+import Input from "@cloudscape-design/components/input";
+import KeyValuePairs from "@cloudscape-design/components/key-value-pairs";
+import ProgressBar from "@cloudscape-design/components/progress-bar";
+import Select from "@cloudscape-design/components/select";
+import SpaceBetween from "@cloudscape-design/components/space-between";
+import Tabs from "@cloudscape-design/components/tabs";
+import Tiles from "@cloudscape-design/components/tiles";
+import Toggle from "@cloudscape-design/components/toggle";
+import { useCreateSource, useGetSourceUploadUrls } from "@api-hooks";
+import {
+  ControlPlaneServiceServiceException,
+  SourceType,
+} from "@coa/control-plane-client";
+
+/** Extract a human-readable message from any thrown value.
+ *  Smithy sets `message = "UnknownError"` for unmodeled error responses;
+ *  in that case we fall back to the raw response body's `error` field. */
+function extractErrorMessage(
+  err: unknown,
+  fallback = "An unexpected error occurred.",
+): string {
+  if (err instanceof ControlPlaneServiceServiceException) {
+    // For unmodeled errors the Smithy client sets message === name === "UnknownError".
+    if (err.message && err.message !== "UnknownError") return err.message;
+
+    // The Smithy REST-JSON deserializer copies unknown fields from the parsed
+    // response body onto the exception object directly. Our API returns
+    // {"error": "..."} so check for that field first.
+    const anyErr = err as unknown as Record<string, unknown>;
+    if (typeof anyErr["error"] === "string") return anyErr["error"];
+
+    // Try to pull the `error` field out of the raw HTTP response body.
+    const body = (err as unknown as { $response?: { body?: unknown } })
+      .$response?.body;
+    if (typeof body === "string") {
+      try {
+        const parsed = JSON.parse(body) as Record<string, unknown>;
+        if (typeof parsed.error === "string") return parsed.error;
+        if (typeof parsed.message === "string") return parsed.message;
+      } catch {
+        // body wasn't JSON — ignore
+      }
+    }
+    return fallback;
+  }
+  if (err instanceof Error && err.message) return err.message;
+  return fallback;
+}
+import {
+  SUPPORTED_UPLOAD_CONTENT_TYPES,
+  MAX_UPLOAD_FILES,
+  PREVIEW_DATABASE_ENGINES,
+} from "@coa/shared";
+import { S3_ARN_RE, validateS3Prefix } from "@utils/helpers";
+
+// ── Source type options ───────────────────────────────────────────────────────
+
+// Three-way selection shown in step 1
+type SourceKind = "GLUE_DATABASE" | "JDBC_DATABASE" | "DOCUMENTS";
+
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+// Every engine the backend has a dialect for. Engines withheld from the product
+// (PREVIEW_DATABASE_ENGINES) stay in this type and in DEFAULT_PORTS so their
+// form fields keep compiling — only ENGINE_OPTIONS below hides them.
+type DatabaseEngine =
+  | "POSTGRESQL"
+  | "MYSQL"
+  | "REDSHIFT"
+  | "ORACLE"
+  | "SQLSERVER"
+  | "SNOWFLAKE";
+
+const DEFAULT_PORTS: Record<DatabaseEngine, string> = {
+  POSTGRESQL: "5432",
+  MYSQL: "3306",
+  REDSHIFT: "5439",
+  ORACLE: "1521",
+  SQLSERVER: "1433",
+  SNOWFLAKE: "443",
+};
+
+const ALL_ENGINE_OPTIONS: Array<{ value: DatabaseEngine; label: string }> = [
+  { value: "POSTGRESQL", label: "PostgreSQL" },
+  { value: "MYSQL", label: "MySQL" },
+  { value: "REDSHIFT", label: "Redshift" },
+  { value: "ORACLE", label: "Oracle" },
+  { value: "SQLSERVER", label: "SQL Server" },
+  { value: "SNOWFLAKE", label: "Snowflake" },
+];
+
+// Selectable engines: everything except those withheld pending validation. To
+// offer an engine again, remove it from PREVIEW_DATABASE_ENGINES (@coa/shared)
+// — no change is needed in this file.
+const ENGINE_OPTIONS = ALL_ENGINE_OPTIONS.filter(
+  (o) => !PREVIEW_DATABASE_ENGINES.has(o.value),
+);
+
+// Engine list shown in the JDBC source-kind description. Derived from
+// ENGINE_OPTIONS so it can never advertise an engine the picker doesn't offer.
+const ENGINE_LABELS = ENGINE_OPTIONS.map((o) => o.label).join(", ");
+
+const EXT_TO_MIME: Record<string, string> = {
+  pdf: "application/pdf",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  txt: "text/plain",
+  md: "text/markdown",
+  markdown: "text/markdown",
+};
+
+function resolveContentType(file: File): string {
+  if (file.type && SUPPORTED_UPLOAD_CONTENT_TYPES.has(file.type))
+    return file.type;
+  const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
+  return EXT_TO_MIME[ext] ?? file.type;
+}
+
+// ── Form model ────────────────────────────────────────────────────────────────
+
+interface Model {
+  // Step 1 — source kind (replaces the old two-step category + type)
+  sourceKind: SourceKind;
+  // Glue database config
+  dbName: string;
+  glueCatalogId: string;
+  glueRegion: string;
+  glueDatabaseName: string;
+  glueTableFilter: string;
+  glueTableExcludeFilter: string;
+  glueAthenaDataCatalogName: string;
+  glueCrossAccountRoleArn: string;
+  glueExternalId: string;
+  // JDBC database config
+  jdbcName: string;
+  dbEngine: DatabaseEngine | null;
+  dbHost: string;
+  dbPort: string;
+  dbDatabaseName: string;
+  dbSchemaFilter: string;
+  dbSchemaExcludeFilter: string;
+  dbTableFilter: string;
+  dbTableExcludeFilter: string;
+  dbSecretArn: string;
+  dbWarehouse: string;
+  dbRole: string;
+  jdbcCrossAccountRoleArn: string;
+  jdbcExternalId: string;
+  // Shared database enrichment toggle — when false, the backend skips the
+  // AI metadata enrichment step entirely and only persists discovered
+  // technical metadata for steward review.
+  metadataEnrichmentEnabled: boolean;
+  // Documents config (upload tab)
+  docUploadName: string;
+  docUploadFiles: File[];
+  // Documents config (s3 tab)
+  docS3Name: string;
+  docS3BucketArn: string;
+  docS3Prefixes: { id: number; value: string }[];
+  docS3RoleArn: string;
+  // Shared extraction config
+  enableVersioning: boolean;
+  deletePrevVersions: boolean;
+}
+
+const initialModel: Model = {
+  sourceKind: "GLUE_DATABASE",
+  dbName: "",
+  glueCatalogId: "",
+  glueRegion: "us-east-1",
+  glueDatabaseName: "",
+  glueTableFilter: "",
+  glueTableExcludeFilter: "",
+  glueAthenaDataCatalogName: "",
+  glueCrossAccountRoleArn: "",
+  glueExternalId: "",
+  jdbcName: "",
+  dbEngine: null,
+  dbHost: "",
+  dbPort: "5432",
+  dbDatabaseName: "",
+  dbSchemaFilter: "",
+  dbSchemaExcludeFilter: "",
+  dbTableFilter: "",
+  dbTableExcludeFilter: "",
+  dbSecretArn: "",
+  dbWarehouse: "",
+  dbRole: "",
+  jdbcCrossAccountRoleArn: "",
+  jdbcExternalId: "",
+  metadataEnrichmentEnabled: true,
+  docUploadName: "",
+  docUploadFiles: [],
+  docS3Name: "",
+  docS3BucketArn: "",
+  docS3Prefixes: [{ id: 0, value: "" }],
+  docS3RoleArn: "",
+  enableVersioning: true,
+  deletePrevVersions: false,
+};
+
+// ── Validation ────────────────────────────────────────────────────────────────
+
+/**
+ * Validate cross-account IAM role ARN format.
+ * Backend IAM policy restricts AssumeRole to roles matching:
+ *   arn:aws:iam::*:role/{prefix}-{env}-datasource-access-*
+ * Default prefix is "coa", default env is "dev", so pattern becomes:
+ *   arn:aws:iam::ACCOUNT:role/coa-dev-datasource-access-SUFFIX
+ */
+function validateCrossAccountRoleArn(arn: string): string | undefined {
+  if (!arn.trim()) return undefined; // optional field
+  const roleArnPattern =
+    /^arn:aws:iam::\d{12}:role\/[a-zA-Z0-9_+=,.@-]+-datasource-access-[a-zA-Z0-9_+=,.@-]+$/;
+  if (!roleArnPattern.test(arn.trim())) {
+    return "Role ARN must match pattern: arn:aws:iam::ACCOUNT:role/{prefix}-datasource-access-*";
+  }
+  return undefined;
+}
+
+interface ValidationErrors {
+  step1?: string;
+  dbName?: string;
+  glueCatalogId?: string;
+  glueDatabaseName?: string;
+  glueCrossAccountRoleArn?: string;
+  jdbcName?: string;
+  dbEngine?: string;
+  dbHost?: string;
+  dbPort?: string;
+  dbDatabaseName?: string;
+  dbSecretArn?: string;
+  jdbcCrossAccountRoleArn?: string;
+  docUploadName?: string;
+  docFiles?: string;
+  docS3Name?: string;
+  docS3BucketArn?: string;
+  docS3Prefixes?: Record<number, string>;
+}
+
+function validateStep2(
+  model: Model,
+  docTab: "upload" | "s3",
+): ValidationErrors {
+  const errs: ValidationErrors = {};
+  if (model.sourceKind === "GLUE_DATABASE") {
+    if (!model.dbName.trim()) errs.dbName = "Name is required.";
+    if (!model.glueCatalogId.trim())
+      errs.glueCatalogId = "Catalog ID is required.";
+    if (!model.glueDatabaseName.trim())
+      errs.glueDatabaseName = "Database name is required.";
+    const roleErr = validateCrossAccountRoleArn(model.glueCrossAccountRoleArn);
+    if (roleErr) errs.glueCrossAccountRoleArn = roleErr;
+  } else if (model.sourceKind === "JDBC_DATABASE") {
+    if (!model.jdbcName.trim()) errs.jdbcName = "Name is required.";
+    if (!model.dbEngine) errs.dbEngine = "Select a database engine.";
+    if (!model.dbHost.trim()) errs.dbHost = "Host is required.";
+    if (!model.dbPort.trim()) errs.dbPort = "Port is required.";
+    if (!model.dbDatabaseName.trim())
+      errs.dbDatabaseName = "Database name is required.";
+    if (!model.dbSecretArn.trim())
+      errs.dbSecretArn = "Secrets Manager ARN is required.";
+    const roleErr = validateCrossAccountRoleArn(model.jdbcCrossAccountRoleArn);
+    if (roleErr) errs.jdbcCrossAccountRoleArn = roleErr;
+  } else {
+    // DOCUMENTS
+    if (docTab === "upload") {
+      if (!model.docUploadName.trim()) errs.docUploadName = "Name is required.";
+      if (model.docUploadFiles.length === 0)
+        errs.docFiles = "Select at least one file.";
+      else if (model.docUploadFiles.length > MAX_UPLOAD_FILES)
+        errs.docFiles = `Maximum ${MAX_UPLOAD_FILES} files.`;
+      else {
+        const bad = model.docUploadFiles.filter(
+          (f) => !SUPPORTED_UPLOAD_CONTENT_TYPES.has(resolveContentType(f)),
+        );
+        if (bad.length > 0)
+          errs.docFiles = `Unsupported: ${bad.map((f) => f.name).join(", ")}`;
+      }
+    } else {
+      if (!model.docS3Name.trim()) errs.docS3Name = "Name is required.";
+      if (!model.docS3BucketArn.trim())
+        errs.docS3BucketArn = "Bucket ARN is required.";
+      else if (!S3_ARN_RE.test(model.docS3BucketArn.trim()))
+        errs.docS3BucketArn = "Must be a valid S3 bucket ARN.";
+      const prefixErrs: Record<number, string> = {};
+      model.docS3Prefixes.forEach(({ id, value }) => {
+        if (!value.trim()) return;
+        const e = validateS3Prefix(value);
+        if (e) prefixErrs[id] = e;
+      });
+      if (Object.keys(prefixErrs).length > 0) errs.docS3Prefixes = prefixErrs;
+    }
+  }
+  if (Object.keys(errs).length > 0) errs.step1 = "Fix the errors above.";
+  return errs;
+}
+
+// ── Component ─────────────────────────────────────────────────────────────────
+
+export const ConnectSource: React.FC = () => {
+  const { namespaceId } = useParams<{ namespaceId: string }>();
+  const navigate = useNavigate();
+
+  const [model, setModel] = useState<Model>(initialModel);
+  const [activeStepIndex, setActiveStepIndex] = useState(0);
+  const [showErrors, setShowErrors] = useState<Record<number, boolean>>({});
+  const [docTab, setDocTab] = useState<"upload" | "s3">("upload");
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const prefixIdCounter = useRef(1);
+
+  const setField = <K extends keyof Model>(k: K, v: Model[K]) =>
+    setModel((prev) => ({ ...prev, [k]: v }));
+
+  const isDatabase =
+    model.sourceKind === "GLUE_DATABASE" ||
+    model.sourceKind === "JDBC_DATABASE";
+
+  // ── Mutations ──────────────────────────────────────────────────────
+  const {
+    mutate: createSource,
+    mutateAsync: createSourceAsync,
+    isPending: isCreating,
+    error: createError,
+  } = useCreateSource({
+    onSuccess: (result) => {
+      const sourceId = result.body?.sourceId;
+      navigate(
+        sourceId
+          ? `/namespaces/${namespaceId}/sources/${sourceId}`
+          : `/namespaces/${namespaceId}/sources`,
+      );
+    },
+  });
+
+  const { mutateAsync: getUploadUrls, isPending: isGettingUrls } =
+    useGetSourceUploadUrls(namespaceId ?? "");
+
+  const isSubmitting = isCreating || isGettingUrls || uploadProgress !== null;
+
+  // ── Prefix helpers ─────────────────────────────────────────────────
+  // Use functional setModel updates so these callbacks have stable identities
+  // and don't trigger a recompute of the steps useMemo on every render.
+  const updatePrefix = useCallback((id: number, value: string) => {
+    setModel((prev) => ({
+      ...prev,
+      docS3Prefixes: prev.docS3Prefixes.map((p) =>
+        p.id === id ? { ...p, value } : p,
+      ),
+    }));
+  }, []);
+  const addPrefix = useCallback(() => {
+    const id = prefixIdCounter.current++;
+    setModel((prev) => ({
+      ...prev,
+      docS3Prefixes: [...prev.docS3Prefixes, { id, value: "" }],
+    }));
+  }, []);
+  const removePrefix = useCallback((id: number) => {
+    setModel((prev) => ({
+      ...prev,
+      docS3Prefixes: prev.docS3Prefixes.filter((p) => p.id !== id),
+    }));
+  }, []);
+
+  // ── Submit ─────────────────────────────────────────────────────────
+  const handleSubmit = async () => {
+    const step2Errs = validateStep2(model, docTab);
+    if (step2Errs.step1) {
+      setShowErrors({ 0: true, 1: true });
+      setActiveStepIndex(1);
+      return;
+    }
+
+    if (model.sourceKind === "GLUE_DATABASE") {
+      createSource({
+        namespaceId: namespaceId!,
+        body: {
+          sourceType: SourceType.DATABASE,
+          databaseSource: {
+            name: model.dbName.trim(),
+            metadataEnrichmentEnabled: model.metadataEnrichmentEnabled,
+            glueConfiguration: {
+              catalogId: model.glueCatalogId.trim(),
+              region: model.glueRegion.trim(),
+              databaseName: model.glueDatabaseName.trim(),
+              tableFilter: model.glueTableFilter.trim() || undefined,
+              tableExcludeFilter:
+                model.glueTableExcludeFilter.trim() || undefined,
+              athenaDataCatalogName:
+                model.glueAthenaDataCatalogName.trim() || undefined,
+              crossAccountRoleArn:
+                model.glueCrossAccountRoleArn.trim() || undefined,
+              externalId: model.glueExternalId.trim() || undefined,
+            },
+          },
+        },
+      });
+      return;
+    }
+
+    if (model.sourceKind === "JDBC_DATABASE") {
+      createSource({
+        namespaceId: namespaceId!,
+        body: {
+          sourceType: SourceType.DATABASE,
+          databaseSource: {
+            name: model.jdbcName.trim(),
+            metadataEnrichmentEnabled: model.metadataEnrichmentEnabled,
+            jdbcConfiguration: {
+              engine: model.dbEngine!,
+              host: model.dbHost.trim(),
+              port: parseInt(model.dbPort, 10),
+              databaseName: model.dbDatabaseName.trim(),
+              schemaFilter: model.dbSchemaFilter.trim() || undefined,
+              schemaExcludeFilter:
+                model.dbSchemaExcludeFilter.trim() || undefined,
+              tableFilter: model.dbTableFilter.trim() || undefined,
+              tableExcludeFilter:
+                model.dbTableExcludeFilter.trim() || undefined,
+              credentialSecretArn: model.dbSecretArn.trim(),
+              warehouse: model.dbWarehouse.trim() || undefined,
+              role: model.dbRole.trim() || undefined,
+              crossAccountRoleArn:
+                model.jdbcCrossAccountRoleArn.trim() || undefined,
+              externalId: model.jdbcExternalId.trim() || undefined,
+            },
+          },
+        },
+      });
+      return;
+    }
+
+    // DOCUMENTS — s3 mode
+    if (docTab === "s3") {
+      createSource({
+        namespaceId: namespaceId!,
+        body: {
+          sourceType: SourceType.DOCUMENTS,
+          documentSource: {
+            name: model.docS3Name.trim(),
+            sourceBucketArn: model.docS3BucketArn.trim(),
+            s3Prefixes: model.docS3Prefixes
+              .map((p) => p.value.trim())
+              .filter(Boolean),
+            roleArn: model.docS3RoleArn.trim() || undefined,
+            extractionConfig: {
+              enableVersioning: model.enableVersioning,
+              deletePrevVersions: model.deletePrevVersions,
+            },
+          },
+        },
+      });
+      return;
+    }
+
+    // DOCUMENTS — upload mode
+    setUploadError(null);
+    setUploadProgress(0);
+    try {
+      const result = await getUploadUrls({
+        files: model.docUploadFiles.map((f) => ({
+          filename: f.name,
+          contentType: resolveContentType(f),
+        })),
+      });
+      const { s3Prefix, uploadUrls } = result;
+      if (!s3Prefix || !uploadUrls)
+        throw new Error("Invalid response: missing s3Prefix or uploadUrls.");
+
+      const fileMap = new Map(model.docUploadFiles.map((f) => [f.name, f]));
+      let completed = 0;
+      for (const entry of uploadUrls) {
+        if (!entry.filename)
+          throw new Error(
+            "Server returned an upload entry without a filename.",
+          );
+        const file = fileMap.get(entry.filename);
+        if (!file || !entry.uploadUrl)
+          throw new Error(`Missing upload URL for ${entry.filename}`);
+        const resp = await fetch(entry.uploadUrl, {
+          method: "PUT",
+          body: file,
+          headers: { "Content-Type": resolveContentType(file) },
+        });
+        if (!resp.ok)
+          throw new Error(
+            `Failed to upload ${entry.filename}: ${resp.status} ${resp.statusText}`,
+          );
+        completed++;
+        setUploadProgress(Math.round((completed / uploadUrls.length) * 90));
+      }
+      setUploadProgress(95);
+      await createSourceAsync({
+        namespaceId: namespaceId!,
+        body: {
+          sourceType: SourceType.DOCUMENTS,
+          documentSource: {
+            name: model.docUploadName.trim(),
+            s3Prefixes: [s3Prefix],
+            extractionConfig: {
+              enableVersioning: model.enableVersioning,
+              deletePrevVersions: model.deletePrevVersions,
+            },
+          },
+        },
+      });
+    } catch (err) {
+      setUploadProgress(null);
+      // If the error is from createSourceAsync (a ControlPlaneServiceServiceException),
+      // createError on the mutation already shows it — don't also set uploadError.
+      if (!(err instanceof ControlPlaneServiceServiceException)) {
+        setUploadError(
+          extractErrorMessage(err, "Upload failed. Please try again."),
+        );
+      }
+    }
+  };
+
+  // ── Steps ──────────────────────────────────────────────────────────
+  const step2Errs = useMemo(
+    () => (showErrors[1] ? validateStep2(model, docTab) : {}),
+    [showErrors, model, docTab],
+  );
+
+  const steps: WizardProps.Step[] = useMemo(() => {
+    // ── Step 1: Choose source type (3 tiles) ──────────────────────────
+    const step1: WizardProps.Step = {
+      title: "Choose source type",
+      description: "Select the type of source you want to connect.",
+      content: (
+        <Container header={<Header variant="h2">Source type</Header>}>
+          <Tiles
+            value={model.sourceKind}
+            onChange={({ detail }) =>
+              setField("sourceKind", detail.value as SourceKind)
+            }
+            items={[
+              {
+                value: "GLUE_DATABASE",
+                label: "Glue database",
+                description:
+                  "Connect to an existing AWS Glue Data Catalog database. Covers S3/Iceberg tables, DynamoDB, and Athena-federated JDBC sources.",
+              },
+              {
+                value: "JDBC_DATABASE",
+                label: "JDBC database",
+                description: `Connect directly to a relational database. Schema is discovered from information_schema. Supported engines: ${ENGINE_LABELS}.`,
+              },
+              {
+                value: "DOCUMENTS",
+                label: "Documents",
+                description:
+                  "Ingest unstructured documents from an S3 bucket or by uploading files directly.",
+              },
+            ]}
+          />
+        </Container>
+      ),
+    };
+
+    // ── Step 2: Configure connection ──────────────────────────────────
+    let step2: WizardProps.Step;
+
+    if (model.sourceKind === "GLUE_DATABASE") {
+      step2 = {
+        title: "Configure connection",
+        description: "Select the Glue Data Catalog database to connect.",
+        errorText: step2Errs.step1,
+        content: (
+          <SpaceBetween size="l">
+            <Container header={<Header variant="h2">Source details</Header>}>
+              <SpaceBetween size="l">
+                <FormField
+                  label={
+                    <>
+                      Source name{" "}
+                      <Box variant="span" color="text-status-error">
+                        *
+                      </Box>
+                    </>
+                  }
+                  description="A unique name for this source within the namespace."
+                  errorText={step2Errs.dbName}
+                >
+                  <Input
+                    value={model.dbName}
+                    onChange={({ detail }) => setField("dbName", detail.value)}
+                    placeholder="My Glue Database"
+                  />
+                </FormField>
+              </SpaceBetween>
+            </Container>
+            <Container header={<Header variant="h2">Glue database</Header>}>
+              <SpaceBetween size="l">
+                <FormField
+                  label={
+                    <>
+                      Catalog ID (AWS account){" "}
+                      <Box variant="span" color="text-status-error">
+                        *
+                      </Box>
+                    </>
+                  }
+                  errorText={step2Errs.glueCatalogId}
+                >
+                  <Input
+                    value={model.glueCatalogId}
+                    onChange={({ detail }) =>
+                      setField("glueCatalogId", detail.value)
+                    }
+                    placeholder="123456789012"
+                  />
+                </FormField>
+                <FormField
+                  label={
+                    <>
+                      Region{" "}
+                      <Box variant="span" color="text-status-error">
+                        *
+                      </Box>
+                    </>
+                  }
+                >
+                  <Input
+                    value={model.glueRegion}
+                    onChange={({ detail }) =>
+                      setField("glueRegion", detail.value)
+                    }
+                    placeholder="us-east-1"
+                  />
+                </FormField>
+                <FormField
+                  label={
+                    <>
+                      Database name{" "}
+                      <Box variant="span" color="text-status-error">
+                        *
+                      </Box>
+                    </>
+                  }
+                  description="Choose a Glue Data Catalog database to connect. All tables within the database will be scanned."
+                  errorText={step2Errs.glueDatabaseName}
+                >
+                  <Input
+                    value={model.glueDatabaseName}
+                    onChange={({ detail }) =>
+                      setField("glueDatabaseName", detail.value)
+                    }
+                    placeholder="my_glue_db"
+                  />
+                </FormField>
+              </SpaceBetween>
+            </Container>
+            <ExpandableSection
+              headerText="Advanced configuration"
+              variant="container"
+            >
+              <SpaceBetween size="l">
+                <FormField
+                  label="Table filter"
+                  description="Optional regex to include specific tables."
+                >
+                  <Input
+                    value={model.glueTableFilter}
+                    onChange={({ detail }) =>
+                      setField("glueTableFilter", detail.value)
+                    }
+                    placeholder="orders|customers"
+                  />
+                </FormField>
+                <FormField
+                  label="Table exclude filter"
+                  description="Optional regex to exclude specific tables."
+                >
+                  <Input
+                    value={model.glueTableExcludeFilter}
+                    onChange={({ detail }) =>
+                      setField("glueTableExcludeFilter", detail.value)
+                    }
+                    placeholder="tmp_.*|staging_.*"
+                  />
+                </FormField>
+                <FormField
+                  label="Athena DataCatalog name"
+                  description="Optional. Required for JDBC-backed Glue databases to enable federated queries."
+                >
+                  <Input
+                    value={model.glueAthenaDataCatalogName}
+                    onChange={({ detail }) =>
+                      setField("glueAthenaDataCatalogName", detail.value)
+                    }
+                    placeholder="my_federated_catalog"
+                  />
+                </FormField>
+                <FormField
+                  label="Cross-account role ARN"
+                  description="Optional. For a Glue catalog in another account, the IAM role Context Ontology Accelerator assumes to read catalog metadata. Must be named {prefix}-datasource-access-*."
+                  errorText={step2Errs.glueCrossAccountRoleArn}
+                >
+                  <Input
+                    value={model.glueCrossAccountRoleArn}
+                    onChange={({ detail }) =>
+                      setField("glueCrossAccountRoleArn", detail.value)
+                    }
+                    placeholder="arn:aws:iam::222222222222:role/coa-dev-datasource-access-acme"
+                  />
+                </FormField>
+                <FormField
+                  label="External ID"
+                  description="Optional. STS ExternalId required by the cross-account role's trust policy."
+                >
+                  <Input
+                    value={model.glueExternalId}
+                    onChange={({ detail }) =>
+                      setField("glueExternalId", detail.value)
+                    }
+                    placeholder="optional-external-id"
+                  />
+                </FormField>
+              </SpaceBetween>
+            </ExpandableSection>
+          </SpaceBetween>
+        ),
+      };
+    } else if (model.sourceKind === "JDBC_DATABASE") {
+      step2 = {
+        title: "Configure connection",
+        description: "Provide connection details for your JDBC database.",
+        errorText: step2Errs.step1,
+        content: (
+          <SpaceBetween size="l">
+            <Container header={<Header variant="h2">Source details</Header>}>
+              <FormField
+                label={
+                  <>
+                    Source name{" "}
+                    <Box variant="span" color="text-status-error">
+                      *
+                    </Box>
+                  </>
+                }
+                description="A unique name for this source within the namespace."
+                errorText={step2Errs.jdbcName}
+              >
+                <Input
+                  value={model.jdbcName}
+                  onChange={({ detail }) => setField("jdbcName", detail.value)}
+                  placeholder="My JDBC Database"
+                />
+              </FormField>
+            </Container>
+            <Container
+              header={<Header variant="h2">Connection settings</Header>}
+            >
+              <SpaceBetween size="l">
+                <FormField
+                  label={
+                    <>
+                      Database engine{" "}
+                      <Box variant="span" color="text-status-error">
+                        *
+                      </Box>
+                    </>
+                  }
+                  errorText={step2Errs.dbEngine}
+                >
+                  <Select
+                    selectedOption={
+                      model.dbEngine
+                        ? (ENGINE_OPTIONS.find(
+                            (o) => o.value === model.dbEngine,
+                          ) ?? null)
+                        : null
+                    }
+                    onChange={({ detail }) => {
+                      const eng = detail.selectedOption.value as DatabaseEngine;
+                      setField("dbEngine", eng);
+                      setField("dbPort", DEFAULT_PORTS[eng]);
+                    }}
+                    options={ENGINE_OPTIONS}
+                    placeholder="Select an engine"
+                  />
+                </FormField>
+                <FormField
+                  label={
+                    <>
+                      Host{" "}
+                      <Box variant="span" color="text-status-error">
+                        *
+                      </Box>
+                    </>
+                  }
+                  errorText={step2Errs.dbHost}
+                >
+                  <Input
+                    value={model.dbHost}
+                    onChange={({ detail }) => setField("dbHost", detail.value)}
+                    placeholder="db.example.com"
+                  />
+                </FormField>
+                <FormField
+                  label={
+                    <>
+                      Port{" "}
+                      <Box variant="span" color="text-status-error">
+                        *
+                      </Box>
+                    </>
+                  }
+                  errorText={step2Errs.dbPort}
+                >
+                  <Input
+                    value={model.dbPort}
+                    onChange={({ detail }) => setField("dbPort", detail.value)}
+                    inputMode="numeric"
+                  />
+                </FormField>
+                <FormField
+                  label={
+                    <>
+                      Database name{" "}
+                      <Box variant="span" color="text-status-error">
+                        *
+                      </Box>
+                    </>
+                  }
+                  errorText={step2Errs.dbDatabaseName}
+                >
+                  <Input
+                    value={model.dbDatabaseName}
+                    onChange={({ detail }) =>
+                      setField("dbDatabaseName", detail.value)
+                    }
+                    placeholder="my_database"
+                  />
+                </FormField>
+                <FormField
+                  label={
+                    <>
+                      Credential secret ARN{" "}
+                      <Box variant="span" color="text-status-error">
+                        *
+                      </Box>
+                    </>
+                  }
+                  description="AWS Secrets Manager secret containing the database username and password."
+                  errorText={step2Errs.dbSecretArn}
+                >
+                  <Input
+                    value={model.dbSecretArn}
+                    onChange={({ detail }) =>
+                      setField("dbSecretArn", detail.value)
+                    }
+                    placeholder="arn:aws:secretsmanager:..."
+                  />
+                </FormField>
+              </SpaceBetween>
+            </Container>
+            <ExpandableSection
+              headerText="Advanced configuration"
+              variant="container"
+            >
+              <SpaceBetween size="l">
+                <FormField
+                  label="Schema filter"
+                  description="Optional glob(s) (* ? [seq]) to include specific schemas. Separate multiple with | or ,."
+                >
+                  <Input
+                    value={model.dbSchemaFilter}
+                    onChange={({ detail }) =>
+                      setField("dbSchemaFilter", detail.value)
+                    }
+                    placeholder="public|sales"
+                  />
+                </FormField>
+                <FormField
+                  label="Schema exclude filter"
+                  description="Optional glob(s) (* ? [seq]) to exclude specific schemas. Separate multiple with | or ,."
+                >
+                  <Input
+                    value={model.dbSchemaExcludeFilter}
+                    onChange={({ detail }) =>
+                      setField("dbSchemaExcludeFilter", detail.value)
+                    }
+                    placeholder="temp_*|staging_*"
+                  />
+                </FormField>
+                <FormField
+                  label="Table filter"
+                  description="Optional glob(s) (* ? [seq]) to include specific tables. Separate multiple with | or ,."
+                >
+                  <Input
+                    value={model.dbTableFilter}
+                    onChange={({ detail }) =>
+                      setField("dbTableFilter", detail.value)
+                    }
+                    placeholder="orders|customers"
+                  />
+                </FormField>
+                <FormField
+                  label="Table exclude filter"
+                  description="Optional glob(s) (* ? [seq]) to exclude specific tables. Separate multiple with | or ,."
+                >
+                  <Input
+                    value={model.dbTableExcludeFilter}
+                    onChange={({ detail }) =>
+                      setField("dbTableExcludeFilter", detail.value)
+                    }
+                    placeholder="tmp_*|staging_*"
+                  />
+                </FormField>
+                {/* Snowflake-only fields. Currently unreachable — SNOWFLAKE is in
+                    PREVIEW_DATABASE_ENGINES so it isn't offered in ENGINE_OPTIONS.
+                    Kept intact so removing that token is all it takes to restore
+                    the full Snowflake connect flow. */}
+                {model.dbEngine === "SNOWFLAKE" && (
+                  <>
+                    <FormField
+                      label="Warehouse"
+                      description="Snowflake virtual warehouse for discovery queries."
+                    >
+                      <Input
+                        value={model.dbWarehouse}
+                        onChange={({ detail }) =>
+                          setField("dbWarehouse", detail.value)
+                        }
+                        placeholder="COMPUTE_WH"
+                      />
+                    </FormField>
+                    <FormField
+                      label="Role"
+                      description="Optional Snowflake RBAC role to assume."
+                    >
+                      <Input
+                        value={model.dbRole}
+                        onChange={({ detail }) =>
+                          setField("dbRole", detail.value)
+                        }
+                        placeholder="ACCOUNTADMIN"
+                      />
+                    </FormField>
+                  </>
+                )}
+                <FormField
+                  label="Cross-account role ARN"
+                  description="Optional. For a credential secret in another account, the IAM role Context Ontology Accelerator assumes to read it. Must be named {prefix}-datasource-access-*."
+                  errorText={step2Errs.jdbcCrossAccountRoleArn}
+                >
+                  <Input
+                    value={model.jdbcCrossAccountRoleArn}
+                    onChange={({ detail }) =>
+                      setField("jdbcCrossAccountRoleArn", detail.value)
+                    }
+                    placeholder="arn:aws:iam::222222222222:role/coa-dev-datasource-access-acme"
+                  />
+                </FormField>
+                <FormField
+                  label="External ID"
+                  description="Optional. STS ExternalId required by the cross-account role's trust policy."
+                >
+                  <Input
+                    value={model.jdbcExternalId}
+                    onChange={({ detail }) =>
+                      setField("jdbcExternalId", detail.value)
+                    }
+                    placeholder="optional-external-id"
+                  />
+                </FormField>
+              </SpaceBetween>
+            </ExpandableSection>
+          </SpaceBetween>
+        ),
+      };
+    } else {
+      // DOCUMENTS
+      step2 = {
+        title: "Configure source",
+        description: "Upload files or connect an S3 bucket.",
+        errorText: step2Errs.step1,
+        content: (
+          <SpaceBetween size="l">
+            <Tabs
+              activeTabId={docTab}
+              onChange={({ detail }) =>
+                setDocTab(detail.activeTabId as "upload" | "s3")
+              }
+              tabs={[
+                {
+                  id: "upload",
+                  label: "Upload files",
+                  content: (
+                    <SpaceBetween size="l">
+                      <Container
+                        header={<Header variant="h2">Source details</Header>}
+                      >
+                        <SpaceBetween size="l">
+                          <FormField
+                            label={
+                              <>
+                                Name{" "}
+                                <Box variant="span" color="text-status-error">
+                                  *
+                                </Box>
+                              </>
+                            }
+                            errorText={step2Errs.docUploadName}
+                          >
+                            <Input
+                              value={model.docUploadName}
+                              onChange={({ detail }) =>
+                                setField("docUploadName", detail.value)
+                              }
+                              placeholder="e.g. product-docs"
+                            />
+                          </FormField>
+                          <FormField
+                            label={
+                              <>
+                                Files{" "}
+                                <Box variant="span" color="text-status-error">
+                                  *
+                                </Box>
+                              </>
+                            }
+                            description="PDF, DOCX, TXT, or Markdown. Maximum 100 files."
+                            errorText={step2Errs.docFiles}
+                          >
+                            <FileUpload
+                              value={model.docUploadFiles}
+                              onChange={({ detail }) =>
+                                setField("docUploadFiles", detail.value)
+                              }
+                              accept=".pdf,.docx,.txt,.md,.markdown"
+                              multiple
+                              showFileSize
+                              showFileThumbnail={false}
+                              i18nStrings={{
+                                uploadButtonText: (m) =>
+                                  m ? "Choose files" : "Choose file",
+                                dropzoneText: (m) =>
+                                  m
+                                    ? "Drop files to upload"
+                                    : "Drop file to upload",
+                                removeFileAriaLabel: (i) =>
+                                  `Remove file ${i + 1}`,
+                                limitShowFewer: "Show fewer files",
+                                limitShowMore: "Show more files",
+                                errorIconAriaLabel: "Error",
+                              }}
+                            />
+                          </FormField>
+                          {uploadProgress !== null && (
+                            <ProgressBar
+                              value={uploadProgress}
+                              label="Uploading files"
+                              description={
+                                uploadProgress < 95
+                                  ? `Uploading ${model.docUploadFiles.length} file(s)...`
+                                  : "Triggering ingestion..."
+                              }
+                            />
+                          )}
+                        </SpaceBetween>
+                      </Container>
+                    </SpaceBetween>
+                  ),
+                },
+                {
+                  id: "s3",
+                  label: "S3 bucket",
+                  content: (
+                    <SpaceBetween size="l">
+                      <Container
+                        header={<Header variant="h2">Source details</Header>}
+                      >
+                        <SpaceBetween size="l">
+                          <FormField
+                            label={
+                              <>
+                                Name{" "}
+                                <Box variant="span" color="text-status-error">
+                                  *
+                                </Box>
+                              </>
+                            }
+                            errorText={step2Errs.docS3Name}
+                          >
+                            <Input
+                              value={model.docS3Name}
+                              onChange={({ detail }) =>
+                                setField("docS3Name", detail.value)
+                              }
+                              placeholder="e.g. product-docs"
+                            />
+                          </FormField>
+                          <FormField
+                            label={
+                              <>
+                                Source bucket ARN{" "}
+                                <Box variant="span" color="text-status-error">
+                                  *
+                                </Box>
+                              </>
+                            }
+                            errorText={step2Errs.docS3BucketArn}
+                          >
+                            <Input
+                              value={model.docS3BucketArn}
+                              onChange={({ detail }) =>
+                                setField("docS3BucketArn", detail.value)
+                              }
+                              placeholder="arn:aws:s3:::my-bucket"
+                            />
+                          </FormField>
+                          <FormField
+                            label="S3 prefixes"
+                            description="Leave blank to ingest the entire bucket."
+                          >
+                            <SpaceBetween size="xs">
+                              {model.docS3Prefixes.map(({ id, value }, idx) => (
+                                <SpaceBetween
+                                  key={id}
+                                  direction="horizontal"
+                                  size="xs"
+                                >
+                                  <FormField
+                                    errorText={step2Errs.docS3Prefixes?.[id]}
+                                  >
+                                    <Input
+                                      value={value}
+                                      onChange={({ detail }) =>
+                                        updatePrefix(id, detail.value)
+                                      }
+                                      placeholder="documents/"
+                                      ariaLabel={`S3 prefix ${idx + 1}`}
+                                    />
+                                  </FormField>
+                                  {model.docS3Prefixes.length > 1 && (
+                                    <Box padding={{ top: "xs" }}>
+                                      <Button
+                                        iconName="close"
+                                        variant="icon"
+                                        ariaLabel="Remove prefix"
+                                        onClick={() => removePrefix(id)}
+                                      />
+                                    </Box>
+                                  )}
+                                </SpaceBetween>
+                              ))}
+                              <Button iconName="add-plus" onClick={addPrefix}>
+                                Add prefix
+                              </Button>
+                            </SpaceBetween>
+                          </FormField>
+                        </SpaceBetween>
+                      </Container>
+                      <ExpandableSection
+                        headerText="Cross-account access (optional)"
+                        variant="container"
+                      >
+                        <FormField label="Role ARN">
+                          <Input
+                            value={model.docS3RoleArn}
+                            onChange={({ detail }) =>
+                              setField("docS3RoleArn", detail.value)
+                            }
+                            placeholder="arn:aws:iam::123456789012:role/my-role"
+                          />
+                        </FormField>
+                      </ExpandableSection>
+                    </SpaceBetween>
+                  ),
+                },
+              ]}
+            />
+            <ExpandableSection
+              headerText="Advanced options"
+              variant="container"
+            >
+              <SpaceBetween size="l">
+                <FormField description="Tracks document versions in Neptune.">
+                  <Toggle
+                    checked={model.enableVersioning}
+                    onChange={({ detail }) =>
+                      setField("enableVersioning", detail.checked)
+                    }
+                  >
+                    Enable versioning
+                  </Toggle>
+                </FormField>
+                <FormField description="Deletes previous versions after re-ingestion.">
+                  <Toggle
+                    checked={model.deletePrevVersions}
+                    disabled={!model.enableVersioning}
+                    onChange={({ detail }) =>
+                      setField("deletePrevVersions", detail.checked)
+                    }
+                  >
+                    Delete previous versions on re-ingestion
+                  </Toggle>
+                </FormField>
+              </SpaceBetween>
+            </ExpandableSection>
+          </SpaceBetween>
+        ),
+      };
+    }
+
+    // ── Step 3: Enrichment (database only) ────────────────────────────
+    const enrichmentStep: WizardProps.Step = {
+      title: "Configure enrichment",
+      description: "Choose AI enrichment features.",
+      content: (
+        <Container header={<Header variant="h2">Metadata enrichment</Header>}>
+          <SpaceBetween size="l">
+            <FormField description="When disabled, only technical metadata is captured during the scan. AI-generated descriptions, synonyms, glossary terms, and tags are skipped.">
+              <Toggle
+                checked={model.metadataEnrichmentEnabled}
+                onChange={({ detail }) =>
+                  setField("metadataEnrichmentEnabled", detail.checked)
+                }
+              >
+                Enable AI metadata enrichment
+              </Toggle>
+            </FormField>
+            <SpaceBetween size="s">
+              <Box variant="h4">Auto-generate descriptions</Box>
+              <Checkbox checked={model.metadataEnrichmentEnabled} disabled>
+                Generate business-friendly descriptions for tables and columns
+              </Checkbox>
+              <Box variant="small" color="text-body-secondary">
+                1–2 sentence business-friendly description per table and column.
+                Tagged AI_GENERATED.
+              </Box>
+            </SpaceBetween>
+            <SpaceBetween size="s">
+              <Box variant="h4">Generate synonyms</Box>
+              <Checkbox checked={model.metadataEnrichmentEnabled} disabled>
+                Generate business-language alternatives for tables and columns
+              </Checkbox>
+              <Box variant="small" color="text-body-secondary">
+                2–5 business-language alternatives per table and column.
+              </Box>
+            </SpaceBetween>
+            <SpaceBetween size="s">
+              <Box variant="h4">Generate glossary terms</Box>
+              <Checkbox checked={model.metadataEnrichmentEnabled} disabled>
+                Map tables and columns to business domain concepts
+              </Checkbox>
+              <Box variant="small" color="text-body-secondary">
+                1–3 business domain concepts (e.g., "Order Management",
+                "Revenue").
+              </Box>
+            </SpaceBetween>
+            <SpaceBetween size="s">
+              <Box variant="h4">Constraint discovery</Box>
+              <Checkbox checked={model.metadataEnrichmentEnabled} disabled>
+                Enable AI-assisted cross-table relationship inference
+              </Checkbox>
+              <Box variant="small" color="text-body-secondary">
+                AI-inferred relationships are tagged as AI_INFERRED and require
+                steward review before promotion.
+              </Box>
+            </SpaceBetween>
+          </SpaceBetween>
+        </Container>
+      ),
+    };
+
+    // ── Step 3/4: Review ──────────────────────────────────────────────
+    const reviewStep: WizardProps.Step = {
+      title: "Review and connect",
+      description: "Review your configuration before connecting.",
+      content: (
+        <SpaceBetween size="l">
+          <Container header={<Header variant="h2">Source type</Header>}>
+            <KeyValuePairs
+              columns={2}
+              items={[
+                {
+                  label: "Category",
+                  value:
+                    model.sourceKind === "GLUE_DATABASE"
+                      ? "Glue database"
+                      : model.sourceKind === "JDBC_DATABASE"
+                        ? "JDBC database"
+                        : "Documents",
+                },
+                {
+                  label: "Source name",
+                  value:
+                    model.sourceKind === "GLUE_DATABASE"
+                      ? model.dbName
+                      : model.sourceKind === "JDBC_DATABASE"
+                        ? model.jdbcName
+                        : docTab === "upload"
+                          ? model.docUploadName
+                          : model.docS3Name,
+                },
+              ]}
+            />
+          </Container>
+          {model.sourceKind === "GLUE_DATABASE" && (
+            <Container header={<Header variant="h2">Connection</Header>}>
+              <KeyValuePairs
+                columns={2}
+                items={[
+                  { label: "Catalog ID", value: model.glueCatalogId },
+                  { label: "Region", value: model.glueRegion },
+                  { label: "Database", value: model.glueDatabaseName },
+                  {
+                    label: "Table filter",
+                    value: model.glueTableFilter || "(none)",
+                  },
+                ]}
+              />
+            </Container>
+          )}
+          {model.sourceKind === "JDBC_DATABASE" && (
+            <Container header={<Header variant="h2">Connection</Header>}>
+              <KeyValuePairs
+                columns={2}
+                items={[
+                  {
+                    label: "Engine",
+                    value:
+                      ENGINE_OPTIONS.find((o) => o.value === model.dbEngine)
+                        ?.label ?? "—",
+                  },
+                  { label: "Host", value: model.dbHost },
+                  { label: "Port", value: model.dbPort },
+                  { label: "Database name", value: model.dbDatabaseName },
+                  {
+                    label: "Schema filter",
+                    value: model.dbSchemaFilter || "(none)",
+                  },
+                  {
+                    label: "Table filter",
+                    value: model.dbTableFilter || "(none)",
+                  },
+                  {
+                    label: "Authentication",
+                    value: "AWS Secrets Manager",
+                  },
+                ]}
+              />
+            </Container>
+          )}
+          {model.sourceKind === "DOCUMENTS" && (
+            <Container header={<Header variant="h2">Source</Header>}>
+              <KeyValuePairs
+                columns={2}
+                items={[
+                  {
+                    label: "Mode",
+                    value: docTab === "upload" ? "File upload" : "S3 bucket",
+                  },
+                  ...(docTab === "s3"
+                    ? [{ label: "Bucket ARN", value: model.docS3BucketArn }]
+                    : [
+                        {
+                          label: "Files",
+                          value: `${model.docUploadFiles.length} file(s)`,
+                        },
+                      ]),
+                ]}
+              />
+            </Container>
+          )}
+          {isDatabase && (
+            <Container
+              header={<Header variant="h2">Enrichment settings</Header>}
+            >
+              <KeyValuePairs
+                columns={2}
+                items={[
+                  {
+                    label: "Metadata enrichment",
+                    value: model.metadataEnrichmentEnabled
+                      ? "Enabled"
+                      : "Disabled",
+                  },
+                ]}
+              />
+            </Container>
+          )}
+          {isDatabase && (
+            <Alert type="info" header="What happens next">
+              {model.metadataEnrichmentEnabled
+                ? `Context Ontology Accelerator will start the scan and enrichment pipeline. The data source status changes to Scanning while technical metadata is discovered, then to Enriching while AI generates business descriptions, synonyms, glossary terms, and tags. Once complete, the status changes to Pending review — you will be notified to review and approve the enriched metadata before it is used for ontology induction.`
+                : `Context Ontology Accelerator will scan the source and discover technical metadata only. AI metadata enrichment is disabled, so no business descriptions, synonyms, glossary terms, or tags will be generated. The status changes to Scanning, then directly to Pending review for steward approval.`}
+            </Alert>
+          )}
+          {uploadError && (
+            <Alert type="error" header="Upload failed">
+              {uploadError}
+            </Alert>
+          )}
+          {createError && (
+            <Alert type="error" header="Failed to connect source">
+              {extractErrorMessage(createError)}
+            </Alert>
+          )}
+        </SpaceBetween>
+      ),
+    };
+
+    return isDatabase
+      ? [step1, step2, enrichmentStep, reviewStep]
+      : [step1, step2, reviewStep];
+  }, [
+    model,
+    docTab,
+    step2Errs,
+    uploadError,
+    createError,
+    uploadProgress,
+    isDatabase,
+    addPrefix,
+    removePrefix,
+    updatePrefix,
+  ]);
+
+  return (
+    <Wizard
+      steps={steps}
+      activeStepIndex={activeStepIndex}
+      onNavigate={({ detail }) => {
+        const requested = detail.requestedStepIndex;
+        if (requested > activeStepIndex) {
+          if (activeStepIndex === 1) {
+            const errs = validateStep2(model, docTab);
+            if (errs.step1) {
+              setShowErrors((p) => ({ ...p, 1: true }));
+              return;
+            }
+          }
+        }
+        setActiveStepIndex(requested);
+      }}
+      onCancel={() => navigate(`/namespaces/${namespaceId}/sources`)}
+      onSubmit={() => {
+        void handleSubmit();
+      }}
+      isLoadingNextStep={isSubmitting}
+      i18nStrings={{
+        stepNumberLabel: (n) => `Step ${n}`,
+        collapsedStepsLabel: (step, total) => `Step ${step} of ${total}`,
+        cancelButton: "Cancel",
+        previousButton: "Previous",
+        nextButton: "Next",
+        submitButton: "Connect source",
+      }}
+    />
+  );
+};

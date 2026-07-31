@@ -1,0 +1,20 @@
+line-length = 120
+target-version = "py312"
+[lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "D"]
+
+[lint.pydocstyle]
+convention = "google"
+
+[lint.per-file-ignores]
+# Docstrings (D) are required only on distributed library/service code under src/
+# and deployed handlers. Tests, demos, and dev scripts are exempt.
+"**/tests/**" = ["E402", "D"]
+"**/test/**" = ["D"]
+"**/demo/**" = ["D"]
+"**/demos/**" = ["D"]
+"**/scripts/**" = ["D"]
+# Benchmark strategies embed verbatim LLM prompt literals. Reflowing them to fit
+# the line limit would change the bytes sent to the model and break run-to-run
+# comparability, so E501 is exempt here too.
+"benchmarks/**" = ["D", "E501"]

@@ -1,0 +1,295 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Shared guardrail content screener using Bedrock ApplyGuardrail API.
+
+Provides both synchronous (Lambda/ingestion) and asynchronous (serve/query-time)
+interfaces for evaluating text content against a configured Bedrock guardrail
+without invoking a foundation model.
+
+Used by:
+- Ingestion pipeline (KG Build): screen chunks before indexing.
+- Serve layer (Synthesizer): screen retrieved chunks before prompt assembly.
+
+References:
+- AWS ApplyGuardrail API: https://docs.aws.amazon.com/bedrock/latest/userguide/guardrails-use-independent-api.html
+- SDO-188: indirect prompt injection via unscreened RAG content.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import random
+import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from typing import Any
+
+import boto3
+from botocore.config import Config as BotoConfig
+from botocore.exceptions import ClientError
+
+logger = logging.getLogger(__name__)
+
+# Guardrail policy paths covering all assessment types.
+# Consolidated from libs/common/bedrock.py and clients/bedrock.py (DRY).
+GUARDRAIL_POLICY_PATHS: list[tuple[str, str]] = [
+    ("topicPolicy", "topics"),
+    ("contentPolicy", "filters"),
+    ("wordPolicy", "customWords"),
+    ("wordPolicy", "managedWordLists"),
+    ("sensitiveInformationPolicy", "piiEntities"),
+    ("sensitiveInformationPolicy", "regexes"),
+]
+
+# Retry configuration matching project patterns (opensearch_vector._oss_retry).
+_MAX_RETRIES = 3
+_INITIAL_BACKOFF_S = 0.2
+_MAX_BACKOFF_S = 2.0
+
+_EXECUTOR = ThreadPoolExecutor(max_workers=5, thread_name_prefix="guardrail-screen")
+
+
+def assessment_has_block(assessment: dict) -> bool:
+    """Check if a guardrail assessment contains any BLOCKED action.
+
+    Shared utility, consolidating duplicated logic from bedrock.py modules.
+    """
+    try:
+        return any(
+            item.get("action") == "BLOCKED"
+            for policy_key, items_key in GUARDRAIL_POLICY_PATHS
+            for item in assessment.get(policy_key, {}).get(items_key, [])
+        )
+    except (TypeError, AttributeError):
+        return False
+
+
+@dataclass(frozen=True)
+class ScreeningResult:
+    """Result of screening a single text content block.
+
+    Attributes:
+        text_index: Position of this text in the input batch (0-based).
+        passed: True if content is safe to use, False if intervened.
+        action: Raw guardrail action ("NONE" or "GUARDRAIL_INTERVENED").
+        intervention_reason: Human-readable reason when intervened.
+        assessment: Full assessment trace when outputScope=FULL (for debugging/quarantine).
+    """
+
+    text_index: int
+    passed: bool
+    action: str
+    intervention_reason: str | None = None
+    assessment: dict[str, Any] | None = None
+
+
+class GuardrailScreenerError(Exception):
+    """Raised when the screener is permanently unavailable after retries."""
+
+
+class GuardrailScreener:
+    """Screens text content via Bedrock ApplyGuardrail API.
+
+    Provides both sync and async interfaces for use in Lambda (ingestion)
+    and async serve (query-time) contexts respectively.
+
+    Args:
+        guardrail_id: Bedrock guardrail identifier (retrieval guardrail).
+        guardrail_version: Guardrail version string.
+        region: AWS region. Defaults to AWS_REGION env var.
+    """
+
+    def __init__(
+        self,
+        guardrail_id: str,
+        guardrail_version: str | None = None,
+        region: str | None = None,
+    ) -> None:
+        """Store guardrail coordinates and defer client creation until first use (see class Args)."""
+        self._guardrail_id = guardrail_id
+        self._guardrail_version = guardrail_version or os.environ.get("BEDROCK_GUARDRAIL_VERSION", "DRAFT")
+        self._region = region or os.environ.get("AWS_REGION", "us-east-1")
+        self._client: Any = None
+
+    def _get_client(self):
+        if self._client is None:
+            self._client = boto3.client(
+                "bedrock-runtime",
+                region_name=self._region,
+                config=BotoConfig(
+                    read_timeout=10,
+                    connect_timeout=5,
+                    retries={"max_attempts": 1},
+                ),
+            )
+        return self._client
+
+    def screen_texts(self, texts: list[str], *, source: str = "INPUT") -> list[ScreeningResult]:
+        """Evaluate texts against the guardrail (synchronous, for Lambda).
+
+        NOTE: ApplyGuardrail evaluates ALL content blocks as a single input.
+        Multiple texts in one call are concatenated, not evaluated independently.
+        For per-document screening, call with one text at a time.
+        When called with multiple texts, the single overall result is applied
+        to all texts (conservative: if any triggers, all are marked as failed).
+
+        Args:
+            texts: List of text strings to evaluate.
+            source: "INPUT" for content entering the system, "OUTPUT" for responses.
+
+        Returns:
+            ScreeningResult per text in the same order as input.
+
+        Raises:
+            GuardrailScreenerError: After exhausting retries on transient errors.
+        """
+        if not texts:
+            return []
+
+        content = [{"text": {"text": t}} for t in texts]
+        response = self._call_with_retry(content, source)
+        return self._parse_response(response, len(texts))
+
+    async def ascreen_texts(self, texts: list[str], *, source: str = "INPUT") -> list[ScreeningResult]:
+        """Evaluate texts against the guardrail (async, for serve layer).
+
+        Runs the synchronous API call in a thread pool executor.
+
+        Args:
+            texts: List of text strings to evaluate (max 10 per call).
+            source: "INPUT" or "OUTPUT".
+
+        Returns:
+            ScreeningResult per text in the same order as input.
+
+        Raises:
+            GuardrailScreenerError: After exhausting retries on transient errors.
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(_EXECUTOR, self.screen_texts, texts)
+
+    def _call_with_retry(self, content: list[dict], source: str) -> dict:
+        """Call ApplyGuardrail with exponential backoff on transient errors."""
+        attempt = 0
+        while True:
+            try:
+                client = self._get_client()
+                return client.apply_guardrail(
+                    guardrailIdentifier=self._guardrail_id,
+                    guardrailVersion=self._guardrail_version,
+                    source=source,
+                    content=content,
+                    outputScope="FULL",
+                )
+            except ClientError as e:
+                error_code = e.response.get("Error", {}).get("Code", "")
+                status_code = e.response.get("ResponseMetadata", {}).get("HTTPStatusCode", 0)
+
+                is_transient = error_code in ("ThrottlingException", "TooManyRequestsException") or status_code >= 500
+
+                if not is_transient or attempt >= _MAX_RETRIES:
+                    logger.error(
+                        "guardrail_screener_failed",
+                        extra={
+                            "error_code": error_code,
+                            "status_code": status_code,
+                            "attempts": attempt + 1,
+                        },
+                    )
+                    raise GuardrailScreenerError(
+                        f"ApplyGuardrail failed after {attempt + 1} attempts: {error_code}"
+                    ) from e
+
+                backoff = min(_MAX_BACKOFF_S, _INITIAL_BACKOFF_S * (2**attempt)) + random.uniform(0, 0.1)
+                logger.warning(
+                    "guardrail_screener_retry",
+                    extra={
+                        "error_code": error_code,
+                        "attempt": attempt + 1,
+                        "backoff_s": round(backoff, 3),
+                    },
+                )
+                time.sleep(backoff)
+                attempt += 1
+            except Exception as e:
+                logger.error("guardrail_screener_unexpected_error", extra={"error": str(e)})
+                raise GuardrailScreenerError(f"Unexpected error calling ApplyGuardrail: {e}") from e
+
+    def _parse_response(self, response: dict, expected_count: int) -> list[ScreeningResult]:
+        """Parse ApplyGuardrail response into ScreeningResult list.
+
+        ApplyGuardrail evaluates all content blocks as one input and returns
+        a single overall action + assessment. We apply the overall result to
+        all texts uniformly. For per-text granularity, callers should invoke
+        screen_texts() with one text at a time.
+        """
+        action = response.get("action", "NONE")
+        assessments = response.get("assessments", [])
+
+        # Single overall action applies to all texts in the batch.
+        if action == "NONE":
+            return [ScreeningResult(text_index=i, passed=True, action="NONE") for i in range(expected_count)]
+
+        # GUARDRAIL_INTERVENED covers two very different outcomes:
+        #   1. A genuine security BLOCK (content/topic/word policy) — quarantine.
+        #   2. Benign PII ANONYMIZATION (masking a name/email/phone) — must NOT
+        #      quarantine. Dropping every document that merely mentions a person
+        #      guts knowledge-graph / ontology construction, whose primary payload
+        #      IS named entities and their relationships.
+        # Only a real block should fail screening; use the shared assessment_has_block
+        # predicate (already used by the Converse-based paths) across all assessments.
+        assessment = assessments[0] if assessments else {}
+        reason = self._extract_intervention_reason(assessment) if assessment else "unknown"
+        # Quarantine only on a real block. Fail CLOSED if there is no assessment
+        # to inspect (anomalous with outputScope=FULL): we cannot prove the
+        # intervention was benign anonymization, so treat it as a block.
+        blocked = (not assessments) or any(assessment_has_block(a) for a in assessments)
+
+        if not blocked:
+            # Anonymize-only (or no blocking policy fired): safe to use. The
+            # intervention_reason still records what was masked for observability.
+            return [
+                ScreeningResult(
+                    text_index=i,
+                    passed=True,
+                    action=action,
+                    intervention_reason=reason,
+                    assessment=assessment,
+                )
+                for i in range(expected_count)
+            ]
+
+        return [
+            ScreeningResult(
+                text_index=i,
+                passed=False,
+                action="GUARDRAIL_INTERVENED",
+                intervention_reason=reason,
+                assessment=assessment,
+            )
+            for i in range(expected_count)
+        ]
+
+    @staticmethod
+    def _extract_intervention_reason(assessment: dict) -> str:
+        """Extract a human-readable reason from an assessment trace.
+
+        Reports every policy item with a non-NONE action, including PII
+        ANONYMIZED entries — not just BLOCKED ones. A guardrail that only
+        anonymizes PII previously logged the unhelpful "unknown" reason
+        because no item was BLOCKED.
+        """
+        reasons: list[str] = []
+        for policy_key, items_key in GUARDRAIL_POLICY_PATHS:
+            items = assessment.get(policy_key, {}).get(items_key, [])
+            for item in items:
+                item_action = item.get("action")
+                if item_action and item_action != "NONE":
+                    item_type = item.get("type", item.get("name", "unknown"))
+                    confidence = item.get("confidence", "")
+                    suffix = f"({confidence})" if confidence else ""
+                    reasons.append(f"{policy_key}.{items_key}:{item_type}:{item_action}{suffix}")
+        return "; ".join(reasons) if reasons else "unknown"

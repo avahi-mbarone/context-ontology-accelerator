@@ -1,0 +1,96 @@
+[
+  {
+    "id": "db-001",
+    "name": "retail_prod",
+    "displayName": "Retail Production Database",
+    "fullyQualifiedName": "retail_postgres.retail_prod",
+    "description": "Primary production database for the retail e-commerce platform. Contains transactional data for customers, orders, products, and inventory.",
+    "service": {
+      "id": "svc-001",
+      "type": "databaseService",
+      "name": "retail_postgres",
+      "fullyQualifiedName": "retail_postgres",
+      "serviceType": "Postgres"
+    },
+    "tags": [
+      {
+        "tagFQN": "Domain.Retail",
+        "source": "Classification"
+      },
+      {
+        "tagFQN": "Tier.Tier1",
+        "source": "Classification"
+      }
+    ],
+    "owners": [
+      {
+        "id": "user-001",
+        "type": "user",
+        "name": "data_engineering"
+      }
+    ]
+  },
+  {
+    "id": "db-002",
+    "name": "analytics_warehouse",
+    "displayName": "Analytics Data Warehouse",
+    "fullyQualifiedName": "snowflake_prod.analytics_warehouse",
+    "description": "Snowflake data warehouse containing transformed and aggregated data for business intelligence and reporting.",
+    "service": {
+      "id": "svc-002",
+      "type": "databaseService",
+      "name": "snowflake_prod",
+      "fullyQualifiedName": "snowflake_prod",
+      "serviceType": "Snowflake"
+    },
+    "tags": [
+      {
+        "tagFQN": "Domain.Analytics",
+        "source": "Classification"
+      },
+      {
+        "tagFQN": "Tier.Tier2",
+        "source": "Classification"
+      }
+    ],
+    "owners": [
+      {
+        "id": "user-002",
+        "type": "user",
+        "name": "analytics_team"
+      }
+    ]
+  },
+  {
+    "id": "db-pc-v2-001",
+    "name": "pc_insurance",
+    "displayName": "P&C Insurance Database (v2)",
+    "fullyQualifiedName": "pc_postgres.pc_insurance",
+    "description": "",
+    "service": {
+      "id": "svc-pc-v2-001",
+      "type": "databaseService",
+      "name": "pc_postgres",
+      "fullyQualifiedName": "pc_postgres",
+      "serviceType": "Postgres"
+    },
+    "tags": [],
+    "owners": []
+  },
+  {
+    "id": "db-pc-001",
+    "name": "pc_insurance",
+    "displayName": "P&C Insurance Database (v2)",
+    "fullyQualifiedName": "pc_postgres.pc_insurance",
+    "description": "",
+    "service": {
+      "id": "svc-pc-001",
+      "type": "databaseService",
+      "name": "pc_postgres",
+      "fullyQualifiedName": "pc_postgres",
+      "serviceType": "Postgres"
+    },
+    "tags": [],
+    "owners": []
+  }
+]

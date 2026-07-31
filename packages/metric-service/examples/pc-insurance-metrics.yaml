@@ -1,0 +1,155 @@
+osi_spec_version: "1.0"
+
+datasets:
+  - name: pc_insurance.claim
+    data_source_id: f2f4304d-72e0-48ce-aa8a-20ec05fc15d6
+    description: "Insurance claims filed by policyholders"
+    synonyms:
+      - claims
+      - insurance claims
+
+  - name: pc_insurance.claim_amount
+    data_source_id: f2f4304d-72e0-48ce-aa8a-20ec05fc15d6
+    description: "Financial amounts associated with claims (reserves, payments)"
+
+  - name: pc_insurance.policy
+    data_source_id: f2f4304d-72e0-48ce-aa8a-20ec05fc15d6
+    description: "Insurance policies"
+    synonyms:
+      - policies
+      - insurance policies
+
+  - name: pc_insurance.policy_amount
+    data_source_id: f2f4304d-72e0-48ce-aa8a-20ec05fc15d6
+    description: "Financial amounts associated with policies (premiums, limits)"
+
+  - name: pc_insurance.catastrophe
+    data_source_id: f2f4304d-72e0-48ce-aa8a-20ec05fc15d6
+    description: "Catastrophe events (hurricanes, floods, wildfires)"
+    synonyms:
+      - catastrophes
+      - CAT events
+      - natural disasters
+
+metrics:
+  - name: total_loss_reserve
+    description: "Total outstanding loss reserve across all claims"
+    expression:
+      dialects:
+        - dialect: ANSI_SQL
+          expression: "SELECT SUM(ca.claim_amount) FROM pc_insurance.claim_amount ca INNER JOIN pc_insurance.loss_reserve lr ON ca.claim_amount_identifier = lr.claim_amount_identifier"
+    ai_context:
+      synonyms:
+        - "loss reserves"
+        - "outstanding reserves"
+        - "total reserves"
+      instructions: "Use when the user asks about loss reserves, outstanding reserves, or reserve amounts. This covers only loss reserves, not expense reserves."
+      examples:
+        - "What is the total loss reserve?"
+        - "How much do we have in reserves?"
+        - "Show me outstanding loss reserves"
+    x_coa:
+      data_source_id: f2f4304d-72e0-48ce-aa8a-20ec05fc15d6
+      source_table: pc_insurance.claim_amount
+      unit: USD
+      return_type: decimal
+      ontology_concepts:
+        - LossReserve
+        - ClaimAmount
+
+  - name: open_claims_count
+    description: "Number of currently open insurance claims"
+    expression:
+      dialects:
+        - dialect: ANSI_SQL
+          expression: "SELECT COUNT(*) FROM pc_insurance.claim WHERE claim_close_date IS NULL"
+    ai_context:
+      synonyms:
+        - "active claims"
+        - "pending claims"
+        - "unclosed claims"
+      instructions: "Use when the user asks how many claims are open, active, or pending. A claim is open if it has no close date."
+      examples:
+        - "How many open claims do we have?"
+        - "What is the number of active claims?"
+        - "Show me pending claims count"
+    x_coa:
+      data_source_id: f2f4304d-72e0-48ce-aa8a-20ec05fc15d6
+      source_table: pc_insurance.claim
+      return_type: integer
+      ontology_concepts:
+        - Claim
+
+  - name: total_premium
+    description: "Total premium amount collected across all policies"
+    expression:
+      dialects:
+        - dialect: ANSI_SQL
+          expression: "SELECT SUM(pa.policy_amount) FROM pc_insurance.policy_amount pa INNER JOIN pc_insurance.premium p ON pa.policy_amount_identifier = p.policy_amount_identifier"
+    ai_context:
+      synonyms:
+        - "premium collected"
+        - "total premiums"
+        - "premium revenue"
+      instructions: "Use when the user asks about premiums, premium revenue, or premium amounts. Includes all premium types across all policies."
+      examples:
+        - "What is the total premium?"
+        - "How much premium have we collected?"
+        - "Show total premium revenue"
+    x_coa:
+      data_source_id: f2f4304d-72e0-48ce-aa8a-20ec05fc15d6
+      source_table: pc_insurance.policy_amount
+      unit: USD
+      return_type: decimal
+      ontology_concepts:
+        - Premium
+        - PolicyAmount
+
+  - name: catastrophe_claims_count
+    description: "Number of claims linked to catastrophe events"
+    expression:
+      dialects:
+        - dialect: ANSI_SQL
+          expression: "SELECT COUNT(*) FROM pc_insurance.claim WHERE catastrophe_identifier IS NOT NULL"
+    ai_context:
+      synonyms:
+        - "CAT claims"
+        - "disaster claims"
+        - "catastrophe-related claims"
+      instructions: "Use when the user asks about claims related to catastrophes, natural disasters, or CAT events."
+      examples:
+        - "How many catastrophe claims do we have?"
+        - "Show me CAT-related claims"
+        - "Number of claims from natural disasters"
+    x_coa:
+      data_source_id: f2f4304d-72e0-48ce-aa8a-20ec05fc15d6
+      source_table: pc_insurance.claim
+      return_type: integer
+      ontology_concepts:
+        - Claim
+        - Catastrophe
+
+  - name: total_loss_payments
+    description: "Total loss payments made across all claims"
+    expression:
+      dialects:
+        - dialect: ANSI_SQL
+          expression: "SELECT SUM(ca.claim_amount) FROM pc_insurance.claim_amount ca INNER JOIN pc_insurance.loss_payment lp ON ca.claim_amount_identifier = lp.claim_amount_identifier"
+    ai_context:
+      synonyms:
+        - "claims paid"
+        - "loss payments"
+        - "total payouts"
+      instructions: "Use when the user asks about payments made on claims, loss payouts, or total claims paid. This is actual money paid out, not reserves."
+      examples:
+        - "What is the total amount paid on claims?"
+        - "How much have we paid in losses?"
+        - "Show total loss payments"
+    x_coa:
+      data_source_id: f2f4304d-72e0-48ce-aa8a-20ec05fc15d6
+      source_table: pc_insurance.claim_amount
+      unit: USD
+      return_type: decimal
+      ontology_concepts:
+        - LossPayment
+        - ClaimAmount

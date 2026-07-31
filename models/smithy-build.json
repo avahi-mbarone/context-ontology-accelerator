@@ -1,0 +1,38 @@
+{
+    "version": "1.0",
+    "sources": ["src/main/smithy"],
+    "projections": {
+        "control-plane-ts": {
+            "plugins": {
+                "typescript-client-codegen": {
+                    "service": "com.amazon.semanticcontext#ControlPlaneService",
+                    "package": "@coa/control-plane-client",
+                    "packageVersion": "1.0.0"
+                }
+            }
+        },
+        "data-layer-ts": {
+            "plugins": {
+                "typescript-client-codegen": {
+                    "service": "com.amazon.semanticcontext.datalayer#DataLayerService",
+                    "package": "@coa/data-layer-client",
+                    "packageVersion": "1.0.0"
+                }
+            }
+        },
+        "openapi-control-plane": {
+            "plugins": {
+                "openapi": {
+                    "service": "com.amazon.semanticcontext#ControlPlaneService"
+                }
+            }
+        },
+        "openapi-data-layer": {
+            "plugins": {
+                "openapi": {
+                    "service": "com.amazon.semanticcontext.datalayer#DataLayerService"
+                }
+            }
+        }
+    }
+}

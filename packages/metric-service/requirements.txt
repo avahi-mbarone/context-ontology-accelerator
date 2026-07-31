@@ -1,0 +1,9 @@
+httpx>=0.27
+structlog>=24.0
+pydantic>=2.13.4
+pydantic-settings>=2.0
+opensearch-py>=2.4
+requests-aws4auth>=1.2
+requests>=2.34.2
+sqlglot>=25.0
+pyyaml>=6.0

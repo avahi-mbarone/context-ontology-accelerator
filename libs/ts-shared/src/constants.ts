@@ -1,0 +1,139 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+/** Application display name shown in the UI header / browser title. */
+export const UI_DISPLAY_TITLE = "Context Ontology Accelerator";
+
+/** Default resource prefix used across CDK stacks and resource naming. */
+export const DEFAULT_RESOURCE_PREFIX = "coa";
+
+/** Default deployment environment name. */
+export const DEFAULT_ENV = "dev";
+
+// ---------------------------------------------------------------------------
+// Derived brand tokens — all based on DEFAULT_RESOURCE_PREFIX so deployments
+// with a custom prefix (e.g. --context resource_prefix=acme) get consistent
+// naming across graph URIs, events, DataZone types, and URN schemes.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Brand token for DATA-PLANE identifiers.
+//
+// Deliberately STATIC and independent of `resource_prefix`. Graph IRIs,
+// EventBridge sources and DataZone type names are data internal to the system,
+// not control-plane resources: they are written into RDF stored in Neptune, into
+// event contracts between services, and into DataZone metadata. Deriving them
+// from a per-deployment prefix would mean a prefix change re-mints every IRI and
+// orphans the data already in the graph, and would let a reader and a writer
+// deployed with different prefixes silently stop matching.
+//
+// `resource_prefix` still governs physical resource names (S3, IAM, DynamoDB,
+// SSM paths) via `prefixed()` — that is the knob meant to vary per deployment.
+// ---------------------------------------------------------------------------
+
+/** Static brand token for data-plane identifiers. NOT the resource prefix. */
+export const BRAND = "coa";
+
+/**
+ * Base authority for knowledge-graph IRIs.
+ * Used by: ontology-engine (IRI minting), context-manager (SPARQL), metric-service (Neptune writes).
+ * Override at deploy time via CDK context `graph_base_uri`.
+ */
+export const DEFAULT_GRAPH_BASE_URI = `http://${BRAND}.amazon.com`;
+
+/**
+ * URN scheme prefix for internal identifiers (metrics, classes, graphs).
+ * Pattern: `urn:{urnPrefix}:{namespace}:metric:{name}`
+ */
+export const DEFAULT_URN_PREFIX = BRAND;
+
+/**
+ * RDF vocabulary namespace for platform-defined predicates (isMapped, groundedTo, etc.).
+ * Bound as `PREFIX {vocabPrefix}: <{graphBaseUri}/vocab/{vocabPrefix}#>` in SPARQL.
+ */
+export const DEFAULT_VOCAB_PREFIX = BRAND;
+
+/**
+ * EventBridge event source prefix.
+ * Events are emitted as `{eventSourcePrefix}.metric-service`, `{eventSourcePrefix}.ontology`, etc.
+ */
+export const DEFAULT_EVENT_SOURCE_PREFIX = BRAND;
+
+/**
+ * DataZone form/asset type name prefix (PascalCase).
+ * Form: `{dzTypePrefix}TableMetadata`, Asset: `{dzTypePrefix}RelationalTable`.
+ */
+export const DEFAULT_DZ_TYPE_PREFIX = BRAND.charAt(0).toUpperCase() + BRAND.slice(1);
+
+/** Filename for the runtime config JSON served to the frontend. */
+export const RUNTIME_CONFIG_FILENAME = "runtime-config.json";
+
+// ---------------------------------------------------------------------------
+// DynamoDB table logical names
+// Actual table name = `{prefix}-{env}-{logicalName}`
+// Used by CDK stacks (table creation) and cross-stack references (env vars).
+// ---------------------------------------------------------------------------
+
+export const TABLE_NAMES = {
+  NAMESPACES: "namespaces",
+  ROLES: "roles",
+  RESOURCE_ROLE_MAPPINGS: "resource-role-mappings",
+  CACHE_INVALIDATION: "cache-invalidation",
+  SOURCES: "sources",
+  SOURCE_SCAN_JOBS: "source-scan-jobs",
+  ONTOLOGY_ENGINE: "ontology-engine",
+  METRIC_IMPORT_JOBS: "metric-import-jobs",
+} as const;
+
+// ---------------------------------------------------------------------------
+// Unstructured document upload constraints
+// Must stay in sync with SUPPORTED_UPLOAD_CONTENT_TYPES in
+// libs/common/src/coa_common/constants.py
+// ---------------------------------------------------------------------------
+
+/** MIME types accepted for direct file upload via pre-signed S3 URLs. */
+export const SUPPORTED_UPLOAD_CONTENT_TYPES: ReadonlySet<string> = new Set([
+  "application/pdf",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document", // .docx
+  "text/plain",
+  "text/markdown",
+]);
+
+/** Maximum number of files per upload request. */
+export const MAX_UPLOAD_FILES = 100;
+
+// ---------------------------------------------------------------------------
+// Database engine launch gate
+// Must stay in sync with PREVIEW_DATABASE_ENGINES in
+// libs/common/src/coa_common/constants.py
+// ---------------------------------------------------------------------------
+
+/**
+ * Database engines whose implementation exists but is withheld from the product
+ * pending further validation. Nothing is deleted — the engine-specific form
+ * fields and backend dialects all remain in the tree; these engines are simply
+ * filtered out of the pickers and registries that read this set.
+ *
+ * To re-enable an engine, remove its token here AND from
+ * PREVIEW_DATABASE_ENGINES in libs/common/src/coa_common/constants.py.
+ */
+export const PREVIEW_DATABASE_ENGINES: ReadonlySet<string> = new Set([
+  "ORACLE",
+  "SNOWFLAKE",
+]);
+
+// ---------------------------------------------------------------------------
+// Metric service defaults
+// ---------------------------------------------------------------------------
+
+/** Default EventBridge bus name for metric lifecycle events. */
+export const DEFAULT_EVENT_BUS_NAME = "default";
+
+/**
+ * Default Bedrock embedding model ID — MUST match the Python single source of
+ * truth (coa_common.constants.DEFAULT_EMBED_MODEL_ID). Cohere
+ * Embed v4 via an inference profile (on-demand unsupported). Producers
+ * (induction, doc-kg-build, metrics) and consumers (serve retrieval) must all
+ * use the same model, or vectors are cross-model incomparable.
+ */
+export const DEFAULT_BEDROCK_MODEL_ID = "us.cohere.embed-v4:0";

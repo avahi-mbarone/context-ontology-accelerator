@@ -1,0 +1,50 @@
+The previous attempt to generate an OWL Turtle fragment for this table failed to parse. Generate a SIMPLER version that is guaranteed to parse.
+
+Use these namespace prefixes (already declared — do not redeclare):
+  @prefix ind:  <{ontology_prefix}> .
+  @prefix owl:  <http://www.w3.org/2002/07/owl#> .
+  @prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+  @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+  @prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+  @prefix prov: <http://www.w3.org/ns/prov#> .
+
+[CONTEXT]
+Table name (PascalCase for class):   {table_class_name}
+Source table identifier:              {table_name}
+
+Database schema:
+{schema_context}
+
+[STRICT OUTPUT CONSTRAINTS]
+Produce ONLY these triple patterns, one per line, separated by `.`:
+
+  ind:ClassName a owl:Class .
+  ind:ClassName rdfs:label "Human Readable Name" .
+  ind:ClassName rdfs:comment "Description text" .
+  ind:propertyName a owl:ObjectProperty .
+  ind:propertyName a owl:DatatypeProperty .
+  ind:propertyName rdfs:label "Property Label" .
+  ind:propertyName rdfs:comment "Property description" .
+  ind:propertyName rdfs:domain ind:ClassName .
+  ind:propertyName rdfs:range xsd:string .
+  ind:propertyName rdfs:range ind:OtherClass .
+  ind:propertyName prov:wasDerivedFrom <{provenance_base}/{table_name}/COLUMN_NAME> .
+
+Valid xsd datatypes (use ONLY these for rdfs:range on DatatypeProperties):
+  xsd:string, xsd:integer, xsd:decimal, xsd:float, xsd:double, xsd:boolean, xsd:dateTime
+DO NOT use xsd:date — it is rejected by OWL 2 DL reasoners.
+
+DO NOT emit ANY of the following. If you emit any of these, the parse
+WILL fail and the entire table's fragment will be lost:
+  - Blank nodes in any position: `[ ... ]`, `[]`, `[a owl:Restriction ...]`
+  - owl:Restriction, owl:onProperty, owl:minCardinality, owl:maxCardinality, owl:cardinality
+  - Inline property lists: `ind:X rdfs:label "A" ; rdfs:comment "B" .`
+  - Comma-separated objects: `rdfs:range xsd:string, xsd:integer`
+  - Any `a` shortcut except at start of a type declaration
+  - Any nested structures
+
+EVERY line must be a complete flat triple ending with ` .` (period).
+One subject, one predicate, one object, one period.
+
+Do not wrap in markdown fences. Do not add explanatory text. Output
+only valid Turtle triples, one per line.

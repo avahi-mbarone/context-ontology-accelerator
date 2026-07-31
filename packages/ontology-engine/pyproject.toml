@@ -1,0 +1,76 @@
+[project]
+name = "coa-ontology"
+version = "0.1.0"
+description = "Ontology Engine — induction of OWL 2 ontologies from relational schemas and documents"
+requires-python = ">=3.12"
+
+dependencies = [
+    "coa-common",
+    "coa-control-plane-server",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "httpx>=0.27",
+    "boto3>=1.35",
+    "rdflib>=7.0",
+    "owlready2>=0.46",
+    "pyshacl>=0.26",
+    "pydantic>=2.13.4",
+    "python-multipart>=0.0.32",
+    "pyyaml>=6.0",
+    "opensearch-py>=2.5",
+    "aiosqlite>=0.20",
+    "sqlalchemy>=2.0",
+    "sqlglot>=25.0",
+    "requests-aws4auth>=1.3",
+    "defusedxml>=0.7",
+]
+
+[project.optional-dependencies]
+demo = [
+    "rich>=13.7",
+    "python-dotenv>=1.0",
+]
+
+[dependency-groups]
+dev = [
+    "rich>=13.7",
+    "python-dotenv>=1.0",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"coa_ontology.inducer.strategies" = ["prompts/*.prompt"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+# `-rs` surfaces skip counts AND reasons in the run summary so a green-
+# looking pytest output with non-zero skips is impossible to overlook.
+# Required by the spec's Testing Discipline section: a layered integ-test
+# skip is "inconclusive, not green" and the operator must see why.
+addopts = "-rs"
+markers = [
+    "unit: Unit tests (mocked, no live AWS calls)",
+    "integ: Integration tests (require live AWS resources)",
+    "llm: Tests that invoke a live LLM (require Bedrock access; non-deterministic; opt-in)",
+]
+
+[tool.coverage.run]
+omit = [
+    # Infrastructure-only modules that require live AWS backends (Neptune
+    # Analytics, Lambda runtime) — tested via integ tests, not unit tests.
+    "*/catalog/na_store.py",
+    "*/api_proxy_handler.py",
+    "*/inducer/routers/batch.py",
+]
+
+[tool.uv.sources]
+coa-common = { workspace = true }
+coa-control-plane-server = { workspace = true }

@@ -1,0 +1,110 @@
+# SEC 10-Q induced-ontology Turtle fixture for the agentic end-to-end + property
+# verification (task 19).
+#
+# This is a faithful SUBSET of the real induced ontology
+# OntologyDevelopmentNotes/ndb-induced-878519a5e0324c688d612709a.ttl for the
+# deployed SCL dev `sec10qtesting` tenant (878519a5e0324c688d612709a) — a SEC 10-Q
+# filings knowledge graph (NVIDIA, Microsoft, Amazon, Intel, Apple Inc.). It keeps
+# the real IRI base, real owl:Class node-type labels, and real owl:ObjectProperty
+# edge-type labels (SERVES, SELLS, PRODUCES, ADDRESSES, INVESTS IN, OWNS,
+# CUSTOMER OF, PART OF, INCLUDES, USES).
+#
+# CRUCIALLY it OMITS "COMPETES WITH" and "ACQUIRED". Those two edges genuinely
+# exist in the property graph (verified live: COMPETES WITH = 11 edges / 6
+# company->company; ACQUIRED = 19 / 14 incl. NVIDIA->Mellanox and
+# NVIDIA ACQUISITION OF->Arm) but are ABSENT from the induced ontology
+# (`grep -c COMPETES` / `grep -c '"ACQUIRED"'` against the induced .ttl both
+# return 0). That gap is exactly what drives the ontology-constrained-traversal
+# property: the controller must refuse to traverse an edge type the ontology does
+# not declare, even when the (mocked) graph tool holds data for it.
+
+@prefix owl:   <http://www.w3.org/2002/07/owl#> .
+@prefix rdf:   <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:  <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:   <http://www.w3.org/2001/XMLSchema#> .
+
+@prefix class: <http://orion.amazon.com/namespace/878519a5e0324c688d612709a/ontology/unstructured/class/> .
+@prefix op:    <http://orion.amazon.com/namespace/878519a5e0324c688d612709a/ontology/unstructured/ObjectProperty/> .
+@prefix dp:    <http://orion.amazon.com/namespace/878519a5e0324c688d612709a/ontology/unstructured/DatatypeProperty/> .
+
+# ── Node types (owl:Class) ──────────────────────────────────────────
+class:Company a owl:Class ;
+    rdfs:label "Company"^^xsd:string .
+
+class:Product a owl:Class ;
+    rdfs:label "Product"^^xsd:string .
+
+class:Service a owl:Class ;
+    rdfs:label "Service"^^xsd:string .
+
+class:Financial-Instrument a owl:Class ;
+    rdfs:label "Financial-Instrument"^^xsd:string .
+
+class:Location a owl:Class ;
+    rdfs:label "Location"^^xsd:string .
+
+class:Creative-Work a owl:Class ;
+    rdfs:label "Creative-Work"^^xsd:string .
+
+class:Event a owl:Class ;
+    rdfs:label "Event"^^xsd:string .
+
+class:Role a owl:Class ;
+    rdfs:label "Role"^^xsd:string .
+
+# ── Edge types (owl:ObjectProperty) with directional domain → range ──
+op:serves a owl:ObjectProperty ;
+    rdfs:label "SERVES"^^xsd:string ;
+    rdfs:domain class:Company ;
+    rdfs:range class:Product .
+
+op:sells a owl:ObjectProperty ;
+    rdfs:label "SELLS"^^xsd:string ;
+    rdfs:domain class:Company ;
+    rdfs:range class:Product .
+
+op:produces a owl:ObjectProperty ;
+    rdfs:label "PRODUCES"^^xsd:string ;
+    rdfs:domain class:Company ;
+    rdfs:range class:Product .
+
+op:addresses a owl:ObjectProperty ;
+    rdfs:label "ADDRESSES"^^xsd:string ;
+    rdfs:domain class:Company ;
+    rdfs:range class:Financial-Instrument .
+
+op:invests_in a owl:ObjectProperty ;
+    rdfs:label "INVESTS IN"^^xsd:string ;
+    rdfs:domain class:Company ;
+    rdfs:range class:Location .
+
+op:owns a owl:ObjectProperty ;
+    rdfs:label "OWNS"^^xsd:string ;
+    rdfs:domain class:Company ;
+    rdfs:range class:Product .
+
+op:customer_of a owl:ObjectProperty ;
+    rdfs:label "CUSTOMER OF"^^xsd:string ;
+    rdfs:domain class:Role ;
+    rdfs:range class:Company .
+
+op:part_of a owl:ObjectProperty ;
+    rdfs:label "PART OF"^^xsd:string ;
+    rdfs:domain class:Product ;
+    rdfs:range class:Company .
+
+op:includes a owl:ObjectProperty ;
+    rdfs:label "INCLUDES"^^xsd:string ;
+    rdfs:domain class:Product ;
+    rdfs:range class:Product .
+
+op:uses a owl:ObjectProperty ;
+    rdfs:label "USES"^^xsd:string ;
+    rdfs:domain class:Company ;
+    rdfs:range class:Service .
+
+# ── Datatype property — must be EXCLUDED from edge types ─────────────
+dp:revenue a owl:DatatypeProperty ;
+    rdfs:label "REVENUE"^^xsd:string ;
+    rdfs:domain class:Financial-Instrument ;
+    rdfs:range xsd:decimal .

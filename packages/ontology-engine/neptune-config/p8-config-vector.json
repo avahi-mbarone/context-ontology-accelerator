@@ -1,0 +1,201 @@
+{
+  "domain": "dev",
+  "region": "us-west-2",
+  "workingDir": "/tmp",
+  "processTopology": "SINGLE",
+  "jvm": {
+    "vmArgs": "-XX:NewRatio=1 -XX:SurvivorRatio=2 -XX:+UseG1GC -XX:MaxGCPauseMillis=5 -XX:+UseTransparentHugePages -XX:+ParallelRefProcEnabled -XX:+PrintCommandLineFlags -XX:+PrintClassHistogram -XX:+PrintFlagsFinal -Dfile.encoding=utf-8",
+    "extraArgs": "",
+    "systemVars": {
+      "usePastForNIR": "enabled",
+      "enableSparqlForP8": "true",
+      "enableGremlinForP8": "true",
+      "enableAdminForP8": "true",
+      "useP8": "true",
+      "enableNIRExecution": "true",
+      "nativeQuery": "viaQueryHint",
+      "enableColumnApi": "false",
+      "enableReadForUpdate": "false",
+      "enableLookAsideCache": "false",
+      "enableTestMode": "false",
+      "enableStatisticsApi": "true",
+      "BoundValueRangeEstimate": "false",
+      "allowDCOptimization": "true",
+      "forceEnableStatusEndpoint": "false",
+      "clientMode": "HTTP"
+    }
+  },
+  "memory": {
+    "jvmHeapSize": "8192",
+    "jvmMaxDirectMemoryInMb": "2703",
+    "nativeTotalMemoryInMb": "184218",
+    "nativeMemoryPerPermitMb": "1",
+    "nativeInitialPermitPerQuery": "1",
+    "nativeTimeoutWaitingPermits": "30000",
+    "quota": {
+      "queryPct": "20",
+      "transactionPct": "4",
+      "durabilityPct": "9",
+      "storagePct": "67"
+    },
+    "jemallocConf": "lg_dirty_mult:3,xmalloc:true",
+    "nativeAlgoBFSPoolSize": "16"
+  },
+  "server": {
+    "port": "8192",
+    "threadPoolSize": "8",
+    "workerPoolSize": "8",
+    "requestQueueLength": "8192",
+    "resultIterationBatchSize": "64",
+    "ssl": {
+      "enabled": "true",
+      "saltyRouteArn": "arn:aws:identityauthority:us-west-2:111122223333:route/inbound-route",
+      "saltyFleetArn": "arn:aws:identityauthority:us-west-2:111122223333:fleet/inbound-fleet",
+      "insecureSsl": "true"
+    },
+    "auth": {
+      "enabled": "false",
+      "enableCryptoOffload": "true",
+      "vpcePolicyBucketName": "pl-policy-06623f301dc93b44d"
+    },
+    "connectionManager": {
+      "idleTimeoutSec": "600",
+      "maxWSConnections": "16384",
+      "connectionRefreshIntervalSec": "300"
+    },
+    "boltConnectionManager": {
+      "idleTimeoutSec": "600",
+      "maxBoltConnections": "1000",
+      "connectionRefreshIntervalSec": "300"
+    },
+    "enableHostHeaderValidation": "false"
+  },
+  "compute": {
+    "port": "8195",
+    "hostsFile": "/tmp/hostsfile.txt",
+    "executablePath": "",
+    "executableName": "start_ncn.sh"
+  },
+  "query": {
+    "memoryLimit": "298844160",
+    "defaultTimeout": "28800000",
+    "maxTimeout": "28800000",
+    "resultCacheSize": "0",
+    "threadExecutionModel": "single",
+    "planCache": {
+      "mode": "disabled",
+      "maxNumPlansCached": "1000",
+      "latencyThresholdToBeCachedMs": "100",
+      "ttlMs": "300000"
+    },
+    "enableIncrementalLoad": "true",
+    "enableWriteViaOpenCypher": "true",
+    "enableWriteViaAlgorithms": "true"
+  },
+  "logging": {
+    "logLevel": "WARN",
+    "logDir": "/tmp",
+    "audit": {
+      "enabled": "false",
+      "logDir": "/rdsdbdata/log/audit/"
+    },
+    "slowQuery": {
+      "enabled": "false",
+      "logDir": "/rdsdbdata/log/slowquery/",
+      "threshold": "5000",
+      "logLevel": "info"
+    },
+    "engineDiag": {
+      "enabled": "false"
+    },
+    "customerVisibleLog": {
+      "enabled": "false",
+      "logDir": "/tmp"
+    }
+  },
+  "catalog": {
+    "version": "1",
+    "baseIri": "http://www.mapgraph.com/#",
+    "vertexIdWidth": "32",
+    "literalIdWidth": "32",
+    "vertexPartitions": "16",
+    "edgePartitions": "16",
+    "edgePropertyPartitionsPerEdgePartition": "1",
+    "statementIdsGenerationNumber": "1",
+    "numVssIndices": "1",
+    "vssIndexConfig": [
+      {
+        "dimension": "1024",
+        "initialNumVectors": "128",
+        "nominalNeighborHoodSize": "32",
+        "insertSearchSize": "100",
+        "searchCandidatesSize": "500"
+      }
+    ]
+  },
+  "durability": {
+    "manifestPath": "/tmp/p8-checkpoints/MANIFEST",
+    "followerIsReadReplica": "true",
+    "requestOffboxCheckpoint": "false",
+    "checkpoint": {
+      "type": "file",
+      "rootDir": "",
+      "partSize": "5",
+      "streamBufferCount": "10",
+      "targetGbps": "100",
+      "maxThreads": "0",
+      "interval": "2147483648",
+      "smallGraphSize": "10000000",
+      "smallGraphDelay": "60",
+      "kmsKeyId": "",
+      "kmsEncryptionContext": ""
+    },
+    "log": {
+      "type": "file",
+      "logDir": "/tmp/p8-logs",
+      "numDataJournals": "",
+      "logGroupPrefix": "",
+      "summaryLogName": "",
+      "journalEndpoint": "",
+      "journalRegion": "",
+      "numWritesPerSec": "",
+      "initialQueueDepth": "",
+      "maxQueueDepth": ""
+    }
+  },
+  "dictGc": {
+    "ability": "enabled",
+    "triggerPercent": "6"
+  },
+  "etl": {
+    "loaderType": "1G",
+    "headerChunkSize": "8192",
+    "splitChunkSize": "134217728",
+    "etlOomMonitorEnabled": "true",
+    "etlOomThreshPercent": "75"
+  },
+  "export": {
+    "kmsKeyId": "",
+    "kmsEncryptionContext": "",
+    "s3ExportBucket": "graph-export-test",
+    "s3ExportKey": "export/graph-export-test",
+    "exportType": "FULLGRAPH",
+    "exportFormat": "PARQUET",
+    "s3ExportJsonSchema": ""
+  },
+  "dfe": {
+    "dfeArgs": "-ll:cpu 32 -ll:io 1 -sm:mapping_table_capacity 10000000 -sm:epoch_manager_capacity 8192 -ll:show_rsrv"
+  },
+  "statistics": {
+    "css_merge": "true",
+    "css_merge_target_count": "10000",
+    "css_trigger_merge_count": "50000",
+    "css_max_predstats_count": "1000000",
+    "directCompute": "true",
+    "requestOffboxCss": "false",
+    "css_pct_change_trigger": "10"
+  },
+  "metrics": {
+    "exporterType": "LOGS"
+  }
+}

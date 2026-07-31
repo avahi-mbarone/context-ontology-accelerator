@@ -1,0 +1,67 @@
+[
+  {
+    "id": "schema-001",
+    "name": "public",
+    "displayName": "Public Schema",
+    "fullyQualifiedName": "retail_postgres.retail_prod.public",
+    "description": "Default public schema containing core transactional tables for the retail platform.",
+    "database": {
+      "id": "db-001",
+      "type": "database",
+      "name": "retail_prod",
+      "fullyQualifiedName": "retail_postgres.retail_prod"
+    }
+  },
+  {
+    "id": "schema-002",
+    "name": "inventory",
+    "displayName": "Inventory Schema",
+    "fullyQualifiedName": "retail_postgres.retail_prod.inventory",
+    "description": "Schema for warehouse inventory management, stock levels, and supplier data.",
+    "database": {
+      "id": "db-001",
+      "type": "database",
+      "name": "retail_prod",
+      "fullyQualifiedName": "retail_postgres.retail_prod"
+    }
+  },
+  {
+    "id": "schema-003",
+    "name": "sales_mart",
+    "displayName": "Sales Data Mart",
+    "fullyQualifiedName": "snowflake_prod.analytics_warehouse.sales_mart",
+    "description": "Star-schema data mart for sales analytics. Contains fact and dimension tables for revenue reporting.",
+    "database": {
+      "id": "db-002",
+      "type": "database",
+      "name": "analytics_warehouse",
+      "fullyQualifiedName": "snowflake_prod.analytics_warehouse"
+    }
+  },
+  {
+    "id": "schema-pc-v2-001",
+    "name": "claims",
+    "displayName": "Claims Schema",
+    "fullyQualifiedName": "pc_postgres.pc_insurance.claims",
+    "description": "",
+    "database": {
+      "id": "db-pc-v2-001",
+      "type": "database",
+      "name": "pc_insurance",
+      "fullyQualifiedName": "pc_postgres.pc_insurance"
+    }
+  },
+  {
+    "id": "schema-pc-001",
+    "name": "claims",
+    "displayName": "Claims Schema",
+    "fullyQualifiedName": "pc_postgres.pc_insurance.claims",
+    "description": "",
+    "database": {
+      "id": "db-pc-001",
+      "type": "database",
+      "name": "pc_insurance",
+      "fullyQualifiedName": "pc_postgres.pc_insurance"
+    }
+  }
+]

@@ -1,0 +1,102 @@
+# GitHub Pages — builds the external-docs site and publishes it to Pages.
+#
+# This runs on GitHub (the public mirror repo, aws/context-ontology-accelerator),
+# NOT on GitLab. It is delivered there by the github-sync mirror job (.github/ is on
+# the .npmignore allowlist).
+#
+# Site URL: https://aws.github.io/context-ontology-accelerator/  (project-pages
+# subpath — hence base=/context-ontology-accelerator/ below). If you later attach a
+# custom domain, change PAGES_BASE to "/".
+#
+# The API reference (Scalar) needs the generated OpenAPI specs. smithy-generated/ is
+# not committed, so this workflow runs the Smithy Gradle build (Java 17) to produce
+# just the OpenAPI projections, then copies them where prepare-openapi.mjs expects.
+#
+# One-time setup on the repo: Settings > Pages > Build and deployment > Source =
+# "GitHub Actions".
+
+name: Deploy docs to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "external-docs/**"
+      - "models/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch: {}
+
+# Least privilege: default to read-only; only the deploy job is granted the
+# pages/id-token write it needs (see the deploy job below).
+permissions:
+  contents: read
+
+# Allow one concurrent deployment; don't cancel an in-progress publish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  PAGES_BASE: "/context-ontology-accelerator/"
+  # Match the pnpm pinned in .mise.toml so the docs build uses the same pnpm as
+  # every other build in the repo.
+  PNPM_VERSION: "10.27.0"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- OpenAPI specs for the API reference (Smithy Gradle build) ---
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Generate OpenAPI specs
+        run: |
+          set -euo pipefail
+          (cd models && ./gradlew --no-daemon build)
+          PROJ="models/build/smithyprojections/models"
+          mkdir -p smithy-generated/openapi
+          cp -r "$PROJ/openapi-control-plane/." smithy-generated/openapi/
+          cp -r "$PROJ/openapi-data-layer/." smithy-generated/openapi/
+          echo "OpenAPI specs staged:"; ls -R smithy-generated/openapi/openapi 2>/dev/null || true
+
+      # --- Build the docs site ---
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Enable pnpm
+        run: corepack enable && corepack prepare "pnpm@${PNPM_VERSION}" --activate
+      - name: Build docs
+        working-directory: external-docs
+        run: |
+          set -euo pipefail
+          # external-docs is its own committed pnpm workspace root (own
+          # pnpm-workspace.yaml + pnpm-lock.yaml + .npmrc). --frozen-lockfile enforces
+          # the committed lockfile — this workspace's only supply-chain control, since
+          # it does NOT inherit the root workspace hardening.
+          pnpm install --frozen-lockfile
+          # Stage OpenAPI specs into public/api/ (servers block from SCL_API_BASE_URL if set).
+          node scripts/prepare-openapi.mjs
+          pnpm build --base="${PAGES_BASE}"
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: external-docs/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    # Only this job needs write to publish; build runs read-only.
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

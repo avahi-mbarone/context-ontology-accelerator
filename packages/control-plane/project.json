@@ -1,0 +1,19 @@
+{
+  "name": "control-plane",
+  "namedInputs": { "default": ["python"] },
+  "implicitDependencies": ["common"],
+  "targets": {
+    "lint": {
+      "command": "uv run ruff check packages/control-plane && uv run ruff format --check packages/control-plane && uv run mypy packages/control-plane/src --ignore-missing-imports --cache-dir packages/control-plane/.mypy_cache"
+    },
+    "test": {
+      "command": "COVERAGE_FILE=packages/control-plane/.coverage uv run pytest packages/control-plane -m unit -v --tb=short --cov=packages/control-plane --cov-report=term-missing --cov-report=xml:packages/control-plane/coverage.xml --cov-fail-under=80 --junitxml=packages/control-plane/junit.xml"
+    },
+    "format": {
+      "command": "uv run ruff format packages/control-plane"
+    },
+    "format:check": {
+      "command": "uv run ruff format --check packages/control-plane"
+    }
+  }
+}

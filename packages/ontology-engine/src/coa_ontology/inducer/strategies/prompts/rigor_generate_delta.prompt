@@ -1,0 +1,48 @@
+Generate an OWL 2 DL ontology fragment in Turtle for the database table described below.
+
+Use these namespace prefixes (already declared — do not redeclare):
+  @prefix ind:  <{ontology_prefix}> .
+  @prefix owl:  <http://www.w3.org/2002/07/owl#> .
+  @prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+  @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+  @prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+  @prefix prov: <http://www.w3.org/ns/prov#> .
+
+[CONTEXT]
+Table name (PascalCase for class):   {table_class_name}
+Source table identifier:              {table_name}
+
+Database schema:
+{schema_context}
+
+Relevant documentation:
+{documents}
+
+Existing ontology concepts (candidates for reuse — reference by full IRI where appropriate):
+{existing_ontology}
+
+Core ontology generated so far in this run (avoid redefining these):
+{core_ontology}
+
+[INSTRUCTIONS]
+1. Declare an owl:Class `ind:{table_class_name}` for the table with rdfs:label and rdfs:comment.
+2. For each column, decide:
+   - If the column participates in a FOREIGN KEY constraint, declare an owl:ObjectProperty with rdfs:range set to the referenced class IRI (use ind:<ReferencedClassPascal>).
+   - Otherwise, declare an owl:DatatypeProperty with an rdfs:range set to the most appropriate xsd datatype (xsd:integer, xsd:string, xsd:decimal, xsd:dateTime, xsd:boolean, xsd:float, xsd:double). NEVER use xsd:date — it is not in the OWL 2 datatype map and will be rejected by DL reasoners; use xsd:dateTime instead.
+3. For every property:
+   - Set exactly one rdfs:domain = ind:{table_class_name}.
+   - Set exactly one rdfs:range.
+   - Add rdfs:label (a human-readable camelCase name) and rdfs:comment (description).
+   - Add prov:wasDerivedFrom <{provenance_base}/{table_name}/COLUMN_NAME>.
+4. Reuse existing concepts from the context block above when they semantically match. When reusing, use their full IRI rather than creating a new one under ind:.
+5. Do not create properties named "is", "has" alone, or other generic stubs — always use meaningful names derived from the column semantics.
+6. Do not duplicate classes or properties already present in the core ontology so far.
+7. Forbidden constructs — do NOT emit any of these (they cause parser failures or are silently discarded downstream):
+   - Blank nodes in any position (e.g. `[ ... ]`, `[]`).
+   - owl:Restriction, owl:onProperty, owl:minCardinality, owl:maxCardinality, owl:cardinality.
+   - Inline property lists nested beyond one level (no `[ ] , [ ]` chains).
+   Emit only flat triples: `<subject> <predicate> <object> .`
+8. Class completeness: if you reference any class IRI in rdfs:domain or rdfs:range that is NOT already in the core ontology above, you MUST declare it with `a owl:Class ; rdfs:label "..." .` in this fragment. Do not leave referenced classes undeclared.
+9. Foundational grounding: when the existing ontology concepts block above shows a class with similarity ≥ 0.85, declare your induced class as a subclass: `ind:YourClass rdfs:subClassOf <matched_foundational_iri> .` This grounds your class in the existing vocabulary.
+
+Output only valid Turtle. Do not include an @prefix block (those are already declared). Do not wrap in markdown fences. Do not add explanatory text before or after the Turtle.

@@ -1,0 +1,301 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+import * as cdk from "aws-cdk-lib";
+import * as cr from "aws-cdk-lib/custom-resources";
+import * as iam from "aws-cdk-lib/aws-iam";
+import * as route53 from "aws-cdk-lib/aws-route53";
+import { Construct } from "constructs";
+import { PublicUIConstruct } from "../../constructs/public-ui-construct";
+import { RuntimeConfig } from "@coa/shared";
+import { SCLStack } from "../../constructs/scl-stack";
+import { CustomDomainConfig } from "../../types";
+
+export interface WebStackProps extends cdk.StackProps {
+  /** OIDC / Cognito authority URL (issuer). */
+  readonly authority: string;
+  /** OIDC / Cognito client ID. */
+  readonly clientId: string;
+  /** Cognito User Pool ID (required to update callback URLs). */
+  readonly userPoolId: string;
+  /** Backend API endpoint URL. */
+  readonly apiEndpoint?: string;
+  /** API Gateway REST API ID (used to update CORS origin after CloudFront creation). */
+  readonly apiRestApiId?: string;
+  /** API Gateway stage name (used to trigger redeployment after CORS update). */
+  readonly apiStageName?: string;
+  /** Path to built web-app assets directory. */
+  readonly websiteContentPath?: string;
+  /** Custom domain configuration for the UI and/or API. */
+  readonly customDomain?: CustomDomainConfig;
+  /** When true, deploy frontend via ECS Fargate + ALB instead of CloudFront + S3. */
+  readonly enablePrivateEndpoints?: boolean;
+  /** Optional WAF WebACL ARN (CLOUDFRONT scope). Takes precedence over {@link autoWebAclParam}. */
+  readonly webAclId?: string;
+  /**
+   * Cross-region SSM parameter holding an auto-created CLOUDFRONT WebACL ARN
+   * (published by {@link EdgeWafStack} in us-east-1). Read via a custom
+   * resource when {@link webAclId} is not provided directly.
+   */
+  readonly autoWebAclParam?: { readonly name: string; readonly region: string };
+  /** AgentCore Runtime ARN for SSE streaming queries. */
+  readonly serveRuntimeArn?: string;
+}
+
+/**
+ * Web application hosting stack for the Context Ontology Accelerator.
+ *
+ * Supports two deployment modes:
+ * - **Public (default)** — CloudFront + S3 via {@link PublicUIConstruct}.
+ *   Static assets are served from S3 through a CloudFront distribution with OAC,
+ *   security headers, and SPA routing (404/403 → `index.html`).
+ * - **Private** — ECS Fargate + ALB (not yet implemented; throws if `enablePrivateEndpoints` is set).
+ *
+ * On first deploy without a custom domain, the CloudFront URL is auto-generated.
+ * This stack automatically patches:
+ * 1. **Cognito callback URLs** — updates the user pool client with the CloudFront origin.
+ * 2. **API Gateway CORS** — updates gateway response headers with the CloudFront origin
+ *    and triggers an API redeployment.
+ *
+ * When `customDomain` is provided, both patches are skipped since the origin is
+ * known upfront and passed directly to the auth and API stacks.
+ *
+ * Runtime configuration (`runtime-config.json`) is injected into S3 at deploy time
+ * with the OIDC authority, client ID, and API endpoint so the React app can
+ * discover backends without a rebuild.
+ */
+export class WebStack extends SCLStack {
+  constructor(scope: Construct, id: string, props: WebStackProps) {
+    super(scope, id, props);
+
+    const uiDomainName = props.customDomain?.uiDomainName;
+    const uiCertificateArn = props.customDomain?.uiCertificateArn;
+    const apiDomainName = props.customDomain?.apiDomainName;
+
+    const runtimeConfig: RuntimeConfig = {
+      region: this.region,
+      stage: this.envName,
+      authority: props.authority,
+      clientId: props.clientId,
+      // Prefer the custom API domain when configured; otherwise the direct
+      // API endpoint.
+      ...(apiDomainName
+        ? { apiEndpoint: `https://${apiDomainName}` }
+        : props.apiEndpoint && { apiEndpoint: props.apiEndpoint }),
+      ...(props.serveRuntimeArn && { serveRuntimeArn: props.serveRuntimeArn }),
+    };
+
+    if (props.enablePrivateEndpoints) {
+      throw new Error(
+        "Private endpoints (ECS frontend) not yet implemented. Set enablePrivateEndpoints to false.",
+      );
+    }
+
+    // ── Resolve the CloudFront WebACL ARN ──────────────────────────
+    // Prefer a caller-provided ARN. Otherwise, on the auto-create path, read
+    // the ARN published by the us-east-1 EdgeWafStack from its SSM parameter.
+    // The read is cross-region (CLOUDFRONT WebACLs live in us-east-1) so it
+    // goes through a custom resource with an explicit region rather than a
+    // CFN dynamic reference (which cannot cross regions).
+    let resolvedWebAclId = props.webAclId;
+    if (!resolvedWebAclId && props.autoWebAclParam) {
+      const { name, region } = props.autoWebAclParam;
+      const webAclReader = new cr.AwsCustomResource(
+        this,
+        "ReadCloudFrontWebAcl",
+        {
+          installLatestAwsSdk: false,
+          onUpdate: {
+            service: "SSM",
+            action: "getParameter",
+            parameters: { Name: name },
+            region,
+            physicalResourceId: cr.PhysicalResourceId.of(`cf-web-acl-${name}`),
+          },
+          policy: cr.AwsCustomResourcePolicy.fromStatements([
+            new iam.PolicyStatement({
+              actions: ["ssm:GetParameter"],
+              resources: [
+                `arn:aws:ssm:${region}:${this.account}:parameter${name}`,
+              ],
+            }),
+          ]),
+        },
+      );
+      resolvedWebAclId = webAclReader.getResponseField("Parameter.Value");
+    }
+
+    const publicUI = new PublicUIConstruct(this, "PublicUI", {
+      websiteContentPath: props.websiteContentPath,
+      runtimeConfig,
+      webAclId: resolvedWebAclId,
+      ...(uiDomainName &&
+        uiCertificateArn && { uiDomainName, uiCertificateArn }),
+    });
+
+    // The origin the browser is actually served from — the custom UI domain
+    // when configured, otherwise the generated CloudFront domain (only known
+    // at deploy time). Cognito callbacks are patched to match.
+    const siteUrl = uiDomainName
+      ? `https://${uiDomainName}`
+      : `https://${publicUI.distribution.distributionDomainName}`;
+
+    // Optional: create Route53 alias records (A + AAAA) → CloudFront when a
+    // hosted zone is provided. Uses L1 CfnRecordSet so only the zone id is
+    // needed (no zone-name lookup). Z2FDTNDATAQYW2 is CloudFront's fixed alias
+    // hosted-zone id. When omitted, DNS is managed externally.
+    const hostedZoneId = props.customDomain?.hostedZoneId;
+    if (hostedZoneId && uiDomainName) {
+      for (const recordType of ["A", "AAAA"] as const) {
+        new route53.CfnRecordSet(this, `UiAlias${recordType}`, {
+          hostedZoneId,
+          name: `${uiDomainName}.`,
+          type: recordType,
+          aliasTarget: {
+            dnsName: publicUI.distribution.distributionDomainName,
+            hostedZoneId: "Z2FDTNDATAQYW2",
+            evaluateTargetHealth: false,
+          },
+        });
+      }
+    }
+
+    // ── Patch Cognito callback URLs ────────────────────────────────
+    // Uses raw AWS API values (not CDK enums) because AwsCustomResource
+    // calls the Cognito API directly. updateUserPoolClient is a full
+    // replacement — all parameters must match the auth stack's addClient()
+    // config or they will be reset to defaults.
+    // Mapping: authFlows.userSrp → ALLOW_USER_SRP_AUTH,
+    //          (implicit)        → ALLOW_REFRESH_TOKEN_AUTH,
+    //          OAuthScope.OPENID → "openid", etc.
+    if (props.userPoolId) {
+      new cr.AwsCustomResource(this, "UpdateCognitoCallbacks", {
+        installLatestAwsSdk: false,
+        onUpdate: {
+          service: "CognitoIdentityServiceProvider",
+          action: "updateUserPoolClient",
+          parameters: {
+            UserPoolId: props.userPoolId,
+            ClientId: props.clientId,
+            CallbackURLs: [
+              `${siteUrl}/authenticate/`,
+              ...(this.envName === "dev"
+                ? ["http://localhost:5173/authenticate/"]
+                : []),
+            ],
+            LogoutURLs: [`${siteUrl}/`],
+            ExplicitAuthFlows: [
+              "ALLOW_USER_SRP_AUTH",
+              "ALLOW_REFRESH_TOKEN_AUTH",
+              // Must mirror idp-authentication-stack.ts addClient() authFlows.
+              // updateUserPoolClient is a full replacement, so omitting this
+              // in dev silently strips ALLOW_USER_PASSWORD_AUTH (added there
+              // for integ-test/CLI sign-in) after this custom resource runs.
+              ...(this.envName === "dev" ? ["ALLOW_USER_PASSWORD_AUTH"] : []),
+            ],
+            AllowedOAuthFlows: ["code"],
+            AllowedOAuthScopes: ["email", "openid", "profile"],
+            SupportedIdentityProviders: ["COGNITO"],
+            AllowedOAuthFlowsUserPoolClient: true,
+            // Must mirror idp-authentication-stack.ts addClient(). This is a
+            // full replacement, so omitting it would reset the client to the
+            // API default (LEGACY), re-enabling user-existence error leakage.
+            PreventUserExistenceErrors: "ENABLED",
+          },
+          physicalResourceId: cr.PhysicalResourceId.of(
+            `cognito-callbacks-${props.clientId}`,
+          ),
+        },
+        policy: cr.AwsCustomResourcePolicy.fromStatements([
+          new iam.PolicyStatement({
+            actions: ["cognito-idp:UpdateUserPoolClient"],
+            resources: [
+              `arn:aws:cognito-idp:${this.region}:${this.account}:userpool/${props.userPoolId}`,
+            ],
+          }),
+        ]),
+      });
+    }
+
+    // ── Patch API Gateway CORS origin ──────────────────────────────
+    if (props.apiRestApiId && props.apiStageName) {
+      const corsHeaders = {
+        "gatewayresponse.header.Access-Control-Allow-Origin": `'${siteUrl}'`,
+        "gatewayresponse.header.Strict-Transport-Security":
+          "'max-age=63072000; includeSubDomains; preload'",
+        "gatewayresponse.header.X-Content-Type-Options": "'nosniff'",
+      };
+
+      const apiArn = `arn:aws:apigateway:${this.region}::/restapis/${props.apiRestApiId}`;
+
+      // Update 4XX gateway response
+      new cr.AwsCustomResource(this, "UpdateApiCors4XX", {
+        installLatestAwsSdk: false,
+        onUpdate: {
+          service: "APIGateway",
+          action: "putGatewayResponse",
+          parameters: {
+            restApiId: props.apiRestApiId,
+            responseType: "DEFAULT_4XX",
+            responseParameters: corsHeaders,
+          },
+          physicalResourceId: cr.PhysicalResourceId.of(
+            `api-cors-4xx-${props.apiRestApiId}`,
+          ),
+        },
+        policy: cr.AwsCustomResourcePolicy.fromStatements([
+          new iam.PolicyStatement({
+            actions: ["apigateway:PUT", "apigateway:PATCH", "apigateway:POST"],
+            resources: [`${apiArn}/*`],
+          }),
+        ]),
+      });
+
+      // Update 5XX gateway response
+      new cr.AwsCustomResource(this, "UpdateApiCors5XX", {
+        installLatestAwsSdk: false,
+        onUpdate: {
+          service: "APIGateway",
+          action: "putGatewayResponse",
+          parameters: {
+            restApiId: props.apiRestApiId,
+            responseType: "DEFAULT_5XX",
+            responseParameters: corsHeaders,
+          },
+          physicalResourceId: cr.PhysicalResourceId.of(
+            `api-cors-5xx-${props.apiRestApiId}`,
+          ),
+        },
+        policy: cr.AwsCustomResourcePolicy.fromStatements([
+          new iam.PolicyStatement({
+            actions: ["apigateway:PUT", "apigateway:PATCH", "apigateway:POST"],
+            resources: [`${apiArn}/*`],
+          }),
+        ]),
+      });
+
+      // Trigger API redeployment so the CORS changes take effect
+      new cr.AwsCustomResource(this, "RedeployApi", {
+        installLatestAwsSdk: false,
+        onUpdate: {
+          service: "APIGateway",
+          action: "createDeployment",
+          parameters: {
+            restApiId: props.apiRestApiId,
+            stageName: props.apiStageName,
+            description: "Auto-redeploy after CORS origin update",
+          },
+          physicalResourceId: cr.PhysicalResourceId.of(
+            `api-redeploy-${Date.now()}`,
+          ),
+        },
+        policy: cr.AwsCustomResourcePolicy.fromStatements([
+          new iam.PolicyStatement({
+            actions: ["apigateway:POST"],
+            resources: [`${apiArn}/*`],
+          }),
+        ]),
+      });
+    }
+  }
+}

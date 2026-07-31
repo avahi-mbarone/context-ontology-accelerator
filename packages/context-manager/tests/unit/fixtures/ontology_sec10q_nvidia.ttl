@@ -1,0 +1,122 @@
+# SEC 10-Q (sec10qtesting) induced-ontology Turtle fixture for the task-19
+# end-to-end + property verification suite.
+#
+# This is a small, focused EXCERPT modelled on the real induced ontology
+# OntologyDevelopmentNotes/ndb-induced-878519a5e0324c688d612709a.ttl (the deployed
+# SCL dev `sec10qtesting` tenant, a SEC 10-Q filings knowledge graph). It mirrors
+# that file's shape exactly: owl:Class node types with an UPPERCASE rdfs:label,
+# owl:ObjectProperty edge types with an UPPERCASE rdfs:label (spaces, not
+# underscores) plus directional rdfs:domain -> rdfs:range, and a stray
+# owl:DatatypeProperty that must NOT surface as an edge type.
+#
+# CRUCIAL INVARIANT (drives the ontology-constrained-traversal property check):
+# the edge set below deliberately OMITS "COMPETES WITH" and "ACQUIRED". Both edges
+# genuinely exist in the property graph for this tenant (verified live: COMPETES
+# WITH 11 edges / 6 company->company; ACQUIRED 19 / 14 company->company including
+# NVIDIA->Mellanox and NVIDIA ACQUISITION OF->Arm) but are ABSENT from the induced
+# ontology. The controller must therefore refuse to traverse them.
+
+@prefix owl:   <http://www.w3.org/2002/07/owl#> .
+@prefix rdf:   <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:  <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:   <http://www.w3.org/2001/XMLSchema#> .
+
+@prefix ns: <http://orion.amazon.com/namespace/878519a5e0324c688d612709a/ontology/unstructured/class/> .
+@prefix op: <http://orion.amazon.com/namespace/878519a5e0324c688d612709a/ontology/unstructured/ObjectProperty/> .
+@prefix dp: <http://orion.amazon.com/namespace/878519a5e0324c688d612709a/ontology/unstructured/DatatypeProperty/> .
+
+# ── Node types (owl:Class) ──────────────────────────────────────────
+ns:Company a owl:Class ;
+    rdfs:label "Company"^^xsd:string ;
+    rdfs:comment "A business entity (e.g. NVIDIA, Microsoft, Amazon, Intel, Apple Inc.)." .
+
+ns:Product a owl:Class ;
+    rdfs:label "Product"^^xsd:string ;
+    rdfs:comment "A product, market segment, or product line." .
+
+ns:Service a owl:Class ;
+    rdfs:label "Service"^^xsd:string .
+
+ns:Financial-Instrument a owl:Class ;
+    rdfs:label "Financial-Instrument"^^xsd:string .
+
+ns:Location a owl:Class ;
+    rdfs:label "Location"^^xsd:string .
+
+ns:Creative-Work a owl:Class ;
+    rdfs:label "Creative-Work"^^xsd:string .
+
+ns:Event a owl:Class ;
+    rdfs:label "Event"^^xsd:string .
+
+ns:Role a owl:Class ;
+    rdfs:label "Role"^^xsd:string .
+
+# ── Edge types (owl:ObjectProperty) with directional domain -> range ──
+op:serves a owl:ObjectProperty ;
+    rdfs:label "SERVES"^^xsd:string ;
+    rdfs:domain ns:Company ;
+    rdfs:range ns:Product .
+
+op:sells a owl:ObjectProperty ;
+    rdfs:label "SELLS"^^xsd:string ;
+    rdfs:domain ns:Company ;
+    rdfs:range ns:Product .
+
+op:produces a owl:ObjectProperty ;
+    rdfs:label "PRODUCES"^^xsd:string ;
+    rdfs:domain ns:Company ;
+    rdfs:range ns:Product .
+
+op:addresses a owl:ObjectProperty ;
+    rdfs:label "ADDRESSES"^^xsd:string ;
+    rdfs:domain ns:Product ;
+    rdfs:range ns:Location .
+
+op:invests_in a owl:ObjectProperty ;
+    rdfs:label "INVESTS IN"^^xsd:string ;
+    rdfs:domain ns:Company ;
+    rdfs:range ns:Company .
+
+op:owns a owl:ObjectProperty ;
+    rdfs:label "OWNS"^^xsd:string ;
+    rdfs:domain ns:Company ;
+    rdfs:range ns:Product .
+
+op:customer_of a owl:ObjectProperty ;
+    rdfs:label "CUSTOMER OF"^^xsd:string ;
+    rdfs:domain ns:Company ;
+    rdfs:range ns:Company .
+
+op:part_of a owl:ObjectProperty ;
+    rdfs:label "PART OF"^^xsd:string ;
+    rdfs:domain ns:Product ;
+    rdfs:range ns:Company .
+
+op:includes a owl:ObjectProperty ;
+    rdfs:label "INCLUDES"^^xsd:string ;
+    rdfs:domain ns:Product ;
+    rdfs:range ns:Product .
+
+op:uses a owl:ObjectProperty ;
+    rdfs:label "USES"^^xsd:string ;
+    rdfs:domain ns:Company ;
+    rdfs:range ns:Product .
+
+op:has a owl:ObjectProperty ;
+    rdfs:label "HAS"^^xsd:string ;
+    rdfs:domain ns:Company ;
+    rdfs:range ns:Financial-Instrument .
+
+op:located_in a owl:ObjectProperty ;
+    rdfs:label "LOCATED IN"^^xsd:string ;
+    rdfs:domain ns:Company ;
+    rdfs:range ns:Location .
+
+# ── Datatype property — must be EXCLUDED from edge types ─────────────
+dp:revenue a owl:DatatypeProperty ;
+    rdfs:label "REVENUE"^^xsd:string ;
+    rdfs:domain ns:Company ;
+    rdfs:range xsd:string .
+
+# NOTE: "COMPETES WITH" and "ACQUIRED" are intentionally NOT declared here.

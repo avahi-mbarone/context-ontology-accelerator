@@ -1,0 +1,19 @@
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix ex:   <https://example.com/onto#> .
+
+<https://example.com/onto> a owl:Ontology ;
+    rdfs:label "Test Ontology" ;
+    rdfs:comment "An ontology for testing imports" .
+
+ex:Patient a owl:Class ; rdfs:label "Patient" .
+ex:Doctor  a owl:Class ; rdfs:label "Doctor" .
+
+ex:treats a owl:ObjectProperty ;
+    rdfs:label "treats" ;
+    rdfs:domain ex:Doctor ;
+    rdfs:range  ex:Patient .
+
+ex:age a owl:DatatypeProperty ;
+    rdfs:label "age" ;
+    rdfs:domain ex:Patient .

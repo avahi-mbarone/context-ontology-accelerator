@@ -1,0 +1,25 @@
+[project]
+name = "coa-data-layer"
+version = "0.1.0"
+description = "Data Layer for Context Ontology Accelerator"
+requires-python = ">=3.12"
+
+dependencies = [
+    "coa-common",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/coa_data_layer"]
+
+[tool.pytest.ini_options]
+markers = [
+    "unit: Unit tests",
+    "integ: Integration tests",
+]
+
+[tool.uv.sources]
+coa-common = { workspace = true }

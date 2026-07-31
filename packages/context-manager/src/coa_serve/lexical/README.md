@@ -1,0 +1,130 @@
+# Lexical Baseline Retriever
+
+Tier 3 retrieval strategy that uses the graphrag-toolkit's built-in retrievers
+against the lexical knowledge graph. Ships as an alternative to the default
+hand-rolled retrieval (VectorRetriever + GraphTraverser).
+
+## What this is
+
+A retrieval adapter that queries the same Neptune property graph and OpenSearch
+indexes that `kg-build` (unstructured document ingestion) writes to. The
+graphrag retrieval approach is **selectable** from a named set of strategies
+(see [Retriever strategies](#retriever-strategies)) rather than hardcoded; the
+default, `chunk_based_semantic`, navigates Source → Chunk → Topic → Statement →
+Fact → Entity structures.
+
+## What this is NOT
+
+- Does NOT consult the published ontology (urn:coa:{namespace}:published)
+- Does NOT use OWL classes, domain/range, or any formal schema knowledge
+- Does NOT change Tier 1 or Tier 2 behaviour
+
+This is the floor against which future ontology-aware retrieval will be measured.
+
+## How to enable
+
+The graphrag retriever is **request-selectable on any deployment**. The lexical
+retriever is built whenever the Neptune + OpenSearch endpoints are configured,
+so a request can engage graphrag on-demand by passing `options.retrieverStrategy`
+— regardless of `TIER3_STRATEGY`.
+
+Whether the *default* Tier 3 path (a request with **no** `retrieverStrategy`)
+uses graphrag is controlled by `TIER3_STRATEGY`:
+
+| `TIER3_STRATEGY` | no `retrieverStrategy` | `retrieverStrategy` passed |
+|---|---|---|
+| `hand-rolled` (default) | hand-rolled (VectorRetriever + GraphTraverser) | graphrag with that strategy |
+| `lexical-baseline` | graphrag with the deployment default (`LEXICAL_RETRIEVER_STRATEGY`) | graphrag with that strategy |
+
+So on the default `hand-rolled` deployment you get today's behaviour unless a
+request explicitly opts into graphrag via `retrieverStrategy`.
+
+## Retriever strategies
+
+Once `lexical-baseline` is enabled, the graphrag retrieval strategy is selectable
+from a named set (single source of truth: `lexical/strategies.py`,
+`STRATEGY_REGISTRY`). Each name maps to a specific toolkit engine family +
+retriever configuration:
+
+| Strategy | Engine family | Notes |
+|----------|---------------|-------|
+| `chunk_based_semantic` | `for_traversal_based_search` | **Default.** Fastest in the toolkit benchmark (~0.48s p50 SEC-10Q) and more accurate than `traversal`. |
+| `traversal` | `for_traversal_based_search` | The previously-hardcoded weighted set (ChunkBasedSearch@1.0 + EntityNetworkSearch@1.0 + TopicBasedSearch@0.5). Slowest + least accurate. |
+| `topic-beam-chunk_only` | `for_semantic_guided_search` | ChunkCosineSimilaritySearch + SemanticChunkBeamGraphSearch. |
+
+### Selecting a strategy
+
+The strategy is resolved once per request with precedence
+**request > deployment default**, where the deployment default depends on
+`TIER3_STRATEGY`:
+
+- **Per-request override** — `options.retrieverStrategy` on the invoke request
+  (alongside `tierOverride` / `dataSourceId` / `maxResults`). When present it
+  engages graphrag with that strategy on **any** deployment. The value is
+  validated at the model layer, so an unknown/unsupported strategy is rejected
+  with a **400** (`ValidationError`) rather than silently substituting a
+  different strategy. Absence of the key is valid.
+- **Deployment default** — `LEXICAL_RETRIEVER_STRATEGY` environment variable,
+  surfaced as `ServiceConfig.lexical_retriever_strategy` (defaults to
+  `chunk_based_semantic`). It only applies when `TIER3_STRATEGY=lexical-baseline`;
+  there, a request with no `retrieverStrategy` uses it (an invalid value logs
+  `invalid_lexical_retriever_strategy` and falls back to `chunk_based_semantic`).
+  Under `TIER3_STRATEGY=hand-rolled` (the default) there is **no** deployment
+  default, so a request with no `retrieverStrategy` runs the hand-rolled path.
+
+In other words: passing `retrieverStrategy` always engages graphrag; omitting it
+falls back to whatever `TIER3_STRATEGY` selects (hand-rolled, or the
+`lexical-baseline` deployment default).
+
+The resolved strategy name is recorded in the trace / response metadata so eval
+runs and request logs attribute results to the strategy that produced them.
+
+> When graphrag is engaged with no explicit strategy (the `lexical-baseline`
+> deployment default), the strategy is `chunk_based_semantic`. The
+> previously-hardcoded behaviour was the `traversal` weighting, so this default
+> is a deliberate behaviour change — the eval baseline is re-recorded for the
+> new default rather than held to the old traversal numbers.
+
+## Store connections
+
+Reuses the same `NEPTUNE_ENDPOINT` and `OPENSEARCH_ENDPOINT` env vars already
+configured for context-manager. The URI format matches what kg-build uses and is
+**backend-aware**, derived from the `NEPTUNE_ENDPOINT` shape:
+
+- Graph store (Neptune Database / NDB): `neptune-db://{neptune_host}:8182`
+- Graph store (Neptune Analytics / NA): `neptune-graph://g-{id}` — used when the
+  endpoint is NA-shaped (`g-…`, `neptune-graph://…`, or an NA host)
+- Vector store: `aoss://{opensearch_endpoint}`
+
+## Tenant ID
+
+### Namespace → tenant contract (production default)
+
+`_get_engine` derives `tenant_id = to_graphrag_tenant_id(namespace)` (from
+`coa_common.constants`) — the same function `kg-build` uses at
+ingestion time — and passes it to the toolkit factory. This is the production
+multi-tenancy contract: the derived `tenant_id` **must match the value kg-build
+wrote**, or retrieval targets a non-existent tenant partition (suffixed
+`__Chunk{tenant}__` labels / `chunk_{tenant}` index) and returns zero documents.
+Engines are cached per `(effective_tenant, strategy.name)` so a per-request
+strategy override does not collide with the cache. This derivation is the default
+and is unchanged.
+
+### Default-tenant override (eval-only seam — not request-reachable)
+
+`BaselineLexicalRetriever` accepts an optional constructor parameter
+`tenant_id_override` (default `None` = derive from namespace, i.e. unchanged
+production behaviour):
+
+- `None` → derive the tenant from the namespace (production default).
+- `DEFAULT_TENANT_OVERRIDE` (the sentinel `"__graphrag_default_tenant__"`) →
+  read under the graphrag-toolkit **default** tenant (`tenant_id=None` → bare
+  `__Chunk__` labels / bare `chunk` index).
+- any other string → read under that literal tenant.
+
+This seam exists **only** for the eval/integ harness, which reads the
+toolkit-built SEC-10Q graph (populated by the graphrag-toolkit example under the
+toolkit default tenant, not via kg-build). It is constructed directly by that
+harness and is deliberately **NOT** wired into `build_lexical_retriever` or the
+request path — there is no way to reach it from an invoke request. The production
+namespace→tenant path is validated end-to-end separately (KG-build E2E).

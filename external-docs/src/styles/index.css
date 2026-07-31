@@ -1,0 +1,209 @@
+@import "tailwindcss";
+
+@theme {
+  --color-paper: #faf7f2;
+  --color-paper-deep: #f2ede4;
+  --color-ink: #1a1915;
+  --color-ink-soft: #3a3731;
+  --color-ink-muted: #6b675d;
+  --color-ink-faint: #a8a299;
+  --color-rule: #e4ddd0;
+  --color-terracotta: #b5462a;
+  --color-terracotta-soft: #d9664a;
+  --color-terracotta-deep: #8a3420;
+  --color-ember: #e8c5a0;
+
+  --color-night: #15140f;
+  --color-night-soft: #1f1d18;
+  --color-night-rule: #2d2a24;
+
+  --font-display: "Fraunces", ui-serif, Georgia, serif;
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+@layer base {
+  :root {
+    color-scheme: light;
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    background-color: var(--color-paper);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-feature-settings: "ss01", "cv11";
+    font-synthesis: none;
+    overflow-x: hidden;
+  }
+
+  ::selection {
+    background-color: var(--color-terracotta);
+    color: var(--color-paper);
+  }
+}
+
+.paper-grain {
+  background-color: var(--color-paper);
+  background-image:
+    radial-gradient(circle at 20% 10%, rgba(181, 70, 42, 0.035) 0%, transparent 55%),
+    radial-gradient(circle at 80% 0%, rgba(26, 25, 21, 0.025) 0%, transparent 60%);
+}
+
+/* Fraunces optical-size tuning for very large display headings */
+.display-h1 {
+  font-family: var(--font-display);
+  font-variation-settings: "opsz" 144, "SOFT" 50;
+  font-weight: 500;
+  letter-spacing: -0.025em;
+  line-height: 0.95;
+}
+
+.display-h2 {
+  font-family: var(--font-display);
+  font-variation-settings: "opsz" 96, "SOFT" 30;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  line-height: 1.05;
+}
+
+.display-eyebrow {
+  font-family: var(--font-sans);
+  font-weight: 500;
+  font-size: 0.75rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--color-terracotta);
+}
+
+/* Markdown content styling */
+.prose h1 {
+  font-family: var(--font-display);
+  font-variation-settings: "opsz" 96;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  font-size: 2.25rem;
+  margin-bottom: 1.5rem;
+  color: var(--color-ink);
+}
+
+.prose h2 {
+  font-family: var(--font-display);
+  font-variation-settings: "opsz" 72;
+  font-weight: 500;
+  letter-spacing: -0.015em;
+  font-size: 1.5rem;
+  margin-top: 2.5rem;
+  margin-bottom: 1rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--color-rule);
+  color: var(--color-ink);
+}
+
+.prose h3 {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  font-size: 1.125rem;
+  margin-top: 2rem;
+  margin-bottom: 0.75rem;
+  color: var(--color-ink-soft);
+}
+
+.prose p {
+  line-height: 1.75;
+  margin-bottom: 1rem;
+  color: var(--color-ink-soft);
+}
+
+.prose a {
+  color: var(--color-terracotta);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  transition: color 150ms;
+}
+.prose a:hover {
+  color: var(--color-terracotta-deep);
+}
+
+.prose code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  background-color: var(--color-paper-deep);
+  padding: 0.15em 0.4em;
+  border-radius: 4px;
+  color: var(--color-terracotta-deep);
+}
+
+.prose pre {
+  background-color: var(--color-ink);
+  color: var(--color-ember);
+  padding: 1.25rem 1.5rem;
+  border-radius: 8px;
+  overflow-x: auto;
+  margin: 1.5rem 0;
+  font-size: 0.8rem;
+  line-height: 1.7;
+}
+.prose pre code {
+  background: none;
+  padding: 0;
+  color: inherit;
+  font-size: inherit;
+}
+
+/* Mermaid diagrams render inside a <pre> (react-markdown's default code-block
+   wrapper), but they're an image, not code — override the dark code-block
+   background with a light one so the diagram matches the page. */
+.prose pre:has(.mermaid-diagram) {
+  background-color: var(--color-paper-deep);
+  padding: 1.5rem;
+}
+
+.prose table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1.5rem 0;
+  font-size: 0.875rem;
+}
+.prose th {
+  text-align: left;
+  font-weight: 600;
+  padding: 0.75rem 1rem;
+  border-bottom: 2px solid var(--color-rule);
+  color: var(--color-ink);
+}
+.prose td {
+  padding: 0.6rem 1rem;
+  border-bottom: 1px solid var(--color-rule);
+  color: var(--color-ink-soft);
+}
+
+.prose ul, .prose ol {
+  margin: 1rem 0;
+  padding-left: 1.5rem;
+  color: var(--color-ink-soft);
+}
+.prose li {
+  margin-bottom: 0.4rem;
+  line-height: 1.65;
+}
+
+.prose blockquote {
+  border-left: 3px solid var(--color-terracotta);
+  padding-left: 1rem;
+  margin: 1.5rem 0;
+  color: var(--color-ink-muted);
+  font-style: italic;
+}
+
+.prose strong {
+  font-weight: 600;
+  color: var(--color-ink);
+}
