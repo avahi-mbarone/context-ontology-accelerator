@@ -82,7 +82,7 @@ jobs:
           pnpm install --frozen-lockfile
           # Stage OpenAPI specs into public/api/ (servers block from SCL_API_BASE_URL if set).
           node scripts/prepare-openapi.mjs
-          pnpm build --base="${PAGES_BASE}"
+          VITE_BASE="${PAGES_BASE}" pnpm build
 
       - uses: actions/configure-pages@v5
         with:
