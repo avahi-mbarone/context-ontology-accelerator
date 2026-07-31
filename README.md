@@ -31,7 +31,7 @@ make lint       # check linting
 make test       # run unit tests
 ```
 
-**Full developer guide:** [docs/getting-started.md](docs/getting-started.md)
+**Full developer guide:** [external-docs/content/getting-started.md](external-docs/content/getting-started.md)
 
 ## Repository Structure
 
