@@ -11,9 +11,6 @@
 # The API reference (Scalar) needs the generated OpenAPI specs. smithy-generated/ is
 # not committed, so this workflow runs the Smithy Gradle build (Java 17) to produce
 # just the OpenAPI projections, then copies them where prepare-openapi.mjs expects.
-#
-# One-time setup on the repo: Settings > Pages > Build and deployment > Source =
-# "GitHub Actions".
 
 name: Deploy docs to GitHub Pages
 
@@ -45,6 +42,11 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # configure-pages with enablement:true calls the Pages API to turn the
+    # feature on, which requires pages:write (contents:read alone is not enough).
+    permissions:
+      contents: read
+      pages: write
     steps:
       - uses: actions/checkout@v4
 
@@ -83,6 +85,11 @@ jobs:
           pnpm build --base="${PAGES_BASE}"
 
       - uses: actions/configure-pages@v5
+        with:
+          # Programmatically enable GitHub Pages if it isn't already turned on,
+          # removing the one-time manual "Settings > Pages > Source = GitHub
+          # Actions" step noted at the top of this file.
+          enablement: true
       - uses: actions/upload-pages-artifact@v3
         with:
           path: external-docs/dist
