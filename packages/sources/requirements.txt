@@ -1,13 +1,13 @@
 # Non-boto3 dependencies for the sources Lambda.
 # boto3/botocore are excluded (provided by the Lambda runtime).
-structlog>=24.0.0
-python-dateutil>=2.6.0
+structlog>=24.4.0
+python-dateutil>=2.9.0.post0
 pydantic>=2.13.4
-pydantic-settings>=2.0.0
-python-ulid>=3.0.0
+pydantic-settings>=2.14.2
+python-ulid>=3.2.1
 pg8000>=1.31.5
 # JDBC discovery dialects (pure-Python drivers preferred for Lambda packaging):
 pymysql>=1.2.0           # MySQL
-oracledb>=2.0.0          # Oracle (thin mode — no Oracle client needed)
-python-tds>=1.15.0       # SQL Server (import: pytds — pure Python, no ODBC)
+oracledb>=2.5.1          # Oracle (thin mode — no Oracle client needed)
+python-tds>=1.17.1       # SQL Server (import: pytds — pure Python, no ODBC)
 snowflake-connector-python>=3.18.1  # Snowflake (needs a warehouse in config; heavier bundle)
