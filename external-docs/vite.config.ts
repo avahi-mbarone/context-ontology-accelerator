@@ -8,7 +8,11 @@ import { resolve } from 'node:path'
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
-  base: './',
+  // Absolute base so asset URLs resolve correctly regardless of the serving
+  // path (GitHub Pages project subpath vs. local dev/preview at '/'). Override
+  // via the VITE_BASE env var — the pages.yml workflow sets this to
+  // PAGES_BASE ("/context-ontology-accelerator/") for the production build.
+  base: process.env.VITE_BASE ?? '/',
   build: {
     outDir: 'dist',
   },
