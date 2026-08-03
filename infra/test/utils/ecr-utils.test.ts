@@ -6,14 +6,14 @@ import { parseEcrImageUri } from "../../lib/utils/ecr-utils";
 describe("parseEcrImageUri", () => {
   it("parses a standard single-segment repo with tag", () => {
     const result = parseEcrImageUri(
-      "839001574554.dkr.ecr.us-east-1.amazonaws.com/scl:context-manager-abc123",
+      "123456789012.dkr.ecr.us-east-1.amazonaws.com/scl:context-manager-abc123",
     );
-    expect(result.accountId).toBe("839001574554");
+    expect(result.accountId).toBe("123456789012");
     expect(result.region).toBe("us-east-1");
     expect(result.repositoryName).toBe("scl");
     expect(result.tag).toBe("context-manager-abc123");
     expect(result.repositoryArn).toBe(
-      "arn:aws:ecr:us-east-1:839001574554:repository/scl",
+      "arn:aws:ecr:us-east-1:123456789012:repository/scl",
     );
   });
 
@@ -45,7 +45,7 @@ describe("parseEcrImageUri", () => {
 
   it("defaults tag to latest when not specified", () => {
     const result = parseEcrImageUri(
-      "839001574554.dkr.ecr.us-east-1.amazonaws.com/scl",
+      "123456789012.dkr.ecr.us-east-1.amazonaws.com/scl",
     );
     expect(result.repositoryName).toBe("scl");
     expect(result.tag).toBe("latest");
@@ -65,7 +65,7 @@ describe("parseEcrImageUri", () => {
 
   it("throws on empty repository name", () => {
     expect(() =>
-      parseEcrImageUri("839001574554.dkr.ecr.us-east-1.amazonaws.com/:tag"),
+      parseEcrImageUri("123456789012.dkr.ecr.us-east-1.amazonaws.com/:tag"),
     ).toThrow("empty repository name");
   });
 });

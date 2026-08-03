@@ -1140,14 +1140,14 @@ class TestGraphStoreUri:
     def test_na_graph_id_produces_neptune_graph_uri(self):
         from coa_serve.clients.factory import _graph_store_uri
 
-        uri = _graph_store_uri("g-idyumweo60")
-        assert uri == "neptune-graph://g-idyumweo60"
+        uri = _graph_store_uri("g-abcd1234ef")
+        assert uri == "neptune-graph://g-abcd1234ef"
 
     def test_na_host_produces_neptune_graph_uri(self):
         from coa_serve.clients.factory import _graph_store_uri
 
-        uri = _graph_store_uri("g-idyumweo60.us-east-1.neptune-graph.amazonaws.com")
-        assert uri == "neptune-graph://g-idyumweo60"
+        uri = _graph_store_uri("g-abcd1234ef.us-east-1.neptune-graph.amazonaws.com")
+        assert uri == "neptune-graph://g-abcd1234ef"
 
     def test_na_uri_prefix_produces_neptune_graph_uri(self):
         from coa_serve.clients.factory import _graph_store_uri
@@ -1172,7 +1172,7 @@ class TestBuildLexicalRetrieverStrategy:
 
         mock_config = MagicMock()
         mock_config.tier3_strategy = "lexical-baseline"
-        mock_config.neptune_endpoint = "g-idyumweo60.us-east-1.neptune-graph.amazonaws.com"
+        mock_config.neptune_endpoint = "g-abcd1234ef.us-east-1.neptune-graph.amazonaws.com"
         mock_config.opensearch_endpoint = "https://test.aoss.amazonaws.com"
         mock_config.lexical_retriever_strategy = "chunk_based_semantic"
 
@@ -1235,13 +1235,13 @@ class TestBuildLexicalRetrieverStrategy:
 
         mock_config = MagicMock()
         mock_config.tier3_strategy = "lexical-baseline"
-        mock_config.neptune_endpoint = "g-idyumweo60.us-east-1.neptune-graph.amazonaws.com"
+        mock_config.neptune_endpoint = "g-abcd1234ef.us-east-1.neptune-graph.amazonaws.com"
         mock_config.opensearch_endpoint = "https://test.aoss.amazonaws.com"
         mock_config.lexical_retriever_strategy = "chunk_based_semantic"
 
         result = build_lexical_retriever(mock_config)
 
-        assert result._graph_store_uri == "neptune-graph://g-idyumweo60"
+        assert result._graph_store_uri == "neptune-graph://g-abcd1234ef"
         assert result._vector_store_uri == "aoss://https://test.aoss.amazonaws.com"
 
     def test_retriever_uses_ndb_graph_store_uri(self):

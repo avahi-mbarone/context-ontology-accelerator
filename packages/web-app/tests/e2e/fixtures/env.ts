@@ -46,7 +46,7 @@ export interface GlueSourceEnv {
 }
 
 // Known-good "hcp360" Glue database on the dev environment (catalog = account).
-const DEFAULT_GLUE_CATALOG_ID = "839001574554";
+const DEFAULT_GLUE_CATALOG_ID = "123456789012";
 const DEFAULT_GLUE_DATABASE_NAME = "hcp360";
 
 /** Resolve the Glue source config (env override or dev defaults). */

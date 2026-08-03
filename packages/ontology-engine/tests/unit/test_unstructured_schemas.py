@@ -32,7 +32,7 @@ from pydantic import ValidationError
 # pops one required key to assert the rejection.
 _VALID_KWARGS: dict = {
     "name": "test-business-news",
-    "graph_arn": "arn:aws:neptune-graph:us-east-1:992382388936:graph/g-idyumweo60",
+    "graph_arn": "arn:aws:neptune-graph:us-east-1:123456789012:graph/g-abcd1234ef",
     "ontology_uri_prefix": (f"{GRAPH_BASE_URI}/namespace/test-e2e/ontology/test-business-news"),
 }
 
