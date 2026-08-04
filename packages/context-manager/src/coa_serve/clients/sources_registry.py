@@ -22,7 +22,7 @@ from typing import Any
 
 import boto3
 import structlog
-from coa_common import resolve_namespace_id, resolve_region
+from coa_common import resolve_namespace_id, resolve_region, sync_boto_config
 
 from ..query_utils import validate_namespace
 
@@ -97,7 +97,7 @@ class SourcesRegistry:
         self._region = region or resolve_region()
         self._executor = executor
         if self._table_name or self._namespaces_table:
-            self._dynamodb = boto3.resource("dynamodb", region_name=self._region)
+            self._dynamodb = boto3.resource("dynamodb", region_name=self._region, config=sync_boto_config())
         else:
             self._dynamodb = None
         self._db_cache: dict[str, tuple[str, float]] = {}

@@ -117,7 +117,12 @@ class TestGetS3Client:
     @patch("coa_common.s3.boto3")
     def test_no_role_returns_default(self, mock_boto3):
         get_s3_client()
-        mock_boto3.client.assert_called_once_with("s3")
+        # No role: a single plain S3 client, now with the shared default
+        # timeout/retry config (socket timeouts + bounded retries).
+        assert mock_boto3.client.call_count == 1
+        args, kwargs = mock_boto3.client.call_args
+        assert args == ("s3",)
+        assert kwargs["config"].connect_timeout == 2
 
     @patch("coa_common.s3.boto3")
     def test_with_role_calls_assume_role(self, mock_boto3):

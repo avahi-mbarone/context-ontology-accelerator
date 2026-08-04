@@ -26,6 +26,7 @@ from pathlib import PurePosixPath
 from typing import Any
 
 import boto3
+from coa_common import async_boto_config
 from coa_common.constants import (
     DEFAULT_MAX_FILE_SIZE_MB,
     SUPPORTED_EXTENSIONS,
@@ -299,7 +300,7 @@ def handler(event: dict, context: Any) -> dict:
             # 4. Process ---------------------------------------------------
             if ext == ".pdf":
                 if textract_client is None:
-                    textract_client = boto3.client("textract")
+                    textract_client = boto3.client("textract", config=async_boto_config())
                 processed_text, out_ext = process_pdf(
                     content_bytes,
                     filename,

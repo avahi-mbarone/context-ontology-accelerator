@@ -13,6 +13,7 @@ import boto3
 from boto3.dynamodb.conditions import ConditionBase, Key  # noqa: F401 — re-exported for callers
 from botocore.exceptions import ClientError
 
+from coa_common.aws_config import async_boto_config
 from coa_common.dao.base import DatastoreDAO, PaginatedResult, QueryParams
 
 logger = logging.getLogger(__name__)
@@ -40,7 +41,7 @@ class DynamoDBDAO(DatastoreDAO):
             region: AWS region hosting the table.
         """
         self._table_name = table_name
-        self._resource = boto3.resource("dynamodb", region_name=region)
+        self._resource = boto3.resource("dynamodb", region_name=region, config=async_boto_config())
         self._table = self._resource.Table(table_name)
 
     # ------------------------------------------------------------------

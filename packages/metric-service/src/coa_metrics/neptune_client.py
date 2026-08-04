@@ -41,6 +41,8 @@ logger = structlog.get_logger(__name__)
 NEPTUNE_ENDPOINT = os.getenv("NEPTUNE_ENDPOINT", "")
 NEPTUNE_REGION = os.getenv("AWS_REGION", "us-east-1")
 NEPTUNE_TIMEOUT = float(os.getenv("NEPTUNE_TIMEOUT", "30"))
+# Split timeout: fast connect (TCP/TLS handshake), NEPTUNE_TIMEOUT read budget.
+NEPTUNE_HTTP_TIMEOUT = httpx.Timeout(connect=2.0, read=NEPTUNE_TIMEOUT, write=NEPTUNE_TIMEOUT, pool=NEPTUNE_TIMEOUT)
 
 
 # ── Namespace prefixes ──────────────────────────────────────────────────
@@ -133,7 +135,7 @@ def _sparql_query(query: str) -> dict[str, Any]:
     }
     headers.update(_sign("POST", url, body))
     t0 = time.perf_counter()
-    with httpx.Client(timeout=NEPTUNE_TIMEOUT) as client:
+    with httpx.Client(timeout=NEPTUNE_HTTP_TIMEOUT) as client:
         resp = client.post(url, content=body, headers=headers)
         elapsed_ms = (time.perf_counter() - t0) * 1000
         if resp.status_code >= 400:
@@ -154,7 +156,7 @@ def _sparql_update(update: str) -> None:
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
     headers.update(_sign("POST", url, body))
     t0 = time.perf_counter()
-    with httpx.Client(timeout=NEPTUNE_TIMEOUT) as client:
+    with httpx.Client(timeout=NEPTUNE_HTTP_TIMEOUT) as client:
         resp = client.post(url, content=body, headers=headers)
         elapsed_ms = (time.perf_counter() - t0) * 1000
         if resp.status_code >= 400:

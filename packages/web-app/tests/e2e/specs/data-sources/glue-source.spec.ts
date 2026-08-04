@@ -5,7 +5,9 @@ import { test } from "../../fixtures/test";
 import {
   readE2EEnv,
   readGlueSourceEnv,
+  requireGlueSourceEnv,
   MISSING_ENV_REASON,
+  MISSING_GLUE_ENV_REASON,
 } from "../../fixtures/env";
 
 /**
@@ -17,6 +19,7 @@ import {
  */
 test.describe("data-sources: glue source lifecycle", () => {
   test.skip(!readE2EEnv(), MISSING_ENV_REASON);
+  test.skip(!readGlueSourceEnv(), MISSING_GLUE_ENV_REASON);
   test.skip(
     !process.env.E2E_SLOW,
     "slow lifecycle test — set E2E_SLOW=1 to run",
@@ -30,7 +33,7 @@ test.describe("data-sources: glue source lifecycle", () => {
   }) => {
     const ns = uniqueName("ns-glue");
     const srcName = uniqueName("src-glue");
-    const glue = readGlueSourceEnv();
+    const glue = requireGlueSourceEnv();
 
     await namespacesPage.gotoList();
     await namespacesPage.create(ns);

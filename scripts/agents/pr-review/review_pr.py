@@ -1,0 +1,551 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""AI review of a pull request — code review and docs-completeness review.
+
+Replaces the internally-hosted review CI components for the GitHub repository.
+Maintainer-invoked: takes a PR number or URL, reads the diff, asks Claude via
+Bedrock for findings, and posts them as a single review comment using the same
+severity markers the ``github-pr-review`` resolver skill triages — so a finding
+filed here can be resolved by that skill without translation.
+
+Safety properties, in order of importance:
+
+1. **Maintainer-gated.** ``workflow_dispatch`` already requires write access, but
+   the actor's permission is re-checked here so the gate is explicit and survives
+   someone adding a second trigger later.
+2. **The diff is untrusted.** A pull request author controls it completely. It is
+   passed to the model as delimited data, never interpolated into a shell
+   command, and the prompts state that the block is data and not instructions.
+3. **Findings are advisory.** This posts a comment. It does not approve, request
+   changes, merge, or push code, so a manipulated model response cannot alter
+   the repository state.
+4. **Reasoning and writing are separate jobs.** ``--mode reason`` holds the model
+   credentials and NO write permission; it emits a JSON payload. ``--mode
+   publish`` holds write permission and never touches the model. The payload is
+   the audited handoff between them, so a compromised model response cannot
+   reach a token that can write.
+5. **Model output is scanned before posting.** Credential shapes and internal
+   hostnames are redacted, because the model reads a full diff and its output
+   goes to a public comment.
+6. **Fork-authored content is refused.** Reviewing it would process untrusted
+   content while holding privileged credentials.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+
+PROMPTS = {"code": "code-review-prompt.md", "docs": "docs-completeness-prompt.md"}
+
+# Permission levels allowed to invoke a review. "read" and "none" are refused.
+PRIVILEGED = frozenset({"admin", "maintain", "write"})
+
+# Cap the diff sent to the model. A 20k-line diff is neither reviewable nor
+# affordable; truncation is reported in the output so it is never silent.
+MAX_DIFF_LINES = 3000
+
+_JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
+
+# Hunk header: @@ -old,count +new,count @@
+_HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+Runner = Callable[[list[str]], str]
+
+# Credential shapes and internal identifiers redacted from model output before it
+# is posted. Deliberately narrow: each pattern has a distinctive prefix or
+# structure, because a loose pattern (for example "any 40-char string", or any
+# 12-digit number) would redact real code and hide the finding it belongs to.
+_REDACTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\b(?:AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}\b"), "[REDACTED-AWS-KEY-ID]"),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{16,}\b"), "[REDACTED-GITHUB-TOKEN]"),
+    (re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}\b"), "[REDACTED-SLACK-TOKEN]"),
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"), "[REDACTED-PRIVATE-KEY]"),
+    (re.compile(r"\b(?:aws_secret_access_key|secret_access_key)\s*[=:]\s*\S+", re.I), "[REDACTED-AWS-SECRET]"),
+    (re.compile(r"\bBearer\s+[A-Za-z0-9._~+/-]{20,}"), "[REDACTED-BEARER-TOKEN]"),
+    (re.compile(r"\b[\w.-]+\.(?:corp\.amazon\.com|a2z\.com|aws\.dev|amazon\.dev)\b"), "[REDACTED-INTERNAL-HOST]"),
+)
+
+
+def redact(text: str) -> tuple[str, int]:
+    """Redact credential shapes and internal hostnames. Returns text and hit count."""
+    hits = 0
+    for pattern, placeholder in _REDACTIONS:
+        text, count = pattern.subn(placeholder, text)
+        hits += count
+    return text, hits
+
+
+def sanitize_findings(findings: list[Finding]) -> tuple[list[Finding], int]:
+    """Redact every finding's title and detail before it can be posted."""
+    cleaned: list[Finding] = []
+    total = 0
+    for finding in findings:
+        title, a = redact(finding.title)
+        detail, b = redact(finding.detail)
+        total += a + b
+        cleaned.append(
+            Finding(severity=finding.severity, title=title, detail=detail, path=finding.path, line=finding.line)
+        )
+    return cleaned, total
+
+
+def prompt_version(path: Path) -> str:
+    """Content hash of the prompt, so a comment records which prompt produced it."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()[:8]
+
+
+def attribution(meta: dict[str, object]) -> str:
+    """Bot-generated labelling: model, prompt version, time and run identity.
+
+    Required so a maintainer never mistakes agent output for human review, and so
+    a finding can be traced back to the exact model and prompt that produced it.
+    """
+    return (
+        "<sub>🤖 Generated by the AI PR review agent — **not** human review. "
+        f"model `{meta.get('model', 'unknown')}` · prompt `{meta.get('prompt_version', 'unknown')}` · "
+        f"run [{meta.get('run_id', 'local')}]({meta.get('run_url', '')}) · {meta.get('generated_at', 'unknown')}</sub>"
+    )
+
+
+@dataclass(frozen=True)
+class Finding:
+    severity: str
+    title: str
+    detail: str
+    path: str | None = None
+    line: int | None = None
+
+
+def gh(args: list[str]) -> str:
+    proc = subprocess.run(["gh", *args], capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        raise RuntimeError(f"gh {' '.join(args)} failed ({proc.returncode}): {proc.stderr.strip()}")
+    return proc.stdout
+
+
+def parse_pr_ref(ref: str) -> int:
+    """Accept a bare number or any GitHub PR URL and return the number."""
+    ref = ref.strip()
+    if ref.isdigit():
+        return int(ref)
+    match = re.search(r"/pull/(\d+)", ref)
+    if not match:
+        raise ValueError(f"could not read a PR number from {ref!r}")
+    return int(match.group(1))
+
+
+def assert_privileged(repo: str, actor: str, *, runner: Runner = gh) -> str:
+    """Fail closed unless the actor has write access or better.
+
+    Raises PermissionError on insufficient access AND on an unreadable
+    permission response — an unverifiable actor is not a privileged one.
+    """
+    try:
+        raw = runner(["api", f"repos/{repo}/collaborators/{actor}/permission"])
+        level = json.loads(raw).get("permission", "none")
+    except (RuntimeError, json.JSONDecodeError) as exc:
+        raise PermissionError(f"could not verify permission for {actor!r}: {exc}") from exc
+    if level not in PRIVILEGED:
+        raise PermissionError(f"{actor!r} has permission {level!r}; a review requires one of {sorted(PRIVILEGED)}")
+    return level
+
+
+def fetch_pr(repo: str, number: int, *, runner: Runner = gh) -> dict[str, object]:
+    raw = runner(
+        [
+            "pr",
+            "view",
+            str(number),
+            "--repo",
+            repo,
+            "--json",
+            "number,title,body,headRefName,headRefOid,baseRefName,files,additions,deletions,isCrossRepository",
+        ]
+    )
+    return json.loads(raw)
+
+
+def assert_not_fork(pr: dict[str, object]) -> None:
+    """Refuse fork-authored pull requests.
+
+    Reviewing one would process untrusted content while this job holds the
+    Bedrock role, and the publish job holds write permission. A maintainer
+    dispatching against a fork PR is the path this closes — the workflow trigger
+    gate alone does not cover it.
+    """
+    if pr.get("isCrossRepository"):
+        raise PermissionError(
+            f"PR #{pr.get('number')} comes from a fork. Fork-authored content is not reviewed, "
+            "because doing so would process untrusted input with privileged credentials."
+        )
+
+
+def marker(review: str, sha: str) -> str:
+    """Idempotency marker, mirroring what the CI review components embed.
+
+    Keyed on review type AND head commit, so a re-dispatch against an unchanged
+    PR is recognised as already reviewed while a new push is reviewed again.
+    """
+    return f"<!-- ai-pr-review:{review}:{sha} -->"
+
+
+def find_previous_review(repo: str, number: int, mark: str, *, runner: Runner = gh) -> str | None:
+    """Return the URL of an existing comment carrying this marker, if any.
+
+    Deliberately fails OPEN, unlike the investigator's issue dedup: if the
+    comment list cannot be read we post anyway. A duplicate comment on one PR is
+    contained and visible, whereas a missing review is silent — the opposite
+    trade-off from issue creation, where duplicates accumulate repo-wide.
+    """
+    try:
+        raw = runner(["api", f"repos/{repo}/issues/{number}/comments?per_page=100"])
+        for comment in json.loads(raw):
+            if mark in str(comment.get("body", "")):
+                return str(comment.get("html_url", "unknown"))
+    except (RuntimeError, json.JSONDecodeError) as exc:
+        print(f"[review] WARNING: could not check for a previous review, posting anyway: {exc}", file=sys.stderr)
+    return None
+
+
+def fetch_diff(repo: str, number: int, *, runner: Runner = gh) -> str:
+    return runner(["pr", "diff", str(number), "--repo", repo])
+
+
+def truncate_diff(diff: str, max_lines: int = MAX_DIFF_LINES) -> tuple[str, bool]:
+    """Return the diff capped at ``max_lines``, and whether it was truncated."""
+    lines = diff.splitlines()
+    if len(lines) <= max_lines:
+        return diff, False
+    kept = "\n".join(lines[:max_lines])
+    return f"{kept}\n\n[diff truncated at {max_lines} of {len(lines)} lines]", True
+
+
+def parse_diff_anchors(diff: str) -> dict[str, set[int]]:
+    """Map each file to the new-side line numbers that can carry an inline comment.
+
+    GitHub rejects a review comment whose line is not part of the diff with a 422,
+    so every anchor must be validated before posting — and one invalid comment
+    fails the ENTIRE review call, taking the valid ones with it. Only added and
+    context lines on the right-hand side are anchorable; deletions are not, since
+    findings are about the post-change state.
+
+    Parsed from the FULL diff, never the truncated copy sent to the model, so
+    truncation cannot silently strip valid anchors.
+    """
+    anchors: dict[str, set[int]] = {}
+    path: str | None = None
+    new_line = 0
+    for line in diff.split("\n"):
+        # Order matters: "+++"/"---" must be tested before "+"/"-".
+        if line.startswith("+++ "):
+            target = line[4:].strip()
+            path = None if target == "/dev/null" else target[2:] if target.startswith("b/") else target
+            continue
+        if line.startswith(("--- ", "diff --git", "index ", "similarity ", "rename ", "new file", "deleted file")):
+            continue
+        if match := _HUNK.match(line):
+            new_line = int(match.group(1))
+            continue
+        if path is None:
+            continue
+        if line.startswith("\\"):  # "\ No newline at end of file"
+            continue
+        # A diff body line always starts with " ", "+" or "-". Anything else —
+        # including the empty string that split("\n") leaves after a trailing
+        # newline — is not content and must not advance the line counter.
+        if not line or line[0] not in " +-":
+            continue
+        if line.startswith("-"):
+            continue  # removed line: no right-hand-side position
+        # Added AND context lines are both inside the hunk, so both are valid
+        # anchors. Restricting to added lines only would divert findings about
+        # unchanged-but-affected code to the summary for no reason.
+        anchors.setdefault(path, set()).add(new_line)
+        new_line += 1
+    return anchors
+
+
+def partition_findings(findings: list[Finding], anchors: dict[str, set[int]]) -> tuple[list[Finding], list[Finding]]:
+    """Split into anchorable (inline) and non-anchorable (summary) findings.
+
+    A finding that cannot be anchored is NEVER dropped — it moves to the summary
+    body. Losing a real finding because the model named a line outside the diff
+    would be far worse than posting it without a precise location.
+    """
+    inline, summary = [], []
+    for finding in findings:
+        if finding.path and finding.line and finding.line in anchors.get(finding.path, frozenset()):
+            inline.append(finding)
+        else:
+            summary.append(finding)
+    return inline, summary
+
+
+def build_prompt(template: str, pr: dict[str, object], diff: str, truncated: bool) -> str:
+    files = pr.get("files")
+    file_list = (
+        "\n".join(f"- {f.get('path')} (+{f.get('additions')}/-{f.get('deletions')})" for f in files)
+        if isinstance(files, list)
+        else "(unavailable)"
+    )
+    replacements = {
+        "{{PR_NUMBER}}": str(pr.get("number", "?")),
+        "{{PR_TITLE}}": str(pr.get("title", "")),
+        "{{PR_BODY}}": str(pr.get("body") or "(no description)"),
+        "{{BASE_BRANCH}}": str(pr.get("baseRefName", "main")),
+        "{{CHANGED_FILES}}": file_list,
+        "{{DIFF}}": diff,
+        "{{TRUNCATION_NOTE}}": (
+            "The diff below is TRUNCATED; say so in your summary and scope findings to what you can see."
+            if truncated
+            else ""
+        ),
+    }
+    out = template
+    for token, value in replacements.items():
+        out = out.replace(token, value)
+    return out
+
+
+def run_model(prompt: str, *, timeout: int = 900) -> str:
+    """Invoke Claude headless with every tool denied — it only reads and writes text."""
+    proc = subprocess.run(
+        ["claude", "-p", prompt, "--disallowedTools", "Bash,Write,Edit,WebFetch"],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"claude failed ({proc.returncode}): {proc.stderr.strip()[:500]}")
+    return proc.stdout
+
+
+def parse_findings(stdout: str) -> list[Finding]:
+    """Parse the model's JSON into findings, dropping anything malformed.
+
+    A finding without a severity or title is unusable, so it is skipped rather
+    than posted as a blank bullet.
+    """
+    match = _JSON_OBJECT.search(stdout)
+    if not match:
+        raise ValueError("model output contained no JSON object")
+    raw = json.loads(match.group(0)).get("findings", [])
+    findings = []
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        severity = str(item.get("severity", "")).upper()
+        title = str(item.get("title", "")).strip()
+        if severity not in {"CRITICAL", "HIGH", "MEDIUM", "LOW"} or not title:
+            continue
+        line = item.get("line")
+        findings.append(
+            Finding(
+                severity=severity,
+                title=title,
+                detail=str(item.get("detail", "")).strip(),
+                path=str(item["path"]) if item.get("path") else None,
+                line=int(line) if isinstance(line, int) else None,
+            )
+        )
+    return findings
+
+
+_MARKERS = {"CRITICAL": "🔴 [CRITICAL]", "HIGH": "🟠 [HIGH]", "MEDIUM": "🟡 [MEDIUM]", "LOW": "🔵 [LOW]"}
+_ORDER = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
+
+
+def render_comment(findings: list[Finding], review: str, actor: str, inline_count: int = 0) -> str:
+    """Render the review comment.
+
+    Markers match what the github-pr-review resolver skill filters on, so a
+    finding here is directly actionable by that skill.
+    """
+    heading = {"code": "Code review", "docs": "Docs completeness review"}[review]
+    if not findings:
+        if inline_count:
+            return f"## {heading}\n\n{inline_count} finding(s) posted inline. Requested by @{actor}."
+        return f"## {heading}\n\nNo findings. (Requested by @{actor}.)"
+    intro = f"{len(findings)} finding(s)"
+    if inline_count:
+        # Say so explicitly: a reader seeing 2 here and 5 inline should not think
+        # findings went missing.
+        intro += f" that could not be anchored to a diff line, plus {inline_count} posted inline"
+    lines = [f"## {heading}", "", f"{intro}. Requested by @{actor}.", ""]
+    for f in sorted(findings, key=lambda x: _ORDER[x.severity]):
+        where = f" — `{f.path}{':' + str(f.line) if f.line else ''}`" if f.path else ""
+        lines += [f"**{_MARKERS[f.severity]}** {f.title}{where}", ""]
+        if f.detail:
+            lines += [f.detail, ""]
+    lines += [
+        "---",
+        "<sub>Advisory only — this review does not approve, request changes, or modify code. "
+        "Severity markers match the `github-pr-review` resolver skill.</sub>",
+    ]
+    return "\n".join(lines)
+
+
+def render_inline_body(finding: Finding) -> str:
+    """One inline comment. Marker first so the resolver skill can filter on it."""
+    parts = [f"**{_MARKERS[finding.severity]}** {finding.title}"]
+    if finding.detail:
+        parts += ["", finding.detail]
+    return "\n".join(parts)
+
+
+def post_review(
+    repo: str,
+    number: int,
+    commit_id: str,
+    inline: list[Finding],
+    body: str,
+    *,
+    runner: Runner = gh,
+) -> None:
+    """Post one review with inline comments, as a COMMENT (never an approval).
+
+    `event: COMMENT` produces resolvable threads without approving or requesting
+    changes, so the review stays advisory while still being resolvable by the
+    github-pr-review skill.
+    """
+    payload = {
+        "commit_id": commit_id,
+        "event": "COMMENT",
+        "body": body,
+        "comments": [{"path": f.path, "line": f.line, "side": "RIGHT", "body": render_inline_body(f)} for f in inline],
+    }
+    path = Path(os.environ.get("RUNNER_TEMP", "/tmp")) / f"review-payload-{number}.json"
+    path.write_text(json.dumps(payload))
+    runner(["api", "--method", "POST", f"repos/{repo}/pulls/{number}/reviews", "--input", str(path)])
+
+
+def _reason(args: argparse.Namespace, repo: str, actor: str, number: int) -> int:
+    """Read-only half: verify, fetch, diagnose, emit a payload. No write access."""
+    level = assert_privileged(repo, actor)
+    print(f"[review] {actor} has {level} access — proceeding")
+
+    pr = fetch_pr(repo, number)
+    assert_not_fork(pr)
+    head_sha = str(pr.get("headRefOid", "unknown"))
+    mark = marker(args.review, head_sha)
+
+    if not args.force and (previous := find_previous_review(repo, number, mark)):
+        print(f"[review] {args.review} review already posted for {head_sha[:8]}: {previous}")
+        print("[review] pass --force to review the same commit again")
+        Path(args.out).write_text(json.dumps({"skip": True, "reason": "already reviewed"}))
+        return 0
+
+    full_diff = fetch_diff(repo, number)
+    anchors = parse_diff_anchors(full_diff)
+    diff, truncated = truncate_diff(full_diff)
+    template_path = Path(__file__).resolve().parent / PROMPTS[args.review]
+    findings = parse_findings(run_model(build_prompt(template_path.read_text(), pr, diff, truncated)))
+
+    payload = {
+        "skip": False,
+        "review": args.review,
+        "actor": actor,
+        "repo": repo,
+        "pr_number": number,
+        "head_sha": head_sha,
+        "marker": mark,
+        "findings": [
+            {"severity": f.severity, "title": f.title, "detail": f.detail, "path": f.path, "line": f.line}
+            for f in findings
+        ],
+        # Anchors are computed here because only this job has the full diff; the
+        # publish job must not need to re-read pull-request content.
+        "anchors": {path: sorted(lines) for path, lines in anchors.items()},
+        "model": os.environ.get("BEDROCK_MODEL_ID", "unknown"),
+        "prompt_version": prompt_version(template_path),
+        "generated_at": datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "run_id": os.environ.get("GITHUB_RUN_ID", "local"),
+        "run_url": f"{os.environ.get('GITHUB_SERVER_URL', 'https://github.com')}/{repo}"
+        f"/actions/runs/{os.environ.get('GITHUB_RUN_ID', '')}",
+    }
+    Path(args.out).write_text(json.dumps(payload, indent=2))
+    print(f"[review] {len(findings)} finding(s) written to {args.out}")
+    return 0
+
+
+def _publish(args: argparse.Namespace) -> int:
+    """Write half: sanitize and post. Never contacts the model."""
+    payload = json.loads(Path(args.payload).read_text())
+    if payload.get("skip"):
+        print(f"[review] nothing to publish ({payload.get('reason', 'skipped')})")
+        return 0
+
+    repo, number, review = payload["repo"], int(payload["pr_number"]), payload["review"]
+    findings = [
+        Finding(severity=f["severity"], title=f["title"], detail=f["detail"], path=f.get("path"), line=f.get("line"))
+        for f in payload["findings"]
+    ]
+
+    # Scan before anything can be posted. The model read a full diff, and this
+    # output goes to a public comment.
+    findings, redactions = sanitize_findings(findings)
+    if redactions:
+        print(f"[review] redacted {redactions} sensitive value(s) from model output")
+
+    footer = f"\n\n{attribution(payload)}\n{payload['marker']}\n"
+    anchors = {path: set(lines) for path, lines in payload.get("anchors", {}).items()}
+    inline, summary_only = partition_findings(findings, anchors)
+    comment = render_comment(findings, review, payload["actor"]) + footer
+
+    if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
+        Path(summary).write_text(comment)
+    if args.dry_run:
+        print(comment)
+        return 0
+
+    if inline:
+        body = render_comment(summary_only, review, payload["actor"], inline_count=len(inline)) + footer
+        try:
+            post_review(repo, number, payload["head_sha"], inline, body)
+            print(f"[review] posted {len(inline)} inline + {len(summary_only)} summary finding(s) to PR #{number}")
+            return 0
+        except RuntimeError as exc:
+            print(f"[review] WARNING: inline review rejected, falling back to a comment: {exc}", file=sys.stderr)
+
+    body_path = Path(os.environ.get("RUNNER_TEMP", "/tmp")) / f"review-{review}-{number}.md"
+    body_path.write_text(comment)
+    gh(["pr", "comment", str(number), "--repo", repo, "--body-file", str(body_path)])
+    print(f"[review] posted {len(findings)} finding(s) to PR #{number}")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="AI review of a pull request.")
+    parser.add_argument("--mode", required=True, choices=["reason", "publish"], help="pipeline half to run")
+    parser.add_argument("--pr", help="PR number or URL (reason mode)")
+    parser.add_argument("--review", choices=sorted(PROMPTS), help="review type (reason mode)")
+    parser.add_argument("--out", help="payload path to write (reason mode)")
+    parser.add_argument("--payload", help="payload path to read (publish mode)")
+    parser.add_argument("--dry-run", action="store_true", help="print the comment instead of posting")
+    parser.add_argument("--force", action="store_true", help="re-review even if this commit was already reviewed")
+    args = parser.parse_args(argv)
+
+    if args.mode == "reason":
+        if not (args.pr and args.review and args.out):
+            parser.error("--mode reason requires --pr, --review and --out")
+        return _reason(args, os.environ["GITHUB_REPOSITORY"], os.environ.get("GITHUB_ACTOR", ""), parse_pr_ref(args.pr))
+
+    if not args.payload:
+        parser.error("--mode publish requires --payload")
+    return _publish(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

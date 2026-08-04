@@ -1,0 +1,68 @@
+# Shared toolchain setup for the PR workflow: Node + pnpm + Python + uv, then
+# install both dependency trees from the committed lockfiles.
+#
+# IMPORTANT — call order: `smithy-generated/control-plane-python-server` is a uv
+# workspace member (see [tool.uv.workspace] in pyproject.toml), so `uv sync`
+# fails with "references a workspace ... but is not a workspace member" unless
+# the generated tree already exists. Any job using this action must download the
+# smithy-generated artifact BEFORE this step.
+#
+# Tool versions are pinned here rather than read from .mise.toml: mise config is
+# not part of the public mirror's allowlist, so it does not exist in the repo
+# this workflow runs in. Keep these in step with .mise.toml when it changes
+# (same constraint the Pages workflow documents for PNPM_VERSION).
+
+name: Set up build toolchain
+description: Node, pnpm, Python and uv with repo-pinned versions, plus lockfile-exact dependency install.
+
+inputs:
+  node-version:
+    description: Node major version.
+    required: false
+    default: "22"
+  pnpm-version:
+    description: pnpm version — keep in step with .mise.toml.
+    required: false
+    default: "10.27.0"
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - name: Enable pnpm
+      shell: bash
+      env:
+        PNPM_VERSION: ${{ inputs.pnpm-version }}
+      run: corepack enable && corepack prepare "pnpm@${PNPM_VERSION}" --activate
+
+    - uses: actions/setup-python@v5
+      with:
+        python-version-file: .python-version
+
+    # `pip install uv` rather than a third-party setup action: every action used
+    # in this repo is first-party actions/*, which keeps the CI supply-chain
+    # surface of a public repo minimal.
+    - name: Install uv
+      shell: bash
+      run: pip install uv
+
+    # Only the uv cache is restored. The pnpm install is ~15s cold, so a store
+    # cache would add moving parts for little gain; revisit if that changes.
+    - uses: actions/cache@v4
+      with:
+        path: ~/.cache/uv
+        key: uv-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+        restore-keys: uv-${{ runner.os }}-
+
+    # --locked / --frozen-lockfile: install EXACTLY the committed lockfiles and
+    # fail loudly on drift instead of silently re-resolving and floating
+    # unpinned deps to a newer release than the lock (and than local dev).
+    - name: Install dependencies
+      shell: bash
+      run: |
+        set -euo pipefail
+        uv sync --all-packages --locked
+        pnpm install --frozen-lockfile

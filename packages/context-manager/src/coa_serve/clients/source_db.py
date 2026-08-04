@@ -46,7 +46,7 @@ from typing import Any
 
 import boto3
 import structlog
-from coa_common import resolve_region
+from coa_common import resolve_region, sync_boto_config
 
 from ..tier2.sql_firewall import SQLFirewall
 from .base import QueryResult, instrumented
@@ -136,7 +136,7 @@ class SourceDBQueryExecutor:
         self._sources = sources_registry or SourcesRegistry(
             table_name=self._table_name, region=self._region, executor=_EXECUTOR
         )
-        self._secrets = boto3.client("secretsmanager", region_name=self._region)
+        self._secrets = boto3.client("secretsmanager", region_name=self._region, config=sync_boto_config())
         # Cached connection handle per "namespace:data_source" key. The value is
         # whatever the engine's adapter returns from open_connection (a SQLAlchemy
         # AsyncEngine for asyncpg/aiomysql, a pytds handle for SQL Server); the

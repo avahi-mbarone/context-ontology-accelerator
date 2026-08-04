@@ -31,6 +31,7 @@ test: test-unit
 test-unit:
 	pnpm nx run-many -t test
 	uv run pytest tests/unit -q
+	uv run pytest scripts/agents -q
 
 coverage:
 	@python3 scripts/coverage-summary.py

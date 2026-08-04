@@ -1,0 +1,14 @@
+# Issue template chooser.
+#
+# Blank issues stay enabled: a contributor with something that fits none of the
+# templates should not be blocked from reporting it, and a blank issue is easier
+# to triage than a template filled in with placeholder text.
+blank_issues_enabled: true
+
+contact_links:
+  - name: Contributing guide
+    url: https://github.com/aws/context-ontology-accelerator/blob/main/CONTRIBUTING.md
+    about: Coding standards, how to add a package, and the PR process.
+  - name: Security vulnerability
+    url: https://aws.amazon.com/security/vulnerability-reporting/
+    about: Report security issues to AWS Security — please do NOT open a public issue.

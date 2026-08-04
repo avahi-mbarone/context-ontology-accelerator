@@ -1,0 +1,204 @@
+# AI review of a pull request — code review and docs-completeness review.
+#
+# GitHub-native replacement for the internally-hosted review CI components.
+# Maintainer-invoked: supply a PR number or URL and pick which review to run.
+#
+# WHY manual dispatch rather than automatic on every PR:
+#
+#   - `workflow_dispatch` is restricted by GitHub to users with write access, so
+#     the trigger itself is the privilege gate. The script re-checks the actor's
+#     permission via the API as well, so the gate is explicit and survives anyone
+#     adding a second trigger later.
+#   - On a public repository an automatic PR trigger would let anyone spend model
+#     budget by opening pull requests.
+#   - A fork PR gets no OIDC token, so the automatic path could not authenticate
+#     to Bedrock for external contributions anyway.
+#
+# Reasoning and writing are SEPARATE JOBS, per AWS GenAI security guidance for
+# agents in public repositories. The `reason` job holds the Bedrock role and has
+# NO write permission; it emits a JSON payload as an artifact. The `publish` job
+# holds write permission, has no AWS credentials and never invokes the model. So a
+# manipulated model response cannot reach a token that can write, and the payload
+# is an auditable record of what the model actually produced.
+#
+# The PR diff and description are UNTRUSTED — the author controls them. They are
+# passed to the model as delimited data, never interpolated into a shell command,
+# the prompts state the block is data and not instructions, and the model runs
+# with its tools denied. The workflow never checks out the PR's code: it reads the
+# diff through the API, so nothing from the pull request is executed.
+#
+# Findings are advisory. This posts a comment; it does not approve, request
+# changes, merge, or push. A manipulated model response cannot change repository
+# state. Severity markers match the `github-pr-review` resolver skill, so a
+# finding filed here can be triaged by that skill without translation.
+#
+# RELATIVE TO THE CI REVIEW COMPONENTS this replaces on GitHub: same two reviews,
+# same severity markers, same advisory posture, and the same commit-SHA
+# idempotency marker so a re-dispatch against an unchanged head is a no-op. NOT
+# yet at parity on three counts, each deliberate:
+#
+#   - Single pass, where the components take max_iterations: 2. Re-dispatch to
+#     review again after pushing fixes.
+#   - Summary comment only, where docs-completeness also anchors findings to a
+#     file and line as a resolvable thread. Anchoring needs a valid diff position
+#     per finding, and a model-supplied line that is slightly wrong lands the
+#     comment on the wrong code. Revisit once finding quality is known.
+#   - Manual dispatch, where the components run per pushed commit. See above for
+#     why an automatic public-repo trigger is not wanted.
+#
+# Fork-authored pull requests are refused outright, even for a maintainer
+# dispatch: reviewing one would process untrusted content while holding the
+# Bedrock role and, downstream, a write token.
+#
+# SETUP — inert until an AWS role is configured. Create a repository variable
+# BEDROCK_ROLE_ARN pointing at a role that trusts this repository's OIDC subject
+# and grants only bedrock:InvokeModel / bedrock:InvokeModelWithResponseStream.
+# The same role the pipeline investigator uses is sufficient. Until it is set the
+# job exits early with a note instead of failing.
+
+name: AI PR review
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: PR number or URL to review.
+        required: true
+      review:
+        description: Which review to run.
+        type: choice
+        options: [code, docs, both]
+        default: both
+      dry_run:
+        description: Print the review instead of posting it.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  # Serialise reviews per PR so two dispatches cannot post interleaved comments.
+  group: ai-review-${{ inputs.pr }}
+  cancel-in-progress: false
+
+jobs:
+  # ---- read-only half: holds credentials, cannot write ----
+  reason:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read # trusted checkout of the default branch only
+      pull-requests: read # read the PR, its diff and existing comments
+      id-token: write # OIDC for the Bedrock role
+    outputs:
+      configured: ${{ steps.config.outputs.configured }}
+    steps:
+      - name: Check whether the Bedrock role is configured
+        id: config
+        env:
+          ROLE_ARN: ${{ vars.BEDROCK_ROLE_ARN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ROLE_ARN}" ]; then
+            echo "BEDROCK_ROLE_ARN is not set — skipping. See this workflow's header." >> "$GITHUB_STEP_SUMMARY"
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Default branch, never the PR head: this job is privileged and must only
+      # execute reviewed code. The PR is read through the API as data.
+      - uses: actions/checkout@v4
+        if: steps.config.outputs.configured == 'true'
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        if: steps.config.outputs.configured == 'true'
+        with:
+          python-version-file: .python-version
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        if: steps.config.outputs.configured == 'true'
+        with:
+          role-to-assume: ${{ vars.BEDROCK_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      # Pinned: an unpinned agent CLI is an unreviewed dependency with model
+      # access. Bump deliberately, the same way any other dependency is bumped.
+      - name: Install Claude CLI
+        if: steps.config.outputs.configured == 'true'
+        env:
+          CLAUDE_CLI_VERSION: "2.1.220"
+        run: npm install -g "@anthropic-ai/claude-code@${CLAUDE_CLI_VERSION}"
+
+      - name: Reason
+        if: steps.config.outputs.configured == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLAUDE_CODE_USE_BEDROCK: "1"
+          AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+          BEDROCK_MODEL_ID: ${{ vars.BEDROCK_MODEL_ID || 'unknown' }}
+          PR_REF: ${{ inputs.pr }}
+          REVIEW: ${{ inputs.review }}
+        run: |
+          set -euo pipefail
+          case "$REVIEW" in
+            both) types="code docs" ;;
+            *) types="$REVIEW" ;;
+          esac
+          mkdir -p "${RUNNER_TEMP}/payloads"
+          for t in $types; do
+            echo "::group::$t reasoning"
+            python3 scripts/agents/pr-review/review_pr.py --mode reason \
+              --pr "$PR_REF" --review "$t" --out "${RUNNER_TEMP}/payloads/$t.json"
+            echo "::endgroup::"
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: steps.config.outputs.configured == 'true'
+        with:
+          name: review-payloads
+          path: ${{ runner.temp }}/payloads/
+          retention-days: 7
+          if-no-files-found: error
+
+  # ---- write half: no model, no AWS credentials ----
+  publish:
+    needs: reason
+    if: needs.reason.outputs.configured == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write # the only write grant, and the model cannot reach it
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: review-payloads
+          path: payloads
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [ "${DRY_RUN:-}" = "true" ]; then args+=(--dry-run); fi
+          for f in payloads/*.json; do
+            echo "::group::publishing $(basename "$f")"
+            python3 scripts/agents/pr-review/review_pr.py --mode publish --payload "$f" "${args[@]}"
+            echo "::endgroup::"
+          done

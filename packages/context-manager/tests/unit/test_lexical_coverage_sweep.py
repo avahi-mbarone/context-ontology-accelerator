@@ -208,13 +208,13 @@ class TestGraphStoreUriSeams:
         disambiguates it away from the NA branch."""
         from coa_serve.clients.factory import _is_neptune_analytics
 
-        assert _is_neptune_analytics("g-idyumweo60.host.example.com:8182") is False
+        assert _is_neptune_analytics("g-abc1234567.host.example.com:8182") is False
 
     def test_bare_na_graph_id_detected(self):
         """A bare ``g-…`` id (no host, no scheme, no port) is detected as NA."""
         from coa_serve.clients.factory import _is_neptune_analytics
 
-        assert _is_neptune_analytics("g-idyumweo60") is True
+        assert _is_neptune_analytics("g-abc1234567") is True
 
 
 # ── Property 4 seam gap — Tier-3 resolve-boundary degradation ───────

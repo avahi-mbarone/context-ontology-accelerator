@@ -20,6 +20,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 import httpx
+import retryhttp
 import structlog
 from botocore.auth import SigV4Auth
 from botocore.awsrequest import AWSRequest
@@ -75,7 +76,11 @@ class NeptuneGraphClient:
         if self._http is None:
             async with self._http_lock:
                 if self._http is None:
-                    timeout = float(os.environ.get("NEPTUNE_TIMEOUT", "30"))
+                    # Sync customer path: fast fixed connect timeout + a bounded
+                    # read budget (NEPTUNE_TIMEOUT, default 8s) so a hung graph
+                    # query cannot tie up request threads.
+                    read = float(os.environ.get("NEPTUNE_TIMEOUT", "8"))
+                    timeout = httpx.Timeout(connect=2.0, read=read, write=read, pool=read)
                     self._http = httpx.AsyncClient(timeout=timeout)
         return self._http
 
@@ -141,8 +146,23 @@ class NeptuneGraphClient:
         body = urlencode({"query": sparql})
         headers = await self._sign_request("POST", url, body)
         headers["Content-Type"] = "application/x-www-form-urlencoded"
-        client = await self._get_http()
-        resp = await client.post(url, content=body, headers=headers)
+
+        # Sync customer path: fail fast with a single retry, and only on
+        # transient transport faults (connection reset / timeout). We do NOT
+        # retry server errors here — the caller (resolution pipeline) has its
+        # own tier fallback, and retrying 5xx would stack retries under load.
+        @retryhttp.retry(
+            max_attempt_number=2,
+            retry_server_errors=False,
+            retry_network_errors=True,
+            retry_timeouts=True,
+            retry_rate_limited=False,
+        )
+        async def _post() -> httpx.Response:
+            client = await self._get_http()
+            return await client.post(url, content=body, headers=headers)
+
+        resp = await _post()
         if not resp.is_success:
             logger.error("neptune_sparql_error", status=resp.status_code, body=resp.text[:500])
         resp.raise_for_status()

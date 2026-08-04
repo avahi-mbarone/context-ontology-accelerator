@@ -65,8 +65,8 @@ _MAX_RETRIES = 5
 #
 # 1. The graphrag-toolkit's extraction prompt asks the LLM to format
 #    facts as Subject + UPPERCASE_PREDICATE + Object/Complement, and
-#    the LLM follows that convention in practice (verified against
-#    the dev graph ``g-idyumweo60``: 100% of the 20 sampled SPO facts
+#    the LLM follows that convention in practice (verified against a
+#    populated development graph: 100% of the 20 sampled SPO facts
 #    and 20 sampled SPC facts followed this shape).
 #
 # 2. For SPO facts the object value is also stored on the

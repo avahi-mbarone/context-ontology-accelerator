@@ -52,11 +52,11 @@ NDB_ENDPOINT = "test-cluster.us-east-1.neptune.amazonaws.com"
 NDB_GRAPH_STORE_URI = "neptune-db://test-cluster.us-east-1.neptune.amazonaws.com:8182"
 
 #: A representative Neptune Analytics (NA) graph id.
-NA_GRAPH_ID = "g-idyumweo60"
+NA_GRAPH_ID = "g-abc1234567"
 #: A representative Neptune Analytics (NA) host endpoint embedding the graph id.
-NA_ENDPOINT = "g-idyumweo60.us-east-1.neptune-graph.amazonaws.com"
+NA_ENDPOINT = "g-abc1234567.us-east-1.neptune-graph.amazonaws.com"
 #: The graph-store URI the factory should derive for an NA endpoint/graph-id.
-NA_GRAPH_STORE_URI = "neptune-graph://g-idyumweo60"
+NA_GRAPH_STORE_URI = "neptune-graph://g-abc1234567"
 
 #: A representative OpenSearch Serverless (AOSS) collection endpoint.
 AOSS_ENDPOINT = "https://test.aoss.amazonaws.com"

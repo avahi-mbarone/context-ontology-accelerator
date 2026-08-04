@@ -55,6 +55,8 @@ class LambdaClient:
             region: AWS region hosting the backend Lambdas.
         """
         self._region = region
+        # Sync customer path: explicit connect/read timeouts and fail-fast
+        # (max_attempts=1 == no retries) — the caller decides when to retry.
         self._lambda_client = boto3.client(
             "lambda",
             region_name=region,

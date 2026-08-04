@@ -31,6 +31,7 @@ from typing import Any
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
+from coa_common import async_boto_config
 from coa_common.dao import DynamoDBDAO
 from coa_control_plane_server.models.source_sub_type import SourceSubType
 
@@ -131,7 +132,7 @@ def _grant_secret_read_to_consumer(secret_arn: str) -> None:
         logger.warning("malformed_secret_arn_skipping_grant", extra={"secret_arn": secret_arn})
         return
     secret_region = parts[3]
-    sm = boto3.client("secretsmanager", region_name=secret_region)
+    sm = boto3.client("secretsmanager", region_name=secret_region, config=async_boto_config())
 
     try:
         # Fetch existing policy (if any)

@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import boto3
 
+from coa_common.aws_config import apply_default_client_config
+
 USER_AGENT_EXTRA = "AwsSolutions/sof_0.1.0"
 
 _installed = False
@@ -48,6 +50,9 @@ def install_user_agent() -> None:
         # ``_session`` is the underlying botocore session; its ``user_agent_extra``
         # feeds the User-Agent of every client/resource built from this session.
         _append_extra(self._session)
+        # Ensure every session has socket timeouts + bounded retries by default,
+        # so no client is ever created on botocore's no-timeout defaults.
+        apply_default_client_config(self._session)
 
     _patched_init.__wrapped__ = original_init  # type: ignore[attr-defined]
     boto3.session.Session.__init__ = _patched_init  # type: ignore[method-assign]
@@ -56,5 +61,6 @@ def install_user_agent() -> None:
     # ran); tag it so those clients get the header too.
     if boto3.DEFAULT_SESSION is not None:
         _append_extra(boto3.DEFAULT_SESSION._session)
+        apply_default_client_config(boto3.DEFAULT_SESSION._session)
 
     _installed = True

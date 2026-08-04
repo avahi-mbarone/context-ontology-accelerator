@@ -6,27 +6,27 @@ import { parseEcrImageUri } from "../../lib/utils/ecr-utils";
 describe("parseEcrImageUri", () => {
   it("parses a standard single-segment repo with tag", () => {
     const result = parseEcrImageUri(
-      "839001574554.dkr.ecr.us-east-1.amazonaws.com/scl:context-manager-abc123",
+      "123456789012.dkr.ecr.us-east-1.amazonaws.com/scl:context-manager-abc123",
     );
-    expect(result.accountId).toBe("839001574554");
+    expect(result.accountId).toBe("123456789012");
     expect(result.region).toBe("us-east-1");
     expect(result.repositoryName).toBe("scl");
     expect(result.tag).toBe("context-manager-abc123");
     expect(result.repositoryArn).toBe(
-      "arn:aws:ecr:us-east-1:839001574554:repository/scl",
+      "arn:aws:ecr:us-east-1:123456789012:repository/scl",
     );
   });
 
   it("parses a prefixed repo name with tag", () => {
     const result = parseEcrImageUri(
-      "522783346932.dkr.ecr.us-west-2.amazonaws.com/coa-dev-context-manager:guardrail-v4",
+      "210987654321.dkr.ecr.us-west-2.amazonaws.com/coa-dev-context-manager:guardrail-v4",
     );
-    expect(result.accountId).toBe("522783346932");
+    expect(result.accountId).toBe("210987654321");
     expect(result.region).toBe("us-west-2");
     expect(result.repositoryName).toBe("coa-dev-context-manager");
     expect(result.tag).toBe("guardrail-v4");
     expect(result.repositoryArn).toBe(
-      "arn:aws:ecr:us-west-2:522783346932:repository/coa-dev-context-manager",
+      "arn:aws:ecr:us-west-2:210987654321:repository/coa-dev-context-manager",
     );
   });
 
@@ -45,7 +45,7 @@ describe("parseEcrImageUri", () => {
 
   it("defaults tag to latest when not specified", () => {
     const result = parseEcrImageUri(
-      "839001574554.dkr.ecr.us-east-1.amazonaws.com/scl",
+      "123456789012.dkr.ecr.us-east-1.amazonaws.com/scl",
     );
     expect(result.repositoryName).toBe("scl");
     expect(result.tag).toBe("latest");
@@ -65,7 +65,7 @@ describe("parseEcrImageUri", () => {
 
   it("throws on empty repository name", () => {
     expect(() =>
-      parseEcrImageUri("839001574554.dkr.ecr.us-east-1.amazonaws.com/:tag"),
+      parseEcrImageUri("123456789012.dkr.ecr.us-east-1.amazonaws.com/:tag"),
     ).toThrow("empty repository name");
   });
 });
