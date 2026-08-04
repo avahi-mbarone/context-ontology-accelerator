@@ -24,6 +24,7 @@ import os
 import re
 
 import boto3
+from coa_common import async_boto_config
 from coa_common.bedrock_metrics import CostTracker
 from rdflib import OWL, RDF, RDFS, XSD, BNode, Graph, Literal, Namespace, URIRef
 from rdflib.namespace import SKOS
@@ -482,6 +483,7 @@ class RigorOntologyStrategy(InductionStrategy):
         return boto3.client(
             "bedrock-runtime",
             region_name=config.get("llm_region", "us-east-1"),
+            config=async_boto_config(read_timeout=120),
         )
 
     def _call_llm(

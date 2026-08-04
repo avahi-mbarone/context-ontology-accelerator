@@ -18,6 +18,8 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
+from coa_common.aws_config import async_boto_config
+
 logger = logging.getLogger(__name__)
 
 _STS_DURATION_SECONDS = 3600
@@ -36,8 +38,10 @@ def get_s3_client(
         role_arn: If provided, assumes this IAM role via STS before creating
             the S3 client (cross-account access).
         session_name: STS session name for auditing.
-        config: Optional botocore Config. If not provided, boto3 defaults are used.
+        config: Optional botocore Config. If not provided, the shared async
+            preset (socket timeouts + bounded retries) is used.
     """
+    resolved = config if config is not None else async_boto_config()
     if role_arn:
         if not _ROLE_ARN_RE.match(role_arn):
             raise ValueError(
@@ -65,9 +69,9 @@ def get_s3_client(
             aws_access_key_id=creds["AccessKeyId"],
             aws_secret_access_key=creds["SecretAccessKey"],
             aws_session_token=creds["SessionToken"],
-            **({} if config is None else {"config": config}),
+            config=resolved,
         )
-    return boto3.client("s3", **({} if config is None else {"config": config}))
+    return boto3.client("s3", config=resolved)
 
 
 def list_objects(

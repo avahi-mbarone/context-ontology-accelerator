@@ -25,7 +25,7 @@ from typing import Any
 import boto3
 import sqlglot
 import structlog
-from coa_common import resolve_region
+from coa_common import resolve_region, sync_boto_config
 
 from ..query_utils import validate_namespace
 from ..tier2.sql_firewall import SQLFirewall
@@ -92,7 +92,7 @@ class AthenaQueryExecutor:
         self._workgroup_prefix = workgroup_prefix or os.environ.get("ATHENA_WORKGROUP_PREFIX", "coa-")
         self._default_output_s3 = output_s3 or os.environ.get("ATHENA_OUTPUT_S3", "")
         self._default_database = os.environ.get("ATHENA_DATABASE", "default")
-        self._athena = boto3.client("athena", region_name=self._region)
+        self._athena = boto3.client("athena", region_name=self._region, config=sync_boto_config())
         self._sources = sources_registry or SourcesRegistry(
             table_name=sources_table, region=self._region, executor=_EXECUTOR
         )

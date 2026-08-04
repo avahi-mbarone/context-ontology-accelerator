@@ -24,6 +24,7 @@ from urllib.error import HTTPError, URLError
 
 import boto3
 import structlog
+from coa_common import async_boto_config
 from coa_common.dao import DynamoDBDAO, QueryParams
 
 logger = structlog.get_logger(__name__)
@@ -38,7 +39,7 @@ def delete_athena_workgroup(workgroup_name: str | None) -> None:
     """Delete Athena workgroup. Raises on failure (not-found is OK)."""
     if not workgroup_name:
         return
-    athena = boto3.client("athena", region_name=os.environ.get("AWS_REGION", "us-east-1"))
+    athena = boto3.client("athena", region_name=os.environ.get("AWS_REGION", "us-east-1"), config=async_boto_config())
     try:
         athena.delete_work_group(WorkGroup=workgroup_name, RecursiveDeleteOption=True)
         logger.info("athena_workgroup_deleted", workgroup_name=workgroup_name)
@@ -93,9 +94,9 @@ def _datazone_client(*, region: str, assume_role_arn: str | None):
     drop-in replacement for the previous direct ``boto3.client("datazone")``.
     """
     if not assume_role_arn:
-        return boto3.client("datazone", region_name=region)
+        return boto3.client("datazone", region_name=region, config=async_boto_config())
 
-    sts = boto3.client("sts", region_name=region)
+    sts = boto3.client("sts", region_name=region, config=async_boto_config())
     creds = sts.assume_role(
         RoleArn=assume_role_arn,
         RoleSessionName="ns-deletion-platform-dz-access",
@@ -135,7 +136,7 @@ def delete_namespace_records(namespace_id: str, namespace_name: str | None) -> N
     Step Functions succeed silently if the records were already removed.
     """
     region = os.environ["AWS_REGION"]
-    dynamodb = boto3.client("dynamodb", region_name=region)
+    dynamodb = boto3.client("dynamodb", region_name=region, config=async_boto_config())
     table_name = os.environ["NAMESPACES_TABLE"]
 
     transact_items = [
@@ -246,7 +247,7 @@ def teardown_vkg_service(namespace_id: str) -> None:
     if not cluster_arn:
         return
 
-    ecs_client = boto3.client("ecs", region_name=region)
+    ecs_client = boto3.client("ecs", region_name=region, config=async_boto_config())
     service_name = f"{prefix}-vkg-{namespace_id}" if prefix else f"vkg-{namespace_id}"
 
     try:
@@ -266,7 +267,7 @@ def teardown_vkg_service(namespace_id: str) -> None:
     if not cloud_map_ns_id:
         return
 
-    sd_client = boto3.client("servicediscovery", region_name=region)
+    sd_client = boto3.client("servicediscovery", region_name=region, config=async_boto_config())
     try:
         svc_paginator = sd_client.get_paginator("list_services")
         for page in svc_paginator.paginate(
@@ -344,7 +345,7 @@ def delete_ontology_artifacts(namespace_id: str) -> None:
         return
 
     region = os.environ.get("AWS_REGION", "us-east-1")
-    s3 = boto3.client("s3", region_name=region)
+    s3 = boto3.client("s3", region_name=region, config=async_boto_config())
     prefix = f"ontologies/{namespace_id}/"
 
     try:

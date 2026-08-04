@@ -51,7 +51,17 @@ class ContextManagerClient:
         self._url = (
             f"https://bedrock-agentcore.{region}.amazonaws.com/runtimes/{encoded_arn}/invocations?qualifier=DEFAULT"
         )
-        self._client = httpx.AsyncClient(timeout=_INVOKE_TIMEOUT_S)
+        # Fast connect timeout, long read budget (the CM does full tiered
+        # resolution). No retry here: the CM retries its own dependencies, so
+        # retrying the whole invocation would stack retries across layers.
+        self._client = httpx.AsyncClient(
+            timeout=httpx.Timeout(
+                connect=2.0,
+                read=_INVOKE_TIMEOUT_S,
+                write=_INVOKE_TIMEOUT_S,
+                pool=_INVOKE_TIMEOUT_S,
+            )
+        )
         logger.info(
             "cm_client_initialized",
             runtime_arn=runtime_arn,

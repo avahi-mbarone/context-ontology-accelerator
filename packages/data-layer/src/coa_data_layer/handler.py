@@ -64,6 +64,8 @@ def _invoke_context_manager(payload: dict, token: str) -> dict:
         },
         method="POST",
     )
+    # Sync customer path behind API Gateway (30s cap): explicit 29s timeout and
+    # no retry by design — fail fast and let the client decide when to retry.
     with urllib_request.urlopen(req, timeout=29) as resp:
         raw = resp.read().decode("utf-8")
     return _parse_first_sse_event(raw)

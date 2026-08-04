@@ -32,7 +32,7 @@ from typing import Any
 
 import boto3
 import structlog
-from coa_common import AossVectorClient, resolve_region
+from coa_common import AossVectorClient, resolve_region, sync_boto_config
 
 from .base import VectorClient, VectorHit
 
@@ -89,7 +89,7 @@ class OpenSearchVectorClient(VectorClient):
         self._proxy_lambda_arn = os.environ.get("OPENSEARCH_PROXY_LAMBDA_ARN", "")
         self._lambda_client: Any = None
         if self._proxy_lambda_arn:
-            self._lambda_client = boto3.client("lambda", region_name=self._region)
+            self._lambda_client = boto3.client("lambda", region_name=self._region, config=sync_boto_config())
         # Shared AOSS client. When a proxy is configured it becomes search-only
         # (the transport routes every search through the Lambda); otherwise it's
         # a direct SigV4 client. The store dimension is irrelevant for reads.

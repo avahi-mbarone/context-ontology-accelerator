@@ -77,8 +77,9 @@ class FewShotExampleLoader:
     def _client(self):
         if self._s3 is None:
             import boto3
+            from coa_common import sync_boto_config
 
-            self._s3 = boto3.client("s3", region_name=self._region)
+            self._s3 = boto3.client("s3", region_name=self._region, config=sync_boto_config())
         return self._s3
 
     def invalidate(self, namespace: str | None = None) -> None:

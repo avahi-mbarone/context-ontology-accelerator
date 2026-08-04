@@ -22,6 +22,10 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
+# Runtime log output. `logs/application.log` was committed once by accident;
+# nothing in the repo reads or writes this path.
+logs/
+
 # MCP logs
 .playwright-mcp
 

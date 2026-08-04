@@ -101,6 +101,17 @@ base URL falls back to the local dev server):
 | `E2E_USERNAME` | Yes                 | Cognito test user email                                                                        |
 | `E2E_PASSWORD` | Yes                 | Cognito test user password                                                                     |
 
+The Glue source lifecycle spec needs two more. The catalog id is an AWS account
+id, so it has no default — the same rule the credentials above follow:
+
+| Variable                 | Required                | Description                                                                          |
+| ------------------------ | ----------------------- | ------------------------------------------------------------------------------------ |
+| `E2E_GLUE_CATALOG_ID`    | Yes (for the Glue spec) | AWS account id owning the Glue catalog. No default — the Glue spec skips when unset. |
+| `E2E_GLUE_DATABASE_NAME` | No                      | Glue database to onboard. Defaults to `hcp360`.                                      |
+
+That spec is also gated behind `E2E_SLOW` (it runs a real scan and enrichment,
+several minutes), so it needs both `E2E_SLOW=1` and `E2E_GLUE_CATALOG_ID` to run.
+
 When credentials are absent, every environment-dependent test **skips** (the run
 still exits 0), so the suite is safe to run anywhere.
 
@@ -324,14 +335,14 @@ The build output (`dist/`) is a static SPA. Serve it behind CloudFront or any st
 
 TypeScript path aliases are configured in both `tsconfig.json` and `vite.config.ts`:
 
-| Alias                      | Maps to                             |
-| -------------------------- | ----------------------------------- |
-| `@auth`                    | `src/auth/`                         |
-| `@api-hooks`               | `src/api-hooks/`                    |
-| `@components`              | `src/components/`                   |
-| `@pages`                   | `src/pages/`                        |
-| `@utils`                   | `src/utils/`                        |
-| `@app-types`               | `src/app-types/`                    |
+| Alias         | Maps to                             |
+| ------------- | ----------------------------------- |
+| `@auth`       | `src/auth/`                         |
+| `@api-hooks`  | `src/api-hooks/`                    |
+| `@components` | `src/components/`                   |
+| `@pages`      | `src/pages/`                        |
+| `@utils`      | `src/utils/`                        |
+| `@app-types`  | `src/app-types/`                    |
 | `@coa/shared` | `../../libs/ts-shared/src/index.ts` |
 
 ## Troubleshooting

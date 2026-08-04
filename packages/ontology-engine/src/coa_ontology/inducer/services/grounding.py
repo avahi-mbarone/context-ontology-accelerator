@@ -25,7 +25,7 @@ import unicodedata
 from dataclasses import dataclass
 
 import boto3
-from botocore.config import Config as BotoConfig
+from coa_common import async_boto_config
 from coa_common.bedrock_metrics import CostTracker
 
 from coa_ontology.inducer.schemas import ConceptMatch, MatchCandidate
@@ -236,7 +236,7 @@ class GroundingService:
             self._bedrock = boto3.client(
                 "bedrock-runtime",
                 region_name=self._llm_region,
-                config=BotoConfig(max_pool_connections=_BEDROCK_MAX_POOL_CONNECTIONS),
+                config=async_boto_config(read_timeout=120, max_pool_connections=_BEDROCK_MAX_POOL_CONNECTIONS),
             )
         return self._bedrock
 

@@ -45,15 +45,35 @@ export interface GlueSourceEnv {
   databaseName: string;
 }
 
-// Known-good "hcp360" Glue database on the dev environment (catalog = account).
-const DEFAULT_GLUE_CATALOG_ID = "839001574554";
+// The catalog id is an AWS account id, so it is env-only with no default —
+// the same rule the credentials above follow. The database name keeps a
+// default because it names a dataset, not an account.
 const DEFAULT_GLUE_DATABASE_NAME = "hcp360";
 
-/** Resolve the Glue source config (env override or dev defaults). */
-export function readGlueSourceEnv(): GlueSourceEnv {
+/** Reason used in test.skip(...) when the Glue catalog is not configured. */
+export const MISSING_GLUE_ENV_REASON =
+  "Glue source env not configured (E2E_GLUE_CATALOG_ID) — skipping";
+
+/** Resolved Glue config, or null when the catalog id is missing (callers test.skip). */
+export function readGlueSourceEnv(): GlueSourceEnv | null {
+  const catalogId = process.env.E2E_GLUE_CATALOG_ID;
+  if (!catalogId) {
+    return null;
+  }
   return {
-    catalogId: process.env.E2E_GLUE_CATALOG_ID ?? DEFAULT_GLUE_CATALOG_ID,
+    catalogId,
     databaseName:
       process.env.E2E_GLUE_DATABASE_NAME ?? DEFAULT_GLUE_DATABASE_NAME,
   };
+}
+
+/** Like readGlueSourceEnv but throws — used inside a test already gated on it. */
+export function requireGlueSourceEnv(): GlueSourceEnv {
+  const env = readGlueSourceEnv();
+  if (!env) {
+    throw new Error(
+      "Glue source env is not configured. Set E2E_GLUE_CATALOG_ID (and optionally E2E_GLUE_DATABASE_NAME).",
+    );
+  }
+  return env;
 }

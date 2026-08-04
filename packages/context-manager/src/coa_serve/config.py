@@ -15,7 +15,7 @@ from typing import Literal
 import boto3
 import structlog
 from botocore.exceptions import ClientError
-from coa_common import resolve_region
+from coa_common import resolve_region, sync_boto_config
 
 logger = structlog.get_logger(__name__)
 
@@ -249,7 +249,7 @@ def _get_ssm_parameter(name: str, *, required: bool = False) -> str:
     """
     try:
         region = resolve_region()
-        ssm = boto3.client("ssm", region_name=region)
+        ssm = boto3.client("ssm", region_name=region, config=sync_boto_config())
         return ssm.get_parameter(Name=name)["Parameter"]["Value"]
     except ClientError as e:
         error_code = e.response["Error"]["Code"]

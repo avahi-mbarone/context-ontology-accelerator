@@ -10,6 +10,12 @@ from coa_common.authnz_types import (
     ResourceRoleMapping,
     ResourceType,
 )
+from coa_common.aws_config import (
+    RetryPolicy,
+    async_boto_config,
+    opensearch_client_kwargs,
+    sync_boto_config,
+)
 from coa_common.aws_user_agent import USER_AGENT_EXTRA, install_user_agent
 from coa_common.bedrock import (
     BedrockClient,
@@ -195,6 +201,10 @@ __all__ = [
     "sanitize_principal_key",
     "USER_AGENT_EXTRA",
     "install_user_agent",
+    "async_boto_config",
+    "sync_boto_config",
+    "opensearch_client_kwargs",
+    "RetryPolicy",
 ]
 
 # Tag every AWS SDK call's User-Agent for usage attribution. Runs on import of

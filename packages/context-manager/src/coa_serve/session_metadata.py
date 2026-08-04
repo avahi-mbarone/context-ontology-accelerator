@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 
 import boto3
 import structlog
+from coa_common import sync_boto_config
 from ulid import ULID
 
 logger = structlog.get_logger(__name__)
@@ -62,7 +63,7 @@ class SessionMetadataStore:
         """
         self._table_name = table_name
         self._ttl_days = ttl_days
-        self._ddb = boto3.resource("dynamodb", region_name=region)
+        self._ddb = boto3.resource("dynamodb", region_name=region, config=sync_boto_config())
         self._table = self._ddb.Table(table_name)
 
     def _compute_ttl(self) -> int:

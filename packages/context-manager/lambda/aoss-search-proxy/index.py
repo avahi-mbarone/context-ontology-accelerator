@@ -16,7 +16,7 @@ import os
 import re
 
 import boto3
-from coa_common import resolve_region
+from coa_common import opensearch_client_kwargs, resolve_region
 from opensearchpy import NotFoundError, OpenSearch, RequestsHttpConnection
 from opensearchpy.helpers.signer import RequestsAWSV4SignerAuth
 
@@ -43,7 +43,7 @@ def _get_client() -> OpenSearch:
             use_ssl=True,
             verify_certs=True,
             connection_class=RequestsHttpConnection,
-            timeout=30,
+            **opensearch_client_kwargs(sync=True),
         )
     return _client
 

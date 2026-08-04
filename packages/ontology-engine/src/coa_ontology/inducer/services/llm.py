@@ -6,8 +6,8 @@
 from __future__ import annotations
 
 import boto3
-from botocore.config import Config as BotoConfig
 from botocore.exceptions import BotoCoreError, ClientError
+from coa_common import async_boto_config
 from coa_common.bedrock_metrics import CostTracker
 
 from coa_ontology.inducer.services.grounding import _BEDROCK_MAX_POOL_CONNECTIONS
@@ -49,14 +49,15 @@ class LLMClient:
     def client(self):
         """Lazily create and cache the Bedrock runtime client."""
         if self._client is None:
+            # LLM generation can be slow; keep a generous read budget (like the
+            # serve/libs Bedrock clients) while still bounding retries + connect.
             # Same connection-pool cap as the grounding rerank client (see
-            # grounding.py:_BEDROCK_MAX_POOL_CONNECTIONS). Not on the
-            # table_to_ontology hot path today, but prevents a future
+            # grounding.py:_BEDROCK_MAX_POOL_CONNECTIONS) to prevent a future
             # pool-starvation footgun if this client is ever fanned out.
             self._client = boto3.client(
                 "bedrock-runtime",
                 region_name=self.region,
-                config=BotoConfig(max_pool_connections=_BEDROCK_MAX_POOL_CONNECTIONS),
+                config=async_boto_config(read_timeout=120, max_pool_connections=_BEDROCK_MAX_POOL_CONNECTIONS),
             )
         return self._client
 

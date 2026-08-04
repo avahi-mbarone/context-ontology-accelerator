@@ -169,7 +169,11 @@ class TestLLMClient:
         assert captured["service_name"] == "bedrock-runtime"
         assert captured["region_name"] == "us-west-2"
         assert captured["config"] is not None
+        # Connection-pool cap shared with the grounding rerank client.
         assert captured["config"].max_pool_connections == _BEDROCK_MAX_POOL_CONNECTIONS
+        # Async backoff config with a generous read budget for LLM generation.
+        assert captured["config"].retries["max_attempts"] == 3
+        assert captured["config"].read_timeout == 120
 
     def test_generate_records_usage_when_tracker_present(self) -> None:
         from coa_common.bedrock_metrics import CostTracker

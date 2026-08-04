@@ -1,0 +1,226 @@
+# Pull-request pipeline — the GitHub port of the internal merge-request pipeline.
+#
+# Runs on GitHub (the public mirror repo), NOT internally. It is delivered here by
+# the mirror sync job, which is why it must be committed to the internal repo:
+# each sync replaces the mirrored tree wholesale, so a file that exists only on
+# GitHub is deleted by the next sync.
+#
+# Purpose (unchanged from the internal pipeline): fast feedback on a PR — lint,
+# unit tests and CDK synth, scoped to the projects a PR actually touches via
+# `nx affected`. The merge queue runs the FULL suite instead, because the
+# declared Nx graph has gaps (web-app has no project.json, smithy-generated is
+# not an implicit dep of anything), so a change can pass `affected` on the PR
+# and still fail `run-many` after it lands.
+#
+# Deliberately NOT ported (each depends on internal-only infrastructure that
+# cannot and should not exist in a public repo):
+#   - CDK dry-run against a live dev account (needs a deploy-scoped IAM role and
+#     that account's ECR image URIs; a public fork PR must never hold cloud
+#     credentials).
+#   - The GenAI code-review child pipeline (built on the internal CI platform's
+#     API, review components and bot identity).
+#   - The cache-warming pre-stage and container resource sizing, which are
+#     concepts of the internal Kubernetes runner fleet. GitHub-hosted runners
+#     have neither.
+#
+# No secrets are used, and the trigger is `pull_request` (never
+# `pull_request_target`), so a fork PR runs with a read-only token and no access
+# to repository secrets.
+
+name: PR
+
+on:
+  pull_request:
+    branches: [main]
+  merge_group:
+  workflow_dispatch: {}
+
+# Least privilege: read-only token, and no job requests more.
+permissions:
+  contents: read
+
+# Supersede in-progress runs for the same PR; never cancel a merge-queue run.
+concurrency:
+  group: pr-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Required by the shared response helper at import time (fail-closed CORS).
+  # A placeholder is fine here; real deployments set it via CDK.
+  ALLOWED_ORIGIN: "https://ci-test.example.com"
+
+jobs:
+  # smithy-generated/ is not committed, and both the uv workspace and the pnpm
+  # workspace declare members inside it — so every downstream job needs this
+  # first. Generated once and passed along as an artifact rather than rebuilt
+  # per job (~1 Gradle build + 2 npm builds).
+  smithy-generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      # The generator script builds the emitted TypeScript clients with npm, so
+      # Node is needed here even though nothing else in this job uses pnpm.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Generate Smithy artifacts
+        run: |
+          set -euo pipefail
+          chmod +x models/gradlew
+          ./scripts/smithy-generate.sh
+
+      # node_modules is excluded: it exists only to build the clients' dist
+      # output, and downstream jobs get their own copy from `pnpm install`.
+      # Including it would mean uploading tens of thousands of files per run.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: smithy-generated
+          path: |
+            smithy-generated/
+            !smithy-generated/**/node_modules/**
+          retention-days: 1
+          if-no-files-found: error
+
+  lint:
+    needs: smithy-generate
+    if: github.event_name != 'merge_group'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # fetch-depth: 0 — `nx affected` needs the merge base with the target
+      # branch, which a shallow clone does not have.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: smithy-generated
+          path: smithy-generated
+      - uses: ./.github/actions/setup-build
+
+      # Version drift gate: every package manifest must match the repo-root
+      # VERSION file. Runs BEFORE the lint tasks so a drifted manifest fails
+      # fast. `nx` has no target for this (it spans every package and both
+      # ecosystems), so it cannot arrive via `affected`.
+      - name: Check version drift
+        run: python3 scripts/sync_version.py --check
+
+      # Each package's lint target points mypy at its own --cache-dir, so
+      # concurrent lint tasks do not race on a shared cache database.
+      - name: Lint affected projects
+        env:
+          # Empty on a manual run (no PR); this workflow only ever targets main.
+          BASE_REF: ${{ github.base_ref || 'main' }}
+        run: pnpm nx affected -t lint --base="origin/${BASE_REF}" --head=HEAD
+
+  unit-test:
+    needs: smithy-generate
+    if: github.event_name != 'merge_group'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: smithy-generated
+          path: smithy-generated
+      - uses: ./.github/actions/setup-build
+
+      - name: Test affected projects
+        env:
+          # Empty on a manual run (no PR); this workflow only ever targets main.
+          BASE_REF: ${{ github.base_ref || 'main' }}
+        run: pnpm nx affected -t test --base="origin/${BASE_REF}" --head=HEAD --output-style=stream
+
+      # Repo-level suite — always run, never `affected`: these tests live outside
+      # every Nx project (cross-package concerns like version sync, NOTICE
+      # generation and doc accuracy), so the graph can never mark them affected.
+      - name: Test repo-level suite
+        run: uv run pytest tests/unit -q
+
+      # GitHub has no built-in JUnit/Cobertura rendering, so the reports are
+      # kept as a downloadable artifact instead.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-reports
+          path: |
+            **/junit.xml
+            **/coverage.xml
+          retention-days: 7
+          if-no-files-found: ignore
+
+  cdk-synth:
+    needs: smithy-generate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: smithy-generated
+          path: smithy-generated
+      - uses: ./.github/actions/setup-build
+
+      # CDK_BUNDLING_STACKS="[]" skips Docker asset bundling: synth only has to
+      # prove the templates are valid, and bundling every image would dominate
+      # the run. A merge-queue run has no PR base to diff against, so it synths
+      # every stack.
+      - name: Synth CDK stacks
+        env:
+          CDK_BUNDLING_STACKS: "[]"
+          # Empty on a manual run (no PR); this workflow only ever targets main.
+          BASE_REF: ${{ github.base_ref || 'main' }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "merge_group" ]; then
+            pnpm nx run-many -t synth
+          else
+            pnpm nx affected -t synth --base="origin/${BASE_REF}" --head=HEAD
+          fi
+
+  # Last line of defence before a PR lands: the full suite, not `affected`.
+  # See the note at the top of this file for why `affected` is not enough.
+  full-test-suite:
+    needs: smithy-generate
+    if: github.event_name == 'merge_group'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: smithy-generated
+          path: smithy-generated
+      - uses: ./.github/actions/setup-build
+
+      - name: Test all projects
+        run: pnpm nx run-many -t test --output-style=stream
+
+      # Same repo-level suite as the PR job — `run-many` never reaches it either.
+      - name: Test repo-level suite
+        run: uv run pytest tests/unit -q
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-reports-full
+          path: |
+            **/junit.xml
+            **/coverage.xml
+          retention-days: 7
+          if-no-files-found: ignore
