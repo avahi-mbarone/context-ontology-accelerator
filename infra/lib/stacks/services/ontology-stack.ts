@@ -443,7 +443,8 @@ export class OntologyStack extends SCLStack {
     );
 
     // CloudWatch — publish custom induction metrics (Bedrock rerank latency,
-    // token usage, per-job cost) under the COA/Ontology namespace.
+    // token usage, per-job cost) under the COA/Ontology namespace, plus
+    // guardrail allow/block decisions under COA/Guardrails (#111 AC10).
     // PutMetricData exposes no resource-level ARN, so least-privilege is
     // enforced with the ``cloudwatch:namespace`` condition key instead.
     taskDef.taskRole.addToPrincipalPolicy(
@@ -451,7 +452,9 @@ export class OntologyStack extends SCLStack {
         actions: ["cloudwatch:PutMetricData"],
         resources: ["*"],
         conditions: {
-          StringEquals: { "cloudwatch:namespace": "COA/Ontology" },
+          StringEquals: {
+            "cloudwatch:namespace": ["COA/Ontology", "COA/Guardrails"],
+          },
         },
       }),
     );

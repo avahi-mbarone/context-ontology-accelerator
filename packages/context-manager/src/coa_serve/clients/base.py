@@ -252,6 +252,10 @@ class QueryResult:
     row_count: int
     truncated: bool
     duration_ms: int = 0
+    # Which execution engine produced this result: "athena" | "redshift" | "jdbc".
+    # Surfaced in the serve trace (t1.execute / t2.sql.execute) so the routing is
+    # observable end-to-end. Empty when the executor doesn't tag itself.
+    engine: str = ""
 
 
 @runtime_checkable

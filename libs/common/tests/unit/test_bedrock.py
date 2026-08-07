@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -275,3 +276,137 @@ class TestGuardrailIntegration:
 
         call_kwargs = mock_client.converse.call_args[1]
         assert call_kwargs["guardrailConfig"]["guardrailVersion"] == "3"
+
+
+class TestGuardrailDecisionMetrics:
+    """#111 AC10/AC11 — Converse guardrail decisions are counted and logged."""
+
+    _ALLOW_RESPONSE = {
+        "output": {"message": {"content": [{"text": '{"ok": true}'}]}},
+        "stopReason": "end_turn",
+        "usage": {"inputTokens": 10, "outputTokens": 5},
+    }
+    _BLOCK_RESPONSE = {
+        "output": {"message": {"content": [{"text": "I cannot help."}]}},
+        "stopReason": "guardrail_intervened",
+        "usage": {"inputTokens": 10, "outputTokens": 5},
+        "trace": {
+            "guardrail": {
+                "outputAssessments": {
+                    "gr-123": [{"contentPolicy": {"filters": [{"action": "BLOCKED", "type": "VIOLENCE"}]}}]
+                }
+            }
+        },
+    }
+
+    @staticmethod
+    def _invoke(mock_boto3, response, **client_kwargs):
+        """Invoke with a canned Converse response, returning the CloudWatch mock."""
+        mock_client = MagicMock()
+        mock_client.converse.return_value = response
+        mock_boto3.client.return_value = mock_client
+        cw = MagicMock()
+        client = BedrockClient(region="us-east-1", **client_kwargs)
+        with (
+            patch("coa_common.guardrail_metrics._cloudwatch_client", return_value=cw),
+            suppress(GuardrailBlockedError),
+        ):
+            client.invoke("sys", "usr")
+        return cw
+
+    @staticmethod
+    def _metrics(cw):
+        return {m["MetricName"]: m for m in cw.put_metric_data.call_args.kwargs["MetricData"]}
+
+    @patch("coa_common.bedrock.boto3")
+    def test_block_emits_invocations_blocked_and_latency(self, mock_boto3):
+        cw = self._invoke(mock_boto3, self._BLOCK_RESPONSE, guardrail_id="gr-123")
+        metrics = self._metrics(cw)
+        assert set(metrics) == {"GuardrailInvocations", "GuardrailBlocked", "GuardrailLatency"}
+        assert {"Name": "Decision", "Value": "BLOCK"} in metrics["GuardrailInvocations"]["Dimensions"]
+
+    @patch("coa_common.bedrock.boto3")
+    def test_allow_emits_invocations_without_blocked(self, mock_boto3):
+        cw = self._invoke(mock_boto3, self._ALLOW_RESPONSE, guardrail_id="gr-123")
+        metrics = self._metrics(cw)
+        assert "GuardrailBlocked" not in metrics
+        assert {"Name": "Decision", "Value": "ALLOW"} in metrics["GuardrailInvocations"]["Dimensions"]
+
+    @patch("coa_common.bedrock.boto3")
+    def test_no_metrics_when_unguarded(self, mock_boto3):
+        """Counting unguarded calls as ALLOW would make the block rate meaningless."""
+        cw = self._invoke(mock_boto3, self._ALLOW_RESPONSE)
+        cw.put_metric_data.assert_not_called()
+
+    @patch("coa_common.bedrock.boto3")
+    def test_component_dimension_defaults_to_enrichment(self, mock_boto3):
+        cw = self._invoke(mock_boto3, self._ALLOW_RESPONSE, guardrail_id="gr-123")
+        for metric in self._metrics(cw).values():
+            assert {"Name": "Component", "Value": "enrichment"} in metric["Dimensions"]
+
+    @patch("coa_common.bedrock.boto3")
+    def test_component_dimension_is_overridable(self, mock_boto3):
+        cw = self._invoke(mock_boto3, self._ALLOW_RESPONSE, guardrail_id="gr-123", component="ontology-shapes")
+        assert {"Name": "Component", "Value": "ontology-shapes"} in self._metrics(cw)["GuardrailInvocations"][
+            "Dimensions"
+        ]
+
+    @patch("coa_common.bedrock.boto3")
+    def test_decision_log_line_has_required_keys(self, mock_boto3):
+        mock_client = MagicMock()
+        mock_client.converse.return_value = self._BLOCK_RESPONSE
+        mock_boto3.client.return_value = mock_client
+
+        client = BedrockClient(region="us-east-1", guardrail_id="gr-123")
+        with (
+            patch("coa_common.guardrail_metrics.logger") as mock_logger,
+            pytest.raises(GuardrailBlockedError),
+        ):
+            client.invoke("sys", "usr")
+
+        assert mock_logger.info.call_args[0][0] == "guardrail_decision"
+        kwargs = mock_logger.info.call_args.kwargs
+        assert kwargs["component"] == "enrichment"
+        assert kwargs["decision"] == "BLOCK"
+        assert kwargs["filter_type"] == "CONTENT"
+        assert kwargs["latency_ms"] >= 0
+
+    @patch("coa_common.bedrock.boto3")
+    def test_metric_failure_still_raises_on_block(self, mock_boto3):
+        """A broken emitter must not let blocked content through."""
+        mock_client = MagicMock()
+        mock_client.converse.return_value = self._BLOCK_RESPONSE
+        mock_boto3.client.return_value = mock_client
+        cw = MagicMock()
+        cw.put_metric_data.side_effect = RuntimeError("cloudwatch down")
+
+        client = BedrockClient(region="us-east-1", guardrail_id="gr-123")
+        with (
+            patch("coa_common.guardrail_metrics._cloudwatch_client", return_value=cw),
+            pytest.raises(GuardrailBlockedError),
+        ):
+            client.invoke("sys", "usr")
+
+    @patch("coa_common.bedrock.boto3")
+    def test_telemetry_double_fault_still_raises_on_block(self, mock_boto3):
+        """The block must survive BOTH the metric put and the fallback log failing.
+
+        The emit sits between the block-determination and the raise, so a
+        telemetry exception escaping it would return blocked content to the
+        caller as if the guardrail had allowed it.
+        """
+        mock_client = MagicMock()
+        mock_client.converse.return_value = self._BLOCK_RESPONSE
+        mock_boto3.client.return_value = mock_client
+        cw = MagicMock()
+        cw.put_metric_data.side_effect = RuntimeError("cloudwatch down")
+
+        client = BedrockClient(region="us-east-1", guardrail_id="gr-123")
+        with (
+            patch("coa_common.guardrail_metrics._cloudwatch_client", return_value=cw),
+            patch("coa_common.guardrail_metrics.logger") as mock_logger,
+            pytest.raises(GuardrailBlockedError),
+        ):
+            mock_logger.info.side_effect = RuntimeError("stdout closed")
+            mock_logger.warning.side_effect = RuntimeError("stdout closed")
+            client.invoke("sys", "usr")

@@ -19,3 +19,33 @@ packageManagerStrictness:
 pnpm:
   auditConfig:
     minReleaseAge: "7 days"
+
+overrides:
+  # downlevel-dts depends on typescript@"next" — a dist-tag that resolves to
+  # whatever nightly was published that day. So `pnpm install` pulls a build that
+  # is hours old, and the minReleaseAge quarantine above then rejects the lockfile
+  # it just produced. This is not a stale lockfile: re-resolving reproduces it,
+  # because the tag keeps moving. A fresh clone fails `make setup` outright, with
+  # node_modules left empty and every TS target (CDK, web-app, Nx) unusable.
+  #
+  # Scoped to downlevel-dts rather than overriding typescript globally: the
+  # workspace packages pin real ranges (~5.7.0 for infra, ^5.6.0 for web-app and
+  # ts-shared, ^6.0.3 for mcp-proxy) and a blanket override would drag them all
+  # onto one version. downlevel-dts only rewrites .d.ts files for older
+  # consumers — a build-time tool inside the Smithy-generated clients, not
+  # something whose exact compiler version changes what ships.
+  "downlevel-dts>typescript": 6.0.3
+  axios: 1.18.0
+  "brace-expansion@1.1.14": 1.1.18
+  "brace-expansion@2.1.0": 2.1.4
+  "brace-expansion@5.0.6": 5.0.9
+  fast-xml-builder: 1.1.7
+  form-data: 4.0.6
+  js-yaml: 3.15.0
+  minimatch@9.0.3: 9.0.7
+  postcss: 8.5.18
+  react-router: 6.30.4
+  react-router-dom: 6.30.4
+  tmp: 0.2.7
+  vite: 6.4.3
+  ws: 8.21.0

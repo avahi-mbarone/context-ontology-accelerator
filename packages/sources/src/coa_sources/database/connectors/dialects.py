@@ -21,20 +21,13 @@ only fails the engine that needs it (and keeps the Lambda bundle lean). All
 identifiers from configuration are bound as query parameters — never
 string-interpolated — except the IN-clause placeholder list, which is built
 solely from a count of validated names.
-
-Not every implemented dialect is enabled: engines listed in
-``coa_common.constants.PREVIEW_DATABASE_ENGINES`` are withheld from the product
-pending further validation. Their classes stay here in full; only the enabled
-``_DIALECTS`` registry (and therefore ``DISCOVERY_ENGINES`` / ``get_dialect``)
-filters them out. See ``_DIALECTS`` below.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import Any
-
-from coa_common.constants import PREVIEW_DATABASE_ENGINES
 
 logger = logging.getLogger(__name__)
 
@@ -81,8 +74,13 @@ Constraints = tuple[dict[str, list[str]], dict[str, list[tuple[str, str, str]]]]
 Descriptions = tuple[dict[str, str], dict[str, dict[str, str]]]
 
 
-def _run(conn: Any, sql: str, params: tuple = ()) -> list[tuple]:
-    """Execute a parameterized query and return all rows."""
+def _run(conn: Any, sql: str, params: tuple[Any, ...] | Mapping[str, Any] = ()) -> list[tuple]:
+    """Execute a parameterized query and return all rows.
+
+    ``params`` accepts either a positional tuple or a mapping of NAMED binds.
+    Named binds are required by dialects whose driver counts each occurrence of
+    a positional placeholder (python-oracledb — see ``OracleDialect.list_tables``).
+    """
     cursor = conn.cursor()
     try:
         cursor.execute(sql, params)
@@ -760,11 +758,17 @@ class OracleDialect(Dialect):
 
     def list_tables(self, conn: Any, schema: str) -> list[str]:
         """List tables and views for an owner from ``all_tables`` / ``all_views``."""
+        # `:owner` is a NAMED bind, deliberately: with positional `:1` binds
+        # python-oracledb counts each OCCURRENCE, so reusing `:1` across both
+        # UNION arms demands two values and discovery died on every Oracle
+        # source with
+        #   DPY-4009: 2 positional bind values are required but 1 were provided
+        # A named bind is supplied once and referenced as often as needed.
         rows = _run(
             conn,
-            "SELECT table_name FROM all_tables WHERE owner = :1 "
-            "UNION SELECT view_name FROM all_views WHERE owner = :1 ORDER BY 1",
-            (schema,),
+            "SELECT table_name FROM all_tables WHERE owner = :owner "
+            "UNION SELECT view_name FROM all_views WHERE owner = :owner ORDER BY 1",
+            {"owner": schema},
         )
         return [r[0] for r in rows]
 
@@ -846,26 +850,18 @@ _IMPLEMENTED_DIALECTS: tuple[Dialect, ...] = (
     OracleDialect(),
 )
 
-# ENABLED dialects. Engines in PREVIEW_DATABASE_ENGINES are implemented above but
-# withheld from the product pending further validation, so they are filtered out
-# here: ``get_dialect`` returns None for them and ``discover_metadata`` /
-# ``test_connection`` reject them with an "unsupported engine" error. Re-enabling
-# an engine means removing its token from PREVIEW_DATABASE_ENGINES — this module
-# needs no change.
-_DIALECTS: tuple[Dialect, ...] = tuple(
-    d for d in _IMPLEMENTED_DIALECTS if d.engines.isdisjoint(PREVIEW_DATABASE_ENGINES)
-)
+# All implemented dialects are enabled.
+_DIALECTS: tuple[Dialect, ...] = _IMPLEMENTED_DIALECTS
 
-# Engines for which schema discovery is implemented AND enabled (one dialect each).
+# Engines for which schema discovery is implemented and enabled (one dialect each).
 DISCOVERY_ENGINES: frozenset[str] = frozenset().union(*(d.engines for d in _DIALECTS))
 
 
 def get_dialect(engine: str | None) -> Dialect | None:
-    """Return the enabled dialect serving ``engine`` (case-insensitive), or None.
+    """Return the dialect serving ``engine`` (case-insensitive), or None.
 
-    None means "no discovery path for this engine", which covers both an unknown
-    token and an engine withheld by PREVIEW_DATABASE_ENGINES. Callers surface it
-    as an unsupported-engine error.
+    None means "no discovery path for this engine" — an unknown token. Callers
+    surface it as an unsupported-engine error.
     """
     if not engine:
         return None
