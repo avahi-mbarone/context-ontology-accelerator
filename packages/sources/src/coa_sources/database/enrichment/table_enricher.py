@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import boto3
 from coa_common.bedrock import GuardrailBlockedError
+from coa_common.config import resolve_region
 from coa_common.datazone_forms import build_forms_input
 from coa_common.domain_models import (
     BusinessMetadata,
@@ -32,7 +33,7 @@ from coa_sources.database.pipeline.enrichment_metrics import (
 
 logger = logging.getLogger(__name__)
 
-AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
+AWS_REGION = resolve_region()
 COLUMN_BATCH_SIZE = 50
 COLUMN_BATCH_THRESHOLD = 80
 MAX_WORKERS = 10

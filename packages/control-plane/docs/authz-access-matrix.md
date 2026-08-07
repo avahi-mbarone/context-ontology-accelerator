@@ -18,7 +18,10 @@ This table reflects every operation registered on the **`ControlPlaneService`**
 Smithy service — the only API behind the Lambda authorizer
 (`packages/control-plane/.../authorization/handler.py`). `/health` is
 unauthenticated (`@optionalAuth`) and is not listed. Any route not listed here
-falls through to `denyAll` (fail-closed).
+falls through to `denyAll` (fail-closed) — a dedicated test
+(`test_no_secured_smithy_operation_is_left_unmapped`) parses the tracked
+Smithy sources and fails if a new `@http` operation ships without an entry
+here, so this table cannot silently drift out of sync with the service again.
 
 ### Namespace, roles & grants
 
@@ -93,13 +96,58 @@ falls through to `denyAll` (fail-closed).
 | `/namespaces/{namespaceId}/proposals/{proposalId}/cancel` | POST | `manageOntology` | OntologyProposal |
 | `/namespaces/{namespaceId}/proposals/{proposalId}/validate` | POST | `manageOntology` | OntologyProposal |
 | `/namespaces/{namespaceId}/proposals/{proposalId}/validate/jobs/{jobId}` | GET | `viewNamespace` | OntologyProposal |
+| `/namespaces/{namespaceId}/proposals/{proposalId}/infer-constraints` | POST | `manageOntology` | OntologyProposal |
+| `/namespaces/{namespaceId}/proposals/{proposalId}/infer-constraints/jobs/{jobId}` | GET | `viewNamespace` | OntologyProposal |
+| `/namespaces/{namespaceId}/proposals/{proposalId}/compile-constraints` | POST | `manageOntology` | OntologyProposal |
+| `/namespaces/{namespaceId}/proposals/{proposalId}/upload-url` | POST | `manageOntology` | OntologyProposal |
 | `/namespaces/{namespaceId}/proposals/update` | POST | `manageOntology` | OntologyProposal |
 | `/namespaces/{namespaceId}/proposals/reject` | POST | `manageOntology` | OntologyProposal |
 | `/namespaces/{namespaceId}/ontologies` | GET | `viewNamespace` | Ontology |
+| `/namespaces/{namespaceId}/ontologies` | DELETE | `manageOntology` | Ontology |
+| `/namespaces/{namespaceId}/ontologies/{ontologyId}` | GET | `viewNamespace` | Ontology |
+| `/namespaces/{namespaceId}/ontologies/{ontologyId}/download` | GET | `viewNamespace` | Ontology |
+| `/namespaces/{namespaceId}/ontologies/upload-url` | POST | `manageOntology` | Ontology |
+| `/namespaces/{namespaceId}/ontologies/{ontologyId}/upload` | POST | `manageOntology` | Ontology |
+| `/namespaces/{namespaceId}/ontologies/{ontologyId}/fetch` | POST | `manageOntology` | Ontology |
+| `/namespaces/{namespaceId}/ontologies/{ontologyId}/ingest-from-s3` | POST | `manageOntology` | Ontology |
+| `/namespaces/{namespaceId}/ontologies/{ontologyId}/ingest-status/{jobId}` | GET | `viewNamespace` | Ontology |
+| `/namespaces/{namespaceId}/ontology/foundational` | GET | `viewNamespace` | Ontology |
+| `/namespaces/{namespaceId}/ontology/foundational/{key}/load` | POST | `manageOntology` | Ontology |
+| `/namespaces/{namespaceId}/proposals/{proposalId}/repair-datatypes` | POST | `manageOntology` | OntologyProposal |
+| `/namespaces/{namespaceId}/graph/traverse` | POST | `traverseGraph` | Namespace |
+| `/namespaces/{namespaceId}/graph/ontology-overview` | GET | `viewNamespace` | Ontology |
 | `/namespaces/{namespaceId}/graph/search` | GET | `viewNamespace` | Ontology |
 | `/namespaces/{namespaceId}/graph/class` | GET | `viewNamespace` | Ontology |
 | `/namespaces/{namespaceId}/graph/object-property` | GET | `viewNamespace` | Ontology |
 | `/namespaces/{namespaceId}/graph/datatype-property` | GET | `viewNamespace` | Ontology |
+
+Two judgement calls worth surfacing:
+
+- **Minting an upload URL is gated as a write** (`manageOntology`, not
+  `viewNamespace`) on `upload-url`, `upload`, `fetch`, and `ingest-from-s3`. A
+  presigned PUT hands out the ability to place an artifact, so the URL itself is
+  gated like the upload it enables — matching the sibling precedents at
+  `/proposals/{proposalId}/upload-url` and `/sources/upload-urls`. `fetch` reads
+  from a remote source but writes the result into this namespace's store, so it
+  is a write despite the name. Polling an ingest job (`ingest-status/{jobId}`)
+  only reveals progress, so it stays a read — the same split as
+  `/proposals/{proposalId}/validate/jobs/{jobId}`.
+- **`manageOntology` brings the archived-namespace mutation guard into play**
+  (see below) where `viewNamespace` would not — intended for the writes above,
+  but a real behavioural consequence of the choice.
+
+### Platform-scoped (no `{namespaceId}`)
+
+| API Endpoint | Method | Cedar Action | Resource Type |
+|---|---|---|---|
+| `/system-health` | GET | `list` | Namespace |
+
+`/system-health` has no `{namespaceId}`, so the evaluated resource `id`
+resolves to `"*"` and no namespace-scoped grant can ever match it — the same
+situation as `/grants` and `/roles`. It is mapped to `list` on `Namespace`,
+which `default.cedar` already permits for every authenticated principal (the
+same basis `GET /namespaces` and `GET /roles` stand on), rather than to a new
+platform-only gate.
 
 !!! note "`query` and `searchDocuments`"
     The `query` and `searchDocuments` Cedar actions are **not** invoked by the
@@ -117,6 +165,7 @@ falls through to `denyAll` (fail-closed).
 | `list` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ (Namespace only) |
 | `viewNamespace` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
 | `query` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
+| `traverseGraph` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
 | `readMetric` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
 | `searchDocuments` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
 | `manageSource` | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ❌ |
@@ -132,7 +181,7 @@ falls through to `denyAll` (fail-closed).
 
 - **Global roles** (`platform-admin`, `platform-viewer`) apply across all namespaces unconditionally.
 - **Namespace roles** are scoped via `resourceUID` — they only grant access when the resource's `id` or `namespace` attribute matches the namespace the role was granted on.
-- For every namespace-scoped route, the authorizer sets **both** the evaluated resource `id` **and** its `namespace` attribute to the `{namespaceId}` from the path. This lets owner/maintainer policies (which match on `resource.id`) and data-steward/data-analyst policies (which match on `resource.namespace`) resolve against the same namespace. Platform routes (`/grants`, `/roles`, `/principals/...`) use `"*"`, which no namespace-scoped role can satisfy — so only global roles apply there.
+- For every namespace-scoped route, the authorizer sets **both** the evaluated resource `id` **and** its `namespace` attribute to the `{namespaceId}` from the path. This lets owner/maintainer policies (which match on `resource.id`) and data-steward/data-analyst policies (which match on `resource.namespace`) resolve against the same namespace. Platform routes (`/grants`, `/roles`, `/principals/...`, `/system-health`) use `"*"`, which no namespace-scoped role can satisfy — so only global roles (or, for `list`, any authenticated principal) apply there.
 - **Resource types are per-route.** Each route is evaluated against its proper Cedar entity type — `Source` (unified database/document sources), `Metric`, `Ontology`, `OntologyProposal`, or `Namespace` — rather than always `Namespace`. Authorization is still **namespace-scoped**: role grants target a namespace (`resourceUID = namespaceId`), and the evaluated `id`/`namespace` are the namespace id. The typed resources document intent and provide the foundation for future per-resource (resource-id-level) policies; no current policy keys on a sub-resource id.
 - The `default.cedar` policy grants `list` on `Namespace` resources to all authenticated users (allows listing namespaces; API-level filtering restricts what's returned).
 - `namespace-owner` and `namespace-maintainer` are functionally identical (both use `permit(principal, action, resource)` with a resource ID match).

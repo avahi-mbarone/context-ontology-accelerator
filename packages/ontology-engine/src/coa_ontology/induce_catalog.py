@@ -42,7 +42,7 @@ def _stage_timer(stage: str, tracker: CostTracker) -> Iterator[None]:
 
     Records via the per-job ``CostTracker`` (single value per stage) so the
     duration is published through the same PutMetricData emit that carries cost
-    — NOT EMF-stdout, which is never extracted on this Fargate task. Fires on
+    rather than as stdout EMF, matching this task's other metrics. Fires on
     normal fall-through, an early ``return``, or an exception propagating out.
     """
     t0 = time.perf_counter()

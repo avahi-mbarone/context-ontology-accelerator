@@ -14,6 +14,18 @@ function buildStack(context: Record<string, string> = {}): Template {
   return Template.fromStack(stack);
 }
 
+/** Egress rules of the Glue-connector security group. */
+function connectorEgress(template: Template): any[] {
+  const sgs = template.findResources("AWS::EC2::SecurityGroup");
+  const connector = (Object.values(sgs) as any[]).find((sg) =>
+    (sg.Properties.GroupDescription as string).startsWith(
+      "Glue Connection / Athena connector",
+    ),
+  );
+  expect(connector).toBeDefined();
+  return connector.Properties.SecurityGroupEgress ?? [];
+}
+
 function buildStackWithEnv(context: Record<string, string> = {}): Template {
   const app = new cdk.App({ context });
   const stack = new NetworkStack(app, "TestNetwork", { env: TEST_ENV });
@@ -194,6 +206,55 @@ describe("NetworkStack", () => {
         expect(
           egress.some((r: any) => r.FromPort === port && r.ToPort === port),
         ).toBe(true);
+      }
+    });
+
+    it("Connector SG allows port 80 for OCSP by default", () => {
+      // Only the Snowflake driver performs internet OCSP, and it is HTTP-only.
+      // Without this rule every connect burns 5-30s per responder before failing
+      // open, which is a live risk against the discovery Lambda's 900s timeout.
+      const egress = connectorEgress(buildStack());
+      expect(
+        egress.some((r: any) => r.FromPort === 80 && r.ToPort === 80),
+      ).toBe(true);
+    });
+
+    it("Connector SG drops the OCSP rule when connector_ocsp_egress=false", () => {
+      // A deployment with no Snowflake source has no use for port 80 egress.
+      const egress = connectorEgress(
+        buildStack({ connector_ocsp_egress: "false" }),
+      );
+      expect(
+        egress.some((r: any) => r.FromPort === 80 && r.ToPort === 80),
+      ).toBe(false);
+      // The rest of the connector's egress is untouched.
+      expect(
+        egress.some((r: any) => r.FromPort === 443 && r.ToPort === 443),
+      ).toBe(true);
+    });
+
+    it("connector_egress_cidrs scopes every connector egress rule, not just one port", () => {
+      // The default is 0.0.0.0/0 because a managed connector reaching a SaaS
+      // warehouse has no enumerable destination set; where the egress path IS
+      // known (fixed NAT/proxy), this narrows OCSP, 443 and the DB ports alike.
+      const egress = connectorEgress(
+        buildStack({ connector_egress_cidrs: "10.20.0.0/16,192.0.2.10/32" }),
+      );
+      const internetBound = egress.filter((r: any) =>
+        [80, 443, 5432, 3306, 1433, 5439, 1521].includes(r.FromPort),
+      );
+      expect(internetBound.length).toBeGreaterThan(0);
+      for (const rule of internetBound) {
+        expect(["10.20.0.0/16", "192.0.2.10/32"]).toContain(rule.CidrIp);
+      }
+      expect(egress.some((r: any) => r.CidrIp === "0.0.0.0/0")).toBe(false);
+      // Both CIDRs get the full port set, so narrowing never silently drops one.
+      for (const cidr of ["10.20.0.0/16", "192.0.2.10/32"]) {
+        for (const port of [80, 443, 1521]) {
+          expect(
+            egress.some((r: any) => r.CidrIp === cidr && r.FromPort === port),
+          ).toBe(true);
+        }
       }
     });
   });

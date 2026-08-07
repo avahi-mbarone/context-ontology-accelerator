@@ -116,6 +116,21 @@ describe("McpStack", () => {
     );
   });
 
+  it("sets JWT issuer/client env vars for independent signature verification", () => {
+    // Defense-in-depth: claims.py verifies signatures itself using the same
+    // issuer/audience the AuthorizerConfiguration below trusts, rather than
+    // assuming AgentCore's platform-level check is the only line of defense.
+    template.hasResourceProperties(
+      "AWS::BedrockAgentCore::Runtime",
+      Match.objectLike({
+        EnvironmentVariables: Match.objectLike({
+          JWT_ISSUER_URL: "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_test",
+          JWT_CLIENT_ID: Match.anyValue(),
+        }),
+      }),
+    );
+  });
+
   it("does NOT set data-plane env vars (delegated to CM)", () => {
     template.hasResourceProperties(
       "AWS::BedrockAgentCore::Runtime",

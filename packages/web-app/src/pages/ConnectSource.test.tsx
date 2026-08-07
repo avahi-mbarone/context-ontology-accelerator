@@ -57,8 +57,7 @@ vi.mock("@coa/control-plane-client", () => ({
 }));
 
 // Partial mock: the upload constraints are stubbed to keep this suite independent
-// of the real MIME list, but PREVIEW_DATABASE_ENGINES comes from the actual module
-// so the engine-picker assertions below test the real launch gate, not a fixture.
+// of the real MIME list.
 vi.mock("@coa/shared", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@coa/shared")>()),
   SUPPORTED_UPLOAD_CONTENT_TYPES: new Set<string>([
@@ -335,22 +334,20 @@ describe("ConnectSource — advanced configuration", () => {
     await clickNext();
     await user.click(screen.getByText("Select an engine"));
 
-    // Snowflake/Oracle dialects are implemented but withheld pending validation
-    // (PREVIEW_DATABASE_ENGINES), so they must not appear in the engine picker.
-    expect(screen.queryByText("Snowflake")).not.toBeInTheDocument();
-    expect(screen.queryByText("Oracle")).not.toBeInTheDocument();
-    // The enabled engines are still offered.
+    // All engines are offered in the picker.
+    expect(screen.getAllByText("Snowflake")[0]).toBeInTheDocument();
+    expect(screen.getAllByText("Oracle")[0]).toBeInTheDocument();
     expect(screen.getAllByText("PostgreSQL")[0]).toBeInTheDocument();
     expect(screen.getAllByText("SQL Server")[0]).toBeInTheDocument();
   });
 
-  it("does not advertise withheld engines in the JDBC source description", () => {
+  it("advertises all engines in the JDBC source description", () => {
     render(<ConnectSource />, { wrapper });
 
     const description = screen.getByText(/Supported engines:/);
     expect(description.textContent).toContain("PostgreSQL");
-    expect(description.textContent).not.toContain("Snowflake");
-    expect(description.textContent).not.toContain("Oracle");
+    expect(description.textContent).toContain("Oracle");
+    expect(description.textContent).toContain("Snowflake");
   });
 });
 
@@ -562,4 +559,141 @@ describe("ConnectSource — cross-account IAM role", () => {
     expect(cfg.crossAccountRoleArn).toBeUndefined();
     expect(cfg.externalId).toBeUndefined();
   });
+});
+
+describe("ConnectSource — Glue execution engine", () => {
+  beforeEach(() => {
+    mockCreate.mockReset();
+    mockCreateAsync.mockReset();
+  });
+
+  it("defaults to Athena — omits executionEngine/redshiftWorkgroup from the payload", async () => {
+    render(<ConnectSource />, { wrapper });
+
+    await clickNext();
+    await user.type(screen.getByPlaceholderText("My Glue Database"), "my-db");
+    await user.type(
+      screen.getByPlaceholderText("123456789012"),
+      "123456789012",
+    );
+    await user.type(screen.getByPlaceholderText("my_glue_db"), "my_db");
+    await clickNext();
+    await clickNext();
+    await user.click(screen.getByRole("button", { name: /^connect source$/i }));
+
+    const cfg =
+      mockCreate.mock.calls[0][0].body.databaseSource.glueConfiguration;
+    expect(cfg.executionEngine).toBeUndefined();
+    expect(cfg.redshiftWorkgroup).toBeUndefined();
+  });
+
+  it("does not show the Redshift workgroup field until Redshift is selected", async () => {
+    render(<ConnectSource />, { wrapper });
+    await clickNext();
+    // On the Glue config step, the workgroup input is hidden by default (Athena).
+    expect(
+      screen.queryByPlaceholderText("my-workgroup"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("submits executionEngine=REDSHIFT and the workgroup when Redshift is chosen", async () => {
+    render(<ConnectSource />, { wrapper });
+
+    await clickNext();
+    await user.type(screen.getByPlaceholderText("My Glue Database"), "my-db");
+    await user.type(
+      screen.getByPlaceholderText("123456789012"),
+      "123456789012",
+    );
+    await user.type(screen.getByPlaceholderText("my_glue_db"), "my_db");
+
+    // Open the Execution engine Select and pick Redshift Serverless.
+    await user.click(screen.getByText("Athena (default)"));
+    await user.click(screen.getByText("Redshift Serverless"));
+
+    // The workgroup field now appears; fill it.
+    await user.type(
+      screen.getByPlaceholderText("my-workgroup"),
+      "my-workgroup",
+    );
+
+    await clickNext();
+    await clickNext();
+    await user.click(screen.getByRole("button", { name: /^connect source$/i }));
+
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+    const cfg =
+      mockCreate.mock.calls[0][0].body.databaseSource.glueConfiguration;
+    expect(cfg.executionEngine).toBe("REDSHIFT");
+    expect(cfg.redshiftWorkgroup).toBe("my-workgroup");
+  }, 15000);
+
+  it("blocks Next when Redshift is selected but no workgroup is entered", async () => {
+    render(<ConnectSource />, { wrapper });
+
+    await clickNext();
+    await user.type(screen.getByPlaceholderText("My Glue Database"), "my-db");
+    await user.type(
+      screen.getByPlaceholderText("123456789012"),
+      "123456789012",
+    );
+    await user.type(screen.getByPlaceholderText("my_glue_db"), "my_db");
+    await user.click(screen.getByText("Athena (default)"));
+    await user.click(screen.getByText("Redshift Serverless"));
+
+    // Attempt to advance without a workgroup — validation must surface an error
+    // and NOT submit.
+    await clickNext();
+    expect(
+      screen.getByText(/Redshift workgroup is required/i),
+    ).toBeInTheDocument();
+    expect(mockCreate).not.toHaveBeenCalled();
+  }, 15000);
+
+  it("hides the Athena DataCatalog field when Redshift is selected (Athena-only concept)", async () => {
+    render(<ConnectSource />, { wrapper });
+    await clickNext();
+
+    // Under the default Athena engine the Athena DataCatalog field is present.
+    expect(
+      screen.getByPlaceholderText("my_federated_catalog"),
+    ).toBeInTheDocument();
+
+    // Switch to Redshift — the Athena DataCatalog field disappears (it does not
+    // apply to the awsdatacatalog auto-mount path), and the workgroup appears.
+    await user.click(screen.getByText("Athena (default)"));
+    await user.click(screen.getByText("Redshift Serverless"));
+
+    expect(
+      screen.queryByPlaceholderText("my_federated_catalog"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByPlaceholderText("my-workgroup")).toBeInTheDocument();
+  }, 15000);
+
+  it("omits athenaDataCatalogName from the payload on the Redshift path", async () => {
+    render(<ConnectSource />, { wrapper });
+
+    await clickNext();
+    await user.type(screen.getByPlaceholderText("My Glue Database"), "my-db");
+    await user.type(
+      screen.getByPlaceholderText("123456789012"),
+      "123456789012",
+    );
+    await user.type(screen.getByPlaceholderText("my_glue_db"), "my_db");
+    await user.click(screen.getByText("Athena (default)"));
+    await user.click(screen.getByText("Redshift Serverless"));
+    await user.type(
+      screen.getByPlaceholderText("my-workgroup"),
+      "my-workgroup",
+    );
+
+    await clickNext();
+    await clickNext();
+    await user.click(screen.getByRole("button", { name: /^connect source$/i }));
+
+    const cfg =
+      mockCreate.mock.calls[0][0].body.databaseSource.glueConfiguration;
+    expect(cfg.executionEngine).toBe("REDSHIFT");
+    expect(cfg.athenaDataCatalogName).toBeUndefined();
+  }, 15000);
 });

@@ -5,6 +5,10 @@
 
 from unittest.mock import MagicMock, patch
 
+# Imported for its side effect: mock.patch() resolves dotted targets by
+# attribute traversal, so this submodule must be bound on its parent
+# package before any patch(f"{MODULE}...") is evaluated.
+import coa_sources.database.connectors.glue_connection_provisioner  # noqa: F401
 import pytest
 from botocore.exceptions import ClientError
 from coa_common.constants import RESOURCE_PREFIX
@@ -134,10 +138,15 @@ class TestProvisionFederatedCatalog:
         assert result["athenaDataCatalogName"]
         _mocks["glue"].delete_connection.assert_not_called()
 
-    def test_failed_connection_status_is_logged(self, _mocks, caplog):
-        """A managed connection that never reaches READY is logged with its real
-        StatusReason (the diagnostic that was previously invisible) — provisioning
-        still returns so LF/catalog steps are attempted, but the failure is surfaced."""
+    def test_failed_connection_status_is_logged_not_fatal(self, _mocks, caplog):
+        """A connection that never reaches READY is logged with its real StatusReason
+        and provisioning CONTINUES.
+
+        Deliberately non-fatal: a not-READY connection is an environment defect
+        (VPC/SG/IAM), and failing the scan on it takes down every JDBC source in the
+        account after discovery has already succeeded. The catalog-emptiness integ
+        assertion is what fails loudly; this log line is the diagnostic.
+        """
         import logging as _logging
 
         from coa_sources.database.connectors.glue_connection_provisioner import (
@@ -151,8 +160,11 @@ class TestProvisionFederatedCatalog:
             }
         }
         with caplog.at_level(_logging.ERROR):
-            provision_federated_catalog(**self._KWARGS)
+            result = provision_federated_catalog(**self._KWARGS)
         assert any("glue_connection_not_ready" in r.message for r in caplog.records)
+        # Provisioning still completed — the catalog reference is returned.
+        assert result["athenaDataCatalogName"]
+        _mocks["glue"].delete_connection.assert_not_called()
 
     def test_catalog_failure_rolls_back_lf_and_connection(self, _mocks):
         from coa_sources.database.connectors.glue_connection_provisioner import (
@@ -394,6 +406,43 @@ class TestGrantConsumerSelect:
 
 
 @pytest.mark.unit
+@pytest.mark.unit
+class TestGrantIamAllowedPrincipals:
+    """Regression cover: tables inherit access from a database-level
+    IAM_ALLOWED_PRINCIPALS grant, and that grant must target the DISCOVERED schemas.
+
+    Granting only the hardcoded `public_schema_name` governed nothing on engines
+    without a "public" database (MySQL, SQL Server, Oracle): LF accepts a grant
+    naming a non-existent database, so `GetDatabases` returned an empty list for
+    every non-LF-admin caller on a catalog that resolved fine.
+    """
+
+    def test_grants_all_per_discovered_schema(self, _mocks):
+        from coa_sources.database.connectors.glue_connection_provisioner import (
+            grant_iam_allowed_principals,
+        )
+
+        result = grant_iam_allowed_principals(catalog_name="scldevds_abc", schemas=["integration_test", "dbo"])
+
+        assert result is True
+        assert _mocks["lf"].grant_permissions.call_count == 2
+        kwargs = [c.kwargs for c in _mocks["lf"].grant_permissions.call_args_list]
+        assert {k["Resource"]["Database"]["Name"] for k in kwargs} == {"integration_test", "dbo"}
+        assert all(k["Principal"]["DataLakePrincipalIdentifier"] == "IAM_ALLOWED_PRINCIPALS" for k in kwargs)
+        assert all(k["Permissions"] == ["ALL"] for k in kwargs)
+        # Nested catalog id is "<account>:<catalogName>".
+        assert all(k["Resource"]["Database"]["CatalogId"] == "123456789012:scldevds_abc" for k in kwargs)
+
+    def test_noop_without_schemas(self, _mocks):
+        from coa_sources.database.connectors.glue_connection_provisioner import (
+            grant_iam_allowed_principals,
+        )
+
+        assert grant_iam_allowed_principals(catalog_name="scldevds_abc", schemas=[]) is False
+        _mocks["lf"].grant_permissions.assert_not_called()
+
+
+@pytest.mark.unit
 class TestGrantConsumerSelectNative:
     """Tests for grant_consumer_select_native (GLUE_DATABASE / strict-LF accounts).
 
@@ -504,3 +553,116 @@ class TestGrantConsumerSelectNative:
         )
         # Best-effort: must not raise; returns False so queryable stays as-is.
         assert grant_consumer_select_native(database_name="mydb", principal_arn="arn:aws:iam::1:role/x") is False
+
+
+@pytest.mark.unit
+class TestSnowflakeWarehouse:
+    """Snowflake needs WAREHOUSE in the Glue connection properties.
+
+    Glue enforces this at CreateConnection time, not at query time:
+      InvalidInputException: [WAREHOUSE are missing in the request object]
+    Since federation failure is fatal for JDBC sources, omitting it turned a
+    fully-successful discovery (all 8 tables found) into SCAN_FAILED.
+    """
+
+    _BASE = {
+        "datasource_id": "DS#snow-1",
+        "engine": "SNOWFLAKE",
+        "host": "myorg-myacct.snowflakecomputing.com",
+        "port": 443,
+        "database_name": "SNOWFLAKE_SAMPLE_DATA",
+        "credential_secret_arn": "arn:aws:secretsmanager:us-east-1:123456789012:secret:s-AbCdEf",
+    }
+
+    @staticmethod
+    def _conn_props(mock_glue):
+        return mock_glue.create_connection.call_args[1]["ConnectionInput"]["ConnectionProperties"]
+
+    def test_warehouse_is_passed_to_glue(self, _mocks):
+        from coa_sources.database.connectors.glue_connection_provisioner import (
+            provision_federated_catalog,
+        )
+
+        provision_federated_catalog(**self._BASE, warehouse="COMPUTE_WH")
+        assert self._conn_props(_mocks["glue"])["WAREHOUSE"] == "COMPUTE_WH"
+
+    def test_casing_filter_not_sent_for_snowflake(self, _mocks):
+        """LOWERCASE_ONLY makes a Snowflake federated catalog expose nothing.
+
+        Snowflake stores unquoted identifiers UPPERCASE, so the filter excludes
+        every object. Glue accepts the property and the connection reaches READY,
+        so the only symptom is a catalog that resolves but is empty — surfacing
+        much later as Athena TABLE_NOT_FOUND at serve time. Verified against a
+        live account: 0 databases with the filter, all 7 schemas without it.
+        """
+        from coa_sources.database.connectors.glue_connection_provisioner import (
+            provision_federated_catalog,
+        )
+
+        provision_federated_catalog(**self._BASE, warehouse="COMPUTE_WH")
+        assert "CATALOG_CASING_FILTER" not in self._conn_props(_mocks["glue"])
+
+    def test_casing_filter_not_sent_for_any_uppercase_native_engine(self, _mocks):
+        """The rule is engine casing convention, not one vendor.
+
+        Oracle folds unquoted identifiers to UPPERCASE like Snowflake, and
+        onboarding a real instance reproduced the same symptom: READY connection,
+        catalog with 0 databases. PostgreSQL/MySQL are lowercase-native and were
+        verified unaffected (byte-identical table lists with and without it).
+        """
+        from coa_sources.database.connectors.glue_connection_provisioner import (
+            provision_federated_catalog,
+        )
+
+        base = {k: v for k, v in self._BASE.items() if k != "engine"}
+        for engine in ("ORACLE", "REDSHIFT", "SNOWFLAKE"):
+            _mocks["glue"].reset_mock()
+            kwargs = dict(base, engine=engine)
+            if engine == "SNOWFLAKE":
+                kwargs["warehouse"] = "COMPUTE_WH"
+            provision_federated_catalog(**kwargs)
+            assert "CATALOG_CASING_FILTER" not in self._conn_props(_mocks["glue"]), engine
+
+    def test_role_is_never_sent_to_glue(self, _mocks):
+        """Glue rejects a ROLE connection property on the Snowflake connector.
+
+        Observed live: InvalidInputException: [ROLE are not allowed in the
+        request object.] The connector session runs as the secret user's
+        DEFAULT_ROLE instead, so nothing may set ROLE here even though
+        jdbcConfiguration.role is valid for the discovery driver.
+        """
+        from coa_sources.database.connectors.glue_connection_provisioner import (
+            provision_federated_catalog,
+        )
+
+        provision_federated_catalog(**self._BASE, warehouse="COMPUTE_WH")
+        assert "ROLE" not in self._conn_props(_mocks["glue"])
+
+    def test_missing_warehouse_fails_with_actionable_message(self, _mocks):
+        """Fail before calling Glue, with a message naming the field to set."""
+        from coa_sources.database.connectors.glue_connection_provisioner import (
+            provision_federated_catalog,
+        )
+
+        with pytest.raises(RuntimeError, match="jdbcConfiguration.warehouse"):
+            provision_federated_catalog(**self._BASE)
+        _mocks["glue"].create_connection.assert_not_called()
+
+    def test_non_snowflake_engines_get_no_warehouse_property(self, _mocks):
+        """The property is engine-specific; other connectors reject unknown keys."""
+        from coa_sources.database.connectors.glue_connection_provisioner import (
+            provision_federated_catalog,
+        )
+
+        provision_federated_catalog(
+            datasource_id="DS#pg-1",
+            engine="POSTGRESQL",
+            host="db.example.com",
+            port=5432,
+            database_name="mydb",
+            credential_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:s-AbCdEf",
+            warehouse="COMPUTE_WH",
+        )
+        props = self._conn_props(_mocks["glue"])
+        assert "WAREHOUSE" not in props
+        assert "ROLE" not in props

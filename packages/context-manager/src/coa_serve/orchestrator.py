@@ -16,6 +16,7 @@ from coa_common import ontology_vector_index_name
 
 from .clients.base import LLMClient, QueryExecutor, VectorClient
 from .exceptions import AccessDeniedError, DataSourceUnavailableError, NoResultError
+from .identity import display_principal
 
 if TYPE_CHECKING:
     from .clients.sources_registry import SourceComposition, SourcesRegistry
@@ -673,7 +674,7 @@ class Orchestrator:
                     data_sources=None,
                     trace=trace,
                     namespace=namespace,
-                    principal=profile.get("userId"),
+                    principal=display_principal(profile),
                     row_count=result.row_count,
                     truncated=result.truncated,
                     strategy=result.strategy_name,
@@ -691,7 +692,7 @@ class Orchestrator:
                     expanded_tables=result.expanded_tables,
                     trace=trace,
                     namespace=namespace,
-                    principal=profile.get("userId"),
+                    principal=display_principal(profile),
                     strategy=result.strategy_name,
                     model_id=model_id,
                 )
@@ -751,12 +752,17 @@ class Orchestrator:
                 metric_match.metric_id not in allowed_metrics and metric_match.metric_name not in allowed_metrics
             ):
                 principal_id = profile.get("userId", "unknown")
+                # Trace details are rendered verbatim in the rationale panel
+                # ("Access denied for principal X"), so they carry the display
+                # label; the log below keeps the sub, which is the stable
+                # correlation key across requests.
+                principal_label = display_principal(profile) or "unknown"
                 reason = f"Metric '{metric_match.metric_name}' not in principal's allowedMetrics"
                 trace.record(
                     StepId.T1_AUTHORIZE,
                     "denied",
                     t1_ms,
-                    detail={"principal": principal_id, "decision": "deny", "reason": reason},
+                    detail={"principal": principal_label, "decision": "deny", "reason": reason},
                     tool_used="grant-profile",
                 )
                 logger.warning(
@@ -824,13 +830,14 @@ class Orchestrator:
                 return None
 
             fw_ms = int((time.perf_counter() - fw_start) * 1000)
-            principal_id = profile.get("userId", "unknown")
+            # Display label — these details are rendered in the rationale panel.
+            principal_label = display_principal(profile) or "unknown"
             if fw_result.denied:
                 trace.record(
                     StepId.T1_AUTHORIZE,
                     "denied",
                     fw_ms,
-                    detail={"principal": principal_id, "decision": "deny"},
+                    detail={"principal": principal_label, "decision": "deny"},
                     tool_used="cedar",
                 )
                 trace.record(
@@ -846,7 +853,7 @@ class Orchestrator:
                 StepId.T1_AUTHORIZE,
                 "allow",
                 fw_ms,
-                detail={"principal": principal_id, "decision": "allow"},
+                detail={"principal": principal_label, "decision": "allow"},
                 tool_used="cedar",
             )
             trace.record(
@@ -893,6 +900,8 @@ class Orchestrator:
                     "rowCount": result.row_count,
                     "table": metric_match.data_source_id or "unknown",
                     "truncated": result.truncated,
+                    # (A2) executing engine — athena | redshift | jdbc.
+                    "engine": result.engine or "unknown",
                 },
                 tool_used="sql-engine",
             )
@@ -905,7 +914,7 @@ class Orchestrator:
                     sql_used=metric_sql,
                     trace=trace,
                     namespace=namespace,
-                    principal=profile.get("userId"),
+                    principal=display_principal(profile),
                     # fuzzy near-miss reports its similarity as confidence (<1.0);
                     # exact name/synonym stays deterministic 1.0.
                     match_confidence=metric_match.match_confidence,
@@ -1003,7 +1012,7 @@ class Orchestrator:
                 guardrail_blocked=tier3_result.guardrail_blocked,
                 trace=trace,
                 namespace=namespace,
-                principal=(profile or {}).get("userId"),
+                principal=display_principal(profile),
                 degraded_sources=tier3_result.degraded_sources or None,
                 model_id=model_id,
                 partial=tier3_result.partial,
@@ -1064,7 +1073,7 @@ class Orchestrator:
             guardrail_blocked=tier3_result.guardrail_blocked,
             trace=trace,
             namespace=namespace,
-            principal=(profile or {}).get("userId"),
+            principal=display_principal(profile),
             degraded_sources=tier3_result.degraded_sources or None,
             model_id=model_id,
         )

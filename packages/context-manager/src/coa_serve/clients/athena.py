@@ -175,6 +175,7 @@ class AthenaQueryExecutor:
             row_count=len(rows),
             truncated=has_more,
             duration_ms=duration_ms,
+            engine="athena",
         )
 
     async def health_check(self) -> dict[str, Any]:
@@ -231,35 +232,66 @@ class AthenaQueryExecutor:
             await asyncio.sleep(min(delay, max(0, remaining)))
             delay = min(delay * _POLL_BACKOFF, _POLL_MAX_DELAY)
 
+    _ATHENA_PAGE_MAX = 1000
+    """Athena GetQueryResults hard limit on rows per call."""
+
     async def _get_results(self, query_id: str, max_rows: int) -> tuple[list[dict[str, Any]], list[str], bool]:
+        """Fetch up to ``max_rows`` result rows, following NextToken across pages.
+
+        Athena caps GetQueryResults at 1000 rows per call and returns a
+        ``NextToken`` for the remainder. The previous implementation issued a
+        single call and discarded the token, so every result set was silently
+        truncated to 999 rows (1000 minus the header) no matter how large
+        ``max_rows`` was — ``has_more`` was computed and then ignored by callers.
+
+        Note the Athena quirk this loop depends on: the header row is present
+        ONLY on the first page. Stripping ``rows[1:]`` unconditionally would eat
+        one real data row per subsequent page.
+        """
         loop = asyncio.get_running_loop()
-        # Athena GetQueryResults supports max 1000 rows per call;
-        # +2 accounts for header row and has_more detection.
-        fetch_limit = min(max_rows + 2, 1000)
-        response = await loop.run_in_executor(
-            _EXECUTOR,
-            lambda: self._athena.get_query_results(QueryExecutionId=query_id, MaxResults=fetch_limit),
-        )
+        rows: list[dict[str, Any]] = []
+        columns: list[str] = []
+        next_token: str | None = None
+        first_page = True
+        truncated = False
 
-        result_set = response["ResultSet"]
-        column_info = result_set["ResultSetMetadata"]["ColumnInfo"]
-        columns = [col["Name"] for col in column_info]
+        while True:
+            # Request only what is still needed; +1 on the first page for the header.
+            want = max_rows - len(rows) + (1 if first_page else 0)
+            page_size = max(1, min(want, self._ATHENA_PAGE_MAX))
+            kwargs: dict[str, Any] = {"QueryExecutionId": query_id, "MaxResults": page_size}
+            if next_token:
+                kwargs["NextToken"] = next_token
 
-        raw_rows = result_set["Rows"]
-        # First row is header in Athena results
-        data_rows = raw_rows[1:] if raw_rows else []
+            # Bind kwargs as a default arg: a bare closure would late-bind and
+            # every iteration would re-request the same page.
+            response = await loop.run_in_executor(
+                _EXECUTOR,
+                lambda kw=kwargs: self._athena.get_query_results(**kw),
+            )
 
-        has_more = len(data_rows) > max_rows or "NextToken" in response
+            result_set = response["ResultSet"]
+            page_rows = result_set.get("Rows", [])
+            if first_page:
+                columns = [col["Name"] for col in result_set["ResultSetMetadata"]["ColumnInfo"]]
+                page_rows = page_rows[1:] if page_rows else []
+                first_page = False
 
-        rows = []
-        for row in data_rows[:max_rows]:
-            row_dict = {}
-            for i, datum in enumerate(row.get("Data", [])):
-                if i < len(columns):
-                    row_dict[columns[i]] = datum.get("VarCharValue")
-            rows.append(row_dict)
+            for row in page_rows:
+                if len(rows) >= max_rows:
+                    truncated = True
+                    break
+                row_dict = {}
+                for i, datum in enumerate(row.get("Data", [])):
+                    if i < len(columns):
+                        row_dict[columns[i]] = datum.get("VarCharValue")
+                rows.append(row_dict)
 
-        return rows, columns, has_more
+            next_token = response.get("NextToken")
+            if not next_token or len(rows) >= max_rows:
+                break
+
+        return rows, columns, bool(next_token) or truncated
 
     @staticmethod
     def _inject_limit(sql: str, max_rows: int) -> str:

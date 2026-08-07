@@ -7,12 +7,19 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
 from dataclasses import dataclass
 
 import boto3
 from botocore.config import Config
+
+from coa_common.config import resolve_region
+from coa_common.guardrail_metrics import (
+    COMPONENT_ENRICHMENT,
+    assessments_from_trace,
+    emit_guardrail_decision,
+    filter_type_from_assessments,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +80,10 @@ class BedrockClient:
         guardrail_version: Guardrail version (default DRAFT).
         max_input_chars: Maximum combined prompt length in characters (default 200,000).
             Requests exceeding this raise InputTooLargeError.
+        component: ``Component`` dimension for the guardrail decision metrics
+            (#111 AC10). Both consumers of this client run as ECS Fargate tasks,
+            which publish their custom metrics via PutMetricData, so decisions
+            go out the same way rather than as stdout EMF.
     """
 
     def __init__(
@@ -83,13 +94,19 @@ class BedrockClient:
         guardrail_id: str | None = None,
         guardrail_version: str | None = None,
         max_input_chars: int = _DEFAULT_MAX_INPUT_CHARS,
+        component: str = COMPONENT_ENRICHMENT,
     ) -> None:
         """Build the Bedrock runtime client with adaptive retries (see class Args)."""
-        self._region = region or os.getenv("AWS_REGION", "us-east-1")
+        # resolve_region (AWS_REGION → AWS_DEFAULT_REGION → us-east-1) rather than a
+        # bespoke getenv: this region reaches both the Bedrock client and the
+        # guardrail decision metrics, and no ECS task definition sets AWS_REGION —
+        # so a lone getenv silently files metrics in us-east-1. See config.resolve_region.
+        self._region = region or resolve_region()
         self._model_id = model_id
         self._guardrail_id = guardrail_id
         self._guardrail_version = guardrail_version or _DEFAULT_GUARDRAIL_VERSION
         self._max_input_chars = max_input_chars
+        self._component = component
         self._client = boto3.client(
             "bedrock-runtime",
             region_name=self._region,
@@ -164,17 +181,31 @@ class BedrockClient:
                 len(content_blocks),
             )
 
-            if stop_reason in ("guardrail_intervened", "guardrail"):
-                guardrail_trace = response.get("trace", {}).get("guardrail", {})
-                blocked = self._check_guardrail_blocked(guardrail_trace)
+            intervened = stop_reason in ("guardrail_intervened", "guardrail")
+            guardrail_trace = response.get("trace", {}).get("guardrail", {}) if intervened else {}
+            blocked = self._check_guardrail_blocked(guardrail_trace) if intervened else False
 
-                if blocked:
-                    logger.warning(
-                        "Guardrail blocked response: model=%s guardrail=%s",
-                        self._model_id,
-                        self._guardrail_id,
-                    )
-                    raise GuardrailBlockedError(f"Guardrail {self._guardrail_id} blocked the response")
+            # Emit the decision only when a guardrail was actually applied —
+            # counting unguarded invocations as ALLOW would make the block rate
+            # meaningless. Emitted for allow AND block (#111 AC10/AC11).
+            if self._guardrail_id:
+                emit_guardrail_decision(
+                    component=self._component,
+                    blocked=blocked,
+                    latency_ms=latency_ms,
+                    filter_type=filter_type_from_assessments(assessments_from_trace(guardrail_trace)),
+                    # Both consumers are ECS tasks that publish metrics via PutMetricData.
+                    transport="put",
+                    region=self._region,
+                )
+
+            if blocked:
+                logger.warning(
+                    "Guardrail blocked response: model=%s guardrail=%s",
+                    self._model_id,
+                    self._guardrail_id,
+                )
+                raise GuardrailBlockedError(f"Guardrail {self._guardrail_id} blocked the response")
 
                 # Intervened without blocking — the response is still usable but
                 # matched values were substituted with placeholders (e.g.
