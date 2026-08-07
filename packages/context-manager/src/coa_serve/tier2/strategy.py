@@ -9,7 +9,8 @@ strategies) with configurable execution policies (sequential, parallel).
 
 Usage::
 
-    tier = StructuredQueryTier(strategies=[NLtoSQLStrategy(...), OntopStrategy(...)])
+    # Order is SEMANTIC: earlier strategies win ties (see _resolve_parallel).
+    tier = StructuredQueryTier(strategies=[OntopStrategy(...), NLtoSQLStrategy(...)])
     result = await tier.resolve(query, namespace, context, option="best")
 """
 
@@ -96,7 +97,23 @@ class StructuredQueryStrategy(Protocol):
 
 
 _PARALLEL_STRATEGY_TIMEOUT_S = 90
-MAX_RESULT_ROWS = 1000
+
+# Ceiling on rows returned to a caller. Raised from 1000 once
+# AthenaClient._get_results learned to follow NextToken across pages — before
+# that, any value above ~1000 was inert because the fetch read a single page and
+# truncated at 999 rows regardless.
+#
+# Both halves must move together: `_inject_limit` pushes this value into the SQL
+# as a LIMIT (bounding the server-side scan), while `_get_results` pages up to
+# it. Raising one without the other either truncates silently (old behaviour) or
+# scans more than it returns.
+#
+# 10_000 rather than 100_000 deliberately: the result set is serialized as JSON
+# across the Context Manager -> MCP -> client boundary, and there is no payload
+# guard in this path. 10k rows keeps a typical response in the low single-digit
+# MB while covering the long tail of legitimate analytical answers. Callers
+# needing more should page, or read the Athena result file from S3 directly.
+MAX_RESULT_ROWS = 10_000
 
 # A strategy result with zero rows is accepted as a truthful "no data" answer
 # ONLY when the strategy was confident in its query. Below this confidence, an
@@ -108,6 +125,40 @@ EMPTY_RESULT_CONFIDENCE_FLOOR = 0.3
 def capped_max_rows(options: dict[str, Any]) -> int:
     """Cap maxResults to the system maximum."""
     return min(options.get("maxResults", MAX_RESULT_ROWS), MAX_RESULT_ROWS)
+
+
+# Empirically-ordered strategy precedence for parallel ("best") selection.
+# LOWER number wins. Ordered by measured reliability on the 22-query TPC-H
+# benchmark, NOT by architectural authority:
+#     nl_to_sql  mean_f1 0.590, execution_rate 1.00
+#     ontop      mean_f1 0.055, execution_rate 0.41
+# Revisit this table when the VKG path improves — it is a statement about the
+# current implementation, not about which approach is better in principle.
+_STRATEGY_PRECEDENCE: dict[str, int] = {
+    StrategyOption.NL_TO_SQL: 0,
+    StrategyOption.ONTOP: 1,
+}
+
+
+def _strategy_precedence(strategy_name: str) -> int:
+    """Rank a strategy for deterministic tie-breaking (lower wins)."""
+    return _STRATEGY_PRECEDENCE.get(strategy_name, len(_STRATEGY_PRECEDENCE))
+
+
+# Ontop emits this when the SPARQL matches no R2RML mapping: a syntactically
+# valid query carrying no data. It was returned with confidence 0.73 in
+# benchmarking, so neither the row count nor the confidence flags it.
+_DEGENERATE_SQL_MARKERS = ("uselessVariable",)
+
+
+def is_degenerate_result(result: StrategyResult) -> bool:
+    """True when a strategy returned a structurally empty no-mapping query.
+
+    Distinct from `is_low_confidence_empty`: this fires regardless of confidence,
+    because the SQL itself proves nothing was resolved.
+    """
+    sql = result.sql or ""
+    return any(marker in sql for marker in _DEGENERATE_SQL_MARKERS)
 
 
 def is_low_confidence_empty(result: StrategyResult) -> bool:
@@ -281,7 +332,9 @@ class StructuredQueryTier:
         # Confidence-gated empty result (option C): prefer results that aren't a
         # low-confidence empty. If every candidate is one, fall through to Tier 3
         # rather than returning a likely-wrong empty answer.
-        acceptable = [(r, ctx) for r, ctx in valid_with_ctx if not is_low_confidence_empty(r)]
+        acceptable = [
+            (r, ctx) for r, ctx in valid_with_ctx if not is_low_confidence_empty(r) and not is_degenerate_result(r)
+        ]
         if not acceptable:
             if valid_with_ctx:
                 logger.info(
@@ -303,9 +356,43 @@ class StructuredQueryTier:
                         },
                     )
             return None
-        # Pick highest confidence among acceptable results
-        acceptable.sort(key=lambda pair: pair[0].confidence, reverse=True)
+        # Pick by DETERMINISTIC precedence, not by LLM self-reported confidence.
+        #
+        # Previously: `acceptable.sort(key=lambda p: p[0].confidence, reverse=True)`.
+        # Strategy confidences are self-assessments produced by the model, so two
+        # strategies landing within noise of each other swapped the winner between
+        # otherwise-identical requests — and with it the SQL and the answer. In
+        # benchmarking this showed up as per-question F1 flipping 0 <-> 1 across
+        # identical runs (mean spread 0.037), which exceeded most real effect sizes
+        # and made A/B comparison unreliable.
+        #
+        # Confidence is still USED, but only as an admission floor
+        # (`is_low_confidence_empty` above), never as a ranking key.
+        #
+        # Precedence is EMPIRICAL, not architectural. An earlier revision of this
+        # code ranked by the caller's declared list order on the assumption that an
+        # ontology-grounded answer outranks a free-form one. Measurement on the 22
+        # TPC-H queries contradicted that:
+        #
+        #     strategy=ontop      mean_f1 0.055   execution_rate 0.41
+        #     strategy=nl_to_sql  mean_f1 0.590   execution_rate 1.00
+        #     strategy=best       mean_f1 0.498   execution_rate 1.00
+        #
+        # `best` scored BELOW nl_to_sql alone because parallel selection kept
+        # Ontop's answer on q01/q07/q19. Ontop also reports high confidence on
+        # useless output (0.85 on failures; 0.73 on a degenerate
+        # "SELECT 1 AS uselessVariable" no-mapping result), so neither its own
+        # confidence nor its notional authority is a safe ranking signal today.
+        # Until the VKG path improves, prefer the strategy that measurably works.
+        acceptable.sort(key=lambda pair: (_strategy_precedence(pair[0].strategy_name), -pair[0].confidence))
         winner, winner_ctx = acceptable[0]
+        logger.info(
+            "tier2_parallel_winner",
+            strategy=winner.strategy_name,
+            confidence=winner.confidence,
+            selected_by="precedence",
+            candidates=[{"strategy": r.strategy_name, "confidence": r.confidence} for r, _ in acceptable],
+        )
         # Merge winner's trace steps into caller's trace (via record() so on_record callback fires for UI)
         for step in winner_ctx.trace.steps:
             context.trace.record(

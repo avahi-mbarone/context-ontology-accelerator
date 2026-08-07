@@ -23,7 +23,7 @@ inputs:
   pnpm-version:
     description: pnpm version — keep in step with .mise.toml.
     required: false
-    default: "10.27.0"
+    default: "10.34.5"
 
 runs:
   using: composite

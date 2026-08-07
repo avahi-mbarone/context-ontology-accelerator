@@ -893,6 +893,8 @@ class Orchestrator:
                     "rowCount": result.row_count,
                     "table": metric_match.data_source_id or "unknown",
                     "truncated": result.truncated,
+                    # (A2) executing engine — athena | redshift | jdbc.
+                    "engine": result.engine or "unknown",
                 },
                 tool_used="sql-engine",
             )

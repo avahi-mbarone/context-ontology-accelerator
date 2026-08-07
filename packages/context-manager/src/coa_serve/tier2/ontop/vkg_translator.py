@@ -30,7 +30,7 @@ from typing import Any
 import structlog
 
 from ...clients.base import QueryExecutor, QueryResult
-from ...clients.vkg import VKGClient, VKGResult
+from ...clients.vkg import SparqlProjection, VKGClient, VKGResult
 from ..sql_firewall import FirewallResult, SQLFirewall
 
 logger = structlog.get_logger(__name__)
@@ -257,6 +257,9 @@ class VKGTranslator:
                 max_rows=max_rows,
                 timeout_seconds=timeout_seconds,
             )
+            # Project raw SQL result to SPARQL solution (if projection metadata available)
+            if vkg_result.projection:
+                query_result = self._project_to_sparql(query_result, vkg_result.projection)
             trace.append(
                 TraceStep(
                     step=Tier2Step.QUERY_EXECUTE,
@@ -343,3 +346,71 @@ class VKGTranslator:
             logger.info("datasource_resolved_from_prefix", datasource_id=resolved)
             return resolved
         return ""
+
+    def _project_to_sparql(self, qr: QueryResult, proj: SparqlProjection) -> QueryResult:
+        """Project raw SQL result to SPARQL solution.
+
+        Maps SQL column aliases to SPARQL variable names and drops columns
+        not in the SELECT. Handles DISTINCT deduplication when required.
+
+        If any SPARQL variable's alias is absent from the result columns, the
+        raw result is returned unchanged: reading a missing key would yield a
+        correct-looking header over an all-NULL column, which is a worse
+        failure than showing the SQL aliases. Alias lookup falls back to a
+        case-insensitive match because some drivers normalise column labels.
+
+        Args:
+            qr: Raw QueryResult from SQL execution (keyed by SQL aliases).
+            proj: Projection metadata from Ontop (SPARQL vars -> SQL aliases).
+
+        Returns:
+            QueryResult with columns renamed to SPARQL variables and projected,
+            or ``qr`` unchanged when the projection cannot be applied.
+        """
+        columns = list(proj.select_vars)
+        by_lower = {c.lower(): c for c in qr.columns}
+
+        # Resolve every variable to a real result column up front.
+        resolved: dict[str, str] = {}
+        for var in columns:
+            alias = proj.var_to_column.get(var, var)
+            # Exact match must be tried first: by_lower collapses columns that
+            # differ only in case (last wins), so a lower-only lookup against a
+            # result set holding both "NAME" and "name" could read the wrong
+            # one — a correct-looking header over wrong values.
+            if alias in qr.columns:
+                resolved[var] = alias
+            elif alias.lower() in by_lower:
+                resolved[var] = by_lower[alias.lower()]
+            else:
+                logger.warning(
+                    "tier2_projection_alias_missing",
+                    variable=var,
+                    sql_alias=alias,
+                    sql_columns=qr.columns,
+                )
+                return qr
+
+        projected_rows = []
+        seen: set[tuple[Any, ...]] = set()
+
+        for row in qr.rows:
+            # Read each SPARQL var's value via its SQL alias
+            projected = {var: row.get(resolved[var]) for var in columns}
+
+            # Dedupe only for SELECT DISTINCT; plain SELECT is a bag
+            if proj.distinct:
+                key = tuple(projected[c] for c in columns)
+                if key in seen:
+                    continue
+                seen.add(key)
+
+            projected_rows.append(projected)
+
+        return QueryResult(
+            rows=projected_rows,
+            columns=columns,
+            row_count=len(projected_rows),
+            truncated=qr.truncated,
+            duration_ms=qr.duration_ms,
+        )

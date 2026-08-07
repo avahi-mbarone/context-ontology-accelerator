@@ -7,9 +7,12 @@ import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as lambda from "aws-cdk-lib/aws-lambda";
+import * as lambdaEventSources from "aws-cdk-lib/aws-lambda-event-sources";
 import * as logs from "aws-cdk-lib/aws-logs";
 import * as acm from "aws-cdk-lib/aws-certificatemanager";
 import * as route53 from "aws-cdk-lib/aws-route53";
+import * as sqs from "aws-cdk-lib/aws-sqs";
+import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
 import * as ssm from "aws-cdk-lib/aws-ssm";
 import * as wafv2 from "aws-cdk-lib/aws-wafv2";
 import { Construct } from "constructs";
@@ -177,6 +180,97 @@ export class ApiStack extends SCLStack {
         resources: [namespacesTableArn],
       }),
     );
+
+    // ── Cache Invalidation Stream Handler ──────────────────────────
+    // Triggered by DynamoDB Streams on Roles and ResourceRoleMappings
+    // tables. On any change, bumps the version counter in the
+    // CacheInvalidation table so the authorizer clears its local cache.
+    const cacheInvalidationFn = new lambda.Function(
+      this,
+      "CacheInvalidationFn",
+      {
+        functionName: this.prefixed("cache-invalidation"),
+        runtime: lambda.Runtime.PYTHON_3_12,
+        handler: "coa_control_plane.authorization.stream_handler.handler",
+        code: bundlePython({
+          srcDirs: [Paths.controlPlaneSrc, Paths.commonLib],
+          requirementsFile: fromRoot("packages/control-plane/requirements.txt"),
+        }),
+        timeout: cdk.Duration.seconds(10),
+        memorySize: 128,
+        // Same VPC placement as the authorizer beside it: DynamoDB is reached
+        // over the VPC's gateway endpoint, no public egress needed.
+        vpc: props.vpc,
+        vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+        logRetention: logs.RetentionDays.ONE_MONTH,
+        environment: {
+          CACHE_INVALIDATION_TABLE_NAME: props.cacheInvalidationTable.tableName,
+        },
+      },
+    );
+
+    // Grant write to the CacheInvalidation table (atomic_increment).
+    props.cacheInvalidationTable.grantReadWriteData(cacheInvalidationFn);
+
+    // A dropped stream record means the authorizer's version counter never
+    // moves for that grant change, so a revoked role stays cached until the
+    // container recycles — the exact gap this wiring exists to close. So:
+    // retry indefinitely within the records' 24h stream retention, and park
+    // anything still failing at the end of it in a DLQ for replay instead of
+    // discarding it silently.
+    const cacheInvalidationDlq = new sqs.Queue(this, "CacheInvalidationDlq", {
+      queueName: this.prefixed("cache-invalidation-dlq"),
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      enforceSSL: true,
+      retentionPeriod: cdk.Duration.days(14),
+    });
+
+    // Wire DynamoDB Streams from Roles and ResourceRoleMappings tables.
+    const streamSourceProps = {
+      startingPosition: lambda.StartingPosition.LATEST,
+      batchSize: 10,
+      maxBatchingWindow: cdk.Duration.seconds(5),
+      // -1 = retry until the record ages out of the 24h stream retention.
+      retryAttempts: -1,
+      onFailure: new lambdaEventSources.SqsDlq(cacheInvalidationDlq),
+      // No partial-batch reporting: the handler collapses a whole batch into a
+      // single version-counter bump (that bump clears the authorizer's entire
+      // local cache, so the exact count is irrelevant — only that it moved).
+      // There are no per-record operations to fail independently, so a whole-
+      // batch retry on error is both correct and cheap.
+    };
+    cacheInvalidationFn.addEventSource(
+      new lambdaEventSources.DynamoEventSource(
+        props.rolesTable,
+        streamSourceProps,
+      ),
+    );
+    cacheInvalidationFn.addEventSource(
+      new lambdaEventSources.DynamoEventSource(
+        props.resourceRoleMappingsTable,
+        streamSourceProps,
+      ),
+    );
+
+    // Any message in the DLQ means an invalidation was dropped after 24h of
+    // retries — the authorizer's version counter never moved for that grant
+    // change, so a revoked role can stay cached (bounded only by the per-entry
+    // TTL, multiplied by warm containers). The DLQ exists to avoid silent
+    // loss; without this alarm operators would never know it filled.
+    new cloudwatch.Alarm(this, "CacheInvalidationDlqAlarm", {
+      alarmName: this.prefixed("cache-invalidation-dlq"),
+      alarmDescription:
+        "Cache-invalidation records landed in the DLQ — authorizer role cache may be serving revoked roles until TTL expiry",
+      metric: cacheInvalidationDlq.metricApproximateNumberOfMessagesVisible({
+        statistic: "Maximum",
+        period: cdk.Duration.minutes(5),
+      }),
+      threshold: 0,
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      evaluationPeriods: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
 
     // ── IAM role for API Gateway to invoke the authorizer Lambda ───
     const authorizerRole = new iam.Role(this, "AuthorizerRole", {

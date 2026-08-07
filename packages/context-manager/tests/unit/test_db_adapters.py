@@ -54,17 +54,15 @@ class TestAdapterRegistry:
         for engine in ("POSTGRESQL", "REDSHIFT", "MYSQL", "SQLSERVER", "mysql"):
             assert is_direct_query_engine(engine)
 
-    def test_is_direct_query_engine_false_for_withheld_and_unknown(self):
-        """The PostgreSQL fail-safe in get_adapter must not become a direct route.
-
-        Withheld engines (PREVIEW_DATABASE_ENGINES) and unknown tokens both resolve
-        to the PostgreSQL adapter, so without this gate the composite executor would
-        transpile Trino->postgres and run it against the wrong engine.
+    def test_is_direct_query_engine_false_for_no_adapter_engines(self):
+        """Engines without a direct adapter (Snowflake, Oracle) and unknown tokens
+        must not take the direct route — get_adapter would hand back the PostgreSQL
+        fail-safe and we would transpile Trino->postgres and run against the wrong
+        engine.
         """
-        from coa_common.constants import PREVIEW_DATABASE_ENGINES
         from coa_serve.clients.db_adapters import is_direct_query_engine
 
-        for engine in (*PREVIEW_DATABASE_ENGINES, "snowflake", "DB2", "", None):
+        for engine in ("SNOWFLAKE", "ORACLE", "DB2", "", None):
             assert not is_direct_query_engine(engine)
 
     def test_dialect_and_port_per_engine(self):

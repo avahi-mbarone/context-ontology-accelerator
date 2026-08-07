@@ -97,6 +97,18 @@ class NLtoSQLStrategy:
             ontology_vector_index_name(self._oss_ontology_index, namespace) if self._oss_ontology_index else None
         )
 
+        # Resolve the target SQL dialect from the namespace's sources so the LLM
+        # generates SQL in the correct dialect for the target engine. This avoids
+        # generating Trino SQL for a PostgreSQL-only source, which would fail or
+        # produce incorrect results after transpilation.
+        dialect = "athena"
+        data_source_id = options.get("dataSourceId", "")
+        if self._query_executor and hasattr(self._query_executor, "resolve_target_dialect"):
+            try:
+                dialect = await self._query_executor.resolve_target_dialect(namespace, data_source_id)
+            except Exception as e:
+                logger.warning("dialect_resolution_failed", error=str(e), fallback="athena")
+
         evidence = options.get("evidence", "")[:500]
         nl_to_sql_result = await self._sql_generator.generate(
             query,
@@ -105,6 +117,7 @@ class NLtoSQLStrategy:
             evidence=evidence,
             embedding=embedding,
             model_id=context.model_id,
+            dialect=dialect,
         )
 
         t_ms = int((time.perf_counter() - t_start) * 1000)
@@ -188,6 +201,8 @@ class NLtoSQLStrategy:
                         "tables": nl_to_sql_result.expanded_tables or nl_to_sql_result.retrieved_tables or [],
                         "truncated": getattr(exec_result, "truncated", False),
                         "shot": shot,
+                        # Executing engine — athena | redshift | jdbc.
+                        "engine": getattr(exec_result, "engine", "") or "unknown",
                     },
                 )
                 result = StrategyResult(

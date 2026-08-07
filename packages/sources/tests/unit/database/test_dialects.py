@@ -9,7 +9,6 @@ import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
-from coa_common.constants import PREVIEW_DATABASE_ENGINES
 from coa_sources.database.connectors.dialects import (
     DISCOVERY_ENGINES,
     InformationSchemaDialect,
@@ -61,17 +60,15 @@ class TestRegistry:
         ]:
             assert isinstance(get_dialect(engine), cls)
 
-    def test_preview_engines_do_not_resolve(self):
-        # SNOWFLAKE/ORACLE dialects are implemented but withheld from the enabled
-        # registry, so discovery treats them as unsupported. If this fails after a
-        # deliberate launch decision, remove the engine from PREVIEW_DATABASE_ENGINES.
-        for engine in PREVIEW_DATABASE_ENGINES:
-            assert get_dialect(engine) is None
-        assert get_dialect("snowflake") is None
+    def test_snowflake_resolves(self):
+        assert isinstance(get_dialect("SNOWFLAKE"), SnowflakeDialect)
+        assert isinstance(get_dialect("snowflake"), SnowflakeDialect)
 
-    def test_preview_dialect_classes_remain_implemented(self):
-        # The gate must HIDE, not delete: the classes stay importable and complete
-        # so re-enabling is a one-line change to PREVIEW_DATABASE_ENGINES.
+    def test_oracle_resolves(self):
+        assert isinstance(get_dialect("ORACLE"), OracleDialect)
+        assert isinstance(get_dialect("oracle"), OracleDialect)
+
+    def test_dialect_engine_sets(self):
         assert SnowflakeDialect().engines == {"SNOWFLAKE"}
         assert OracleDialect().engines == {"ORACLE"}
 
@@ -87,8 +84,7 @@ class TestRegistry:
         assert get_dialect(None) is None
 
     def test_discovery_engines_set(self):
-        assert {"POSTGRESQL", "REDSHIFT", "MYSQL", "SQLSERVER"} == DISCOVERY_ENGINES
-        assert DISCOVERY_ENGINES.isdisjoint(PREVIEW_DATABASE_ENGINES)
+        assert {"POSTGRESQL", "REDSHIFT", "MYSQL", "SQLSERVER", "ORACLE", "SNOWFLAKE"} == DISCOVERY_ENGINES
 
 
 @pytest.mark.unit
@@ -224,6 +220,23 @@ class TestOracleDialect:
     def test_list_schemas_uses_all_users(self):
         conn = _Conn(lambda sql, p: [("HR",), ("SALES",)] if "all_users" in sql else [])
         assert OracleDialect().list_schemas(conn) == ["HR", "SALES"]
+
+    def test_list_tables_binds_owner_once_per_value_not_per_occurrence(self):
+        """A reused bind must not require a second value.
+
+        The UNION references the owner twice. With positional `:1` binds
+        python-oracledb counts each OCCURRENCE, so one value for two `:1`s
+        failed every Oracle discovery with:
+            DPY-4009: 2 positional bind values are required but 1 were provided
+        A named bind is supplied once and may be referenced freely.
+        """
+        conn = _Conn(lambda sql, p: [("EMP",), ("DEPT",)] if "all_tables" in sql else [])
+        assert OracleDialect().list_tables(conn, "HR") == ["EMP", "DEPT"]
+        sql, params = conn.cursor_obj.calls[0]
+        # Named bind, referenced twice, supplied once.
+        assert sql.count(":owner") == 2
+        assert ":1" not in sql
+        assert params == {"owner": "HR"}
 
     def test_fetch_columns_uses_all_tab_columns_with_named_binds(self):
         rows = [("EMP", "ID", "NUMBER", "N"), ("EMP", "NAME", "VARCHAR2", "Y")]

@@ -20,9 +20,10 @@ from __future__ import annotations
 
 import boto3
 
+from coa_common import __version__
 from coa_common.aws_config import apply_default_client_config
 
-USER_AGENT_EXTRA = "AwsSolutions/sof_0.1.0"
+USER_AGENT_EXTRA = f"AwsSolutions/context-ontology-accelerator-31415926_{__version__}"
 
 _installed = False
 

@@ -103,26 +103,6 @@ export const SUPPORTED_UPLOAD_CONTENT_TYPES: ReadonlySet<string> = new Set([
 export const MAX_UPLOAD_FILES = 100;
 
 // ---------------------------------------------------------------------------
-// Database engine launch gate
-// Must stay in sync with PREVIEW_DATABASE_ENGINES in
-// libs/common/src/coa_common/constants.py
-// ---------------------------------------------------------------------------
-
-/**
- * Database engines whose implementation exists but is withheld from the product
- * pending further validation. Nothing is deleted — the engine-specific form
- * fields and backend dialects all remain in the tree; these engines are simply
- * filtered out of the pickers and registries that read this set.
- *
- * To re-enable an engine, remove its token here AND from
- * PREVIEW_DATABASE_ENGINES in libs/common/src/coa_common/constants.py.
- */
-export const PREVIEW_DATABASE_ENGINES: ReadonlySet<string> = new Set([
-  "ORACLE",
-  "SNOWFLAKE",
-]);
-
-// ---------------------------------------------------------------------------
 // Metric service defaults
 // ---------------------------------------------------------------------------
 

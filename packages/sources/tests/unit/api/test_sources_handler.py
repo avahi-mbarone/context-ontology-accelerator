@@ -479,6 +479,48 @@ class TestDocumentDetailMetrics:
 
 
 @pytest.mark.unit
+class TestDatabaseDetailEngineProjection:
+    """The GET-source database detail surfaces the execution engine.
+
+    queryEngine is a top-level DDB column; redshiftWorkgroup is a top-level column
+    that must be folded into glueConfiguration (with executionEngine) so the API +
+    UI can show the chosen engine for a Glue-via-Redshift source.
+    """
+
+    def _detail(self, item: dict):
+        from coa_sources.api.sources_handler import _build_database_detail
+
+        base = {
+            "sourceType": "DATABASE",
+            "sourceSubType": "GLUE_DATABASE",
+            "name": "glue-src",
+            "status": "APPROVED",
+            "glueConfiguration": {"catalogId": "123", "region": "us-east-1", "databaseName": "insurance_lake"},
+        }
+        base.update(item)
+        detail = _build_database_detail(base)
+        assert detail is not None
+        return detail
+
+    def test_athena_default_projects_athena_no_workgroup(self):
+        detail = self._detail({"queryEngine": "ATHENA"})
+        assert detail["queryEngine"] == "ATHENA"
+        assert "redshiftWorkgroup" not in detail.get("glueConfiguration", {})
+
+    def test_redshift_engine_projects_engine_and_workgroup(self):
+        detail = self._detail({"queryEngine": "REDSHIFT", "redshiftWorkgroup": "my-wg"})
+        assert detail["queryEngine"] == "REDSHIFT"
+        glue = detail["glueConfiguration"]
+        assert glue["redshiftWorkgroup"] == "my-wg"
+        assert glue["executionEngine"] == "REDSHIFT"
+
+    def test_absent_query_engine_is_omitted(self):
+        detail = self._detail({})
+        assert "queryEngine" not in detail
+        assert "redshiftWorkgroup" not in detail.get("glueConfiguration", {})
+
+
+@pytest.mark.unit
 class TestGetSourceMetricsBestEffort:
     """The GET-source metrics read is best-effort: a failure enriching a document
     source with KG-build metrics must degrade to 200 (no metrics), never 500.

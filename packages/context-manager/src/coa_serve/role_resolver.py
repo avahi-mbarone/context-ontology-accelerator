@@ -57,6 +57,43 @@ class ResolvedProfile:
             profile["allowedMetrics"] = self.allowed_metrics
 
 
+def build_principal_keys(
+    *,
+    user_id: str,
+    email: str,
+    groups: list[str],
+) -> list[str]:
+    """Build the PrincipalIndex GSI lookup keys for a caller.
+
+    Grants can be written under any identifier the caller presents at query
+    time (sub, email, group membership). Every known identifier is included
+    so a grant written under one form resolves regardless of which identifier
+    the JWT primarily surfaces. Duplicates (e.g. sub == email post-encoding)
+    are collapsed to keep the DDB query count at the minimum.
+
+    Args:
+        user_id: The JWT sub (or upstream fallback identifier).
+        email: The JWT email claim; empty when the token has none.
+        groups: The caller's group memberships from the JWT.
+
+    Returns:
+        Ordered list of ``User::…`` and ``Group::…`` keys, deduplicated.
+        Order matters only for readability of downstream logs — grants under
+        every key are merged equally.
+    """
+    seen: set[str] = set()
+    keys: list[str] = []
+    for identifier in (user_id, email):
+        if not identifier:
+            continue
+        key = f"User::{sanitize_principal_key(identifier)}"
+        if key not in seen:
+            seen.add(key)
+            keys.append(key)
+    keys.extend(f"Group::{sanitize_principal_key(g)}" for g in groups)
+    return keys
+
+
 def resolve_profile(
     user_id: str,
     groups: list[str],
@@ -89,15 +126,7 @@ def resolve_profile(
 
     dao = DynamoDBDAO(_RRM_TABLE, region=_AWS_REGION)
 
-    principal_keys = [f"User::{sanitize_principal_key(user_id)}"]
-    # Also look up by email when the JWT sub (UUID) differs from the email.
-    # Grants created via the control-plane API are keyed by email, while the
-    # Context Manager uses the JWT sub as user_id. Without this second lookup,
-    # namespace-owner / data-analyst grants written against email are invisible
-    # to the role resolver and Cedar denies the query.
-    if email and email != user_id:
-        principal_keys.append(f"User::{sanitize_principal_key(email)}")
-    principal_keys.extend(f"Group::{sanitize_principal_key(g)}" for g in groups)
+    principal_keys = build_principal_keys(user_id=user_id, email=email, groups=groups)
 
     # Collect all grant items for this principal.
     #

@@ -19,7 +19,7 @@ import pytest
 from coa_mcp import server
 from coa_mcp.auth.grant_resolver import GrantResolutionError
 
-from .conftest import create_test_token
+from .conftest import _TEST_AUDIENCE, _TEST_ISSUER, _TEST_KID, _private_key, create_test_token
 
 
 class _FakeRequest:
@@ -185,10 +185,12 @@ class TestResolveCallerAndProfile:
             "sub": "alice",
             "email": "alice@example.com",
             "namespaces": ["sales"],
-            "roles": ["viewer"],
+            "cognito:groups": ["viewer"],
+            "iss": _TEST_ISSUER,
+            "aud": _TEST_AUDIENCE,
             "exp": int(time.time()) + 3600,
         }
-        token = jwt.encode(payload, "secret", algorithm="HS256")
+        token = jwt.encode(payload, _private_key, algorithm="RS256", headers={"kid": _TEST_KID})
         _, profile = await server._resolve_caller_and_profile("sales", _FakeCtx(f"Bearer {token}"))
         assert profile["userId"] == "alice@example.com"
 
