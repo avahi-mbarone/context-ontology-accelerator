@@ -447,6 +447,12 @@ export class ServeStack extends SCLStack {
           ATHENA_WORKGROUP_PREFIX: `${this.prefixed("")}`,
           // ATHENA_WORKGROUP_PREFIX is a fallback; primary resolution reads
           // athenaWorkgroupName from the namespaces DDB table at runtime.
+          // Redshift Data API `Database` used for awsdatacatalog queries.
+          // Redshift Serverless namespaces default their DB to "dev"; override
+          // via the redshift_serve_database context if a namespace differs.
+          REDSHIFT_SERVE_DATABASE:
+            (this.node.tryGetContext("redshift_serve_database") as string) ??
+            "dev",
           OSS_ONTOLOGY_INDEX: opensearchCollectionName,
           // Default engine for a request that does not set `options.mode`. Standard
           // (not agentic), because agentic runs ~90s at p50 and the REST/MCP callers
@@ -685,6 +691,37 @@ export class ServeStack extends SCLStack {
           resources: [
             `arn:aws:athena:${region}:${account}:workgroup/*`,
             `arn:aws:athena:${region}:${account}:datacatalog/*`,
+          ],
+        }),
+      );
+
+      // Redshift Data API — execute Glue/Iceberg queries via Redshift
+      // Serverless (`awsdatacatalog` auto-mount) as an alternative to Athena for
+      // Glue sources that opt in (GlueConfiguration.executionEngine=REDSHIFT).
+      // The workgroup itself is provisioned/owned by the customer and named at
+      // onboarding; this grants the serve runtime the Data API + Serverless
+      // credential-vend actions to run statements against those workgroups. The
+      // Glue/Lake Formation/S3 grants below are shared with the Athena path and
+      // already cover the auto-mount's catalog + underlying-data reads.
+      runtime.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: [
+            "redshift-data:ExecuteStatement",
+            "redshift-data:DescribeStatement",
+            "redshift-data:GetStatementResult",
+            "redshift-data:ListStatements",
+          ],
+          // redshift-data actions do not support resource-level scoping to a
+          // specific workgroup/statement (statement ids are created at call time
+          // and owned by this principal); AWS models these as account-wide.
+          resources: ["*"],
+        }),
+      );
+      runtime.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ["redshift-serverless:GetCredentials"],
+          resources: [
+            `arn:aws:redshift-serverless:${region}:${account}:workgroup/*`,
           ],
         }),
       );

@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import importlib
 import sys
+import threading
+import time
 import types
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
@@ -182,3 +184,126 @@ class TestResetMetrics:
 class TestMetricsKey:
     def test_dedicated_partition(self, km):
         assert km._metrics_key("ns", "ds") == {"PK": "METRICS#ns", "SK": "KGBUILD#ds"}
+
+
+class TestCounterSnapshot:
+    """Increments mirror into an in-process snapshot for the heartbeat to read.
+
+    The heartbeat reports progress deltas without a DynamoDB read per beat, so
+    every DDB-bound increment must also land in the local mirror.
+    """
+
+    def test_increment_mirrors_into_snapshot(self, km):
+        monitor, _ = _monitor_with_mock_dao(km)
+        monitor.increment_llm_processed_chunks(7)
+        monitor.increment_graph_processed_chunks(3)
+        assert km.counter_snapshot() == {"chunks_llm": 7, "chunks_graph": 3}
+
+    def test_increments_accumulate(self, km):
+        monitor, _ = _monitor_with_mock_dao(km)
+        monitor.increment_llm_processed_chunks(2)
+        monitor.increment_llm_processed_chunks(5)
+        assert km.counter_snapshot()["chunks_llm"] == 7
+
+    def test_snapshot_is_a_copy(self, km):
+        monitor, _ = _monitor_with_mock_dao(km)
+        monitor.increment_llm_processed_chunks(1)
+        km.counter_snapshot()["chunks_llm"] = 999
+        assert km.counter_snapshot()["chunks_llm"] == 1
+
+    def test_ddb_failure_still_mirrors_locally(self, km):
+        # The heartbeat must keep reporting progress even when DDB writes fail,
+        # since that is exactly when operators are watching the logs.
+        monitor, dao = _monitor_with_mock_dao(km)
+        dao.atomic_add.side_effect = RuntimeError("ddb down")
+        monitor.increment_llm_processed_chunks(4)
+        assert km.counter_snapshot()["chunks_llm"] == 4
+
+
+class TestHeartbeat:
+    def test_disabled_interval_starts_no_thread(self, km):
+        with patch.object(km, "HEARTBEAT_INTERVAL_SECONDS", 0):
+            before = threading.active_count()
+            stop = km.start_heartbeat(namespace_id="ns", doc_source_id="ds")
+        assert threading.active_count() == before
+        assert not stop.is_set()
+
+    def test_emits_liveness_line_with_elapsed_and_counters(self, km):
+        events: list[tuple[str, dict]] = []
+
+        def capture(event, **kwargs):
+            events.append((event, kwargs))
+
+        monitor, _ = _monitor_with_mock_dao(km)
+        monitor.increment_llm_processed_chunks(11)
+
+        with (
+            patch.object(km, "HEARTBEAT_INTERVAL_SECONDS", 0.01),
+            patch.object(km.logger, "info", side_effect=capture),
+        ):
+            stop = km.start_heartbeat(namespace_id="ns", doc_source_id="ds")
+            deadline = time.time() + 5
+            while time.time() < deadline and not any(e == "kg_build heartbeat" for e, _ in events):
+                time.sleep(0.01)
+            stop.set()
+
+        beats = [kwargs for event, kwargs in events if event == "kg_build heartbeat"]
+        assert beats, "heartbeat never emitted a liveness line"
+        first = beats[0]
+        assert first["namespace_id"] == "ns"
+        assert first["doc_source_id"] == "ds"
+        assert first["chunks_llm"] == 11
+        assert first["chunks_llm_delta"] == 11
+        assert first["elapsed_seconds"] >= 0
+
+    def test_stop_event_halts_beating(self, km):
+        events: list[str] = []
+        # A long interval would leave the thread parked inside stop.wait() for the
+        # full period regardless of the event, so keep it short and assert that no
+        # further beats are emitted rather than racing on thread liveness.
+        with (
+            patch.object(km, "HEARTBEAT_INTERVAL_SECONDS", 0.01),
+            patch.object(km.logger, "info", side_effect=lambda e, **kw: events.append(e)),
+        ):
+            stop = km.start_heartbeat(namespace_id="ns", doc_source_id="ds")
+            deadline = time.time() + 5
+            while time.time() < deadline and events.count("kg_build heartbeat") < 1:
+                time.sleep(0.01)
+            stop.set()
+            # Give the thread more than one interval to wake up and exit.
+            time.sleep(0.2)
+            after_stop = events.count("kg_build heartbeat")
+            time.sleep(0.2)
+            assert events.count("kg_build heartbeat") == after_stop, "heartbeat kept beating after stop was set"
+
+    def test_zero_delta_beat_still_emitted_when_stalled(self, km):
+        # A beat with all-zero deltas is the signal that distinguishes a stalled
+        # task from a dead one, so it must not be suppressed.
+        events: list[tuple[str, dict]] = []
+        monitor, _ = _monitor_with_mock_dao(km)
+        monitor.increment_llm_processed_chunks(5)
+
+        with (
+            patch.object(km, "HEARTBEAT_INTERVAL_SECONDS", 0.01),
+            patch.object(km.logger, "info", side_effect=lambda e, **kw: events.append((e, kw))),
+        ):
+            stop = km.start_heartbeat(namespace_id="ns", doc_source_id="ds")
+            deadline = time.time() + 5
+            while time.time() < deadline and len([1 for e, _ in events if e == "kg_build heartbeat"]) < 2:
+                time.sleep(0.01)
+            stop.set()
+
+        beats = [kw for e, kw in events if e == "kg_build heartbeat"]
+        assert len(beats) >= 2
+        assert beats[1]["chunks_llm_delta"] == 0
+        assert beats[1]["chunks_llm"] == 5
+
+
+class TestRssMb:
+    def test_returns_float_or_none(self, km):
+        rss = km._rss_mb()
+        assert rss is None or (isinstance(rss, float) and rss > 0)
+
+    def test_missing_procfs_returns_none(self, km):
+        with patch("builtins.open", side_effect=OSError("no procfs")):
+            assert km._rss_mb() is None

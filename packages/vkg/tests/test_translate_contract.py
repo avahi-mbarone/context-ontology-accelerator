@@ -542,3 +542,34 @@ class TestExtractTableRefs:
 
     def test_no_tables(self):
         assert _extract_table_refs("SELECT 1") == []
+
+
+class TestPython39Compatibility:
+    """``translate-server.py`` must import under the CONTAINER's Python, not the repo's.
+
+    The Dockerfile installs AL2023's system ``python3`` (3.9) and the entrypoint
+    runs the server with it, while the rest of the repo targets 3.12. A PEP 604
+    annotation (``dict[str, Any] | None``) without ``from __future__ import
+    annotations`` is evaluated at import time and raises TypeError on 3.9, so the
+    container dies before serving /health — invisible to any test running on 3.12.
+    """
+
+    def test_module_has_future_annotations_import(self):
+        """Guards PEP 604 / PEP 585 annotations against the 3.9 runtime."""
+        source = _server_path.read_text()
+        assert "from __future__ import annotations" in source, (
+            "translate-server.py runs on Python 3.9 in the container; "
+            "`from __future__ import annotations` is required or PEP 604 "
+            "annotations raise TypeError at import and kill the server."
+        )
+
+    def test_compiles_under_python39_grammar(self):
+        """Syntax must be valid for the container interpreter's feature set."""
+        import ast
+
+        tree = ast.parse(_server_path.read_text())
+        # match statements (3.10+) and PEP 695 type params (3.12+) would not
+        # parse on 3.9 even with the __future__ import.
+        for node in ast.walk(tree):
+            assert type(node).__name__ != "Match", "match statement requires Python 3.10+"
+            assert not getattr(node, "type_params", None), "PEP 695 type params require Python 3.12+"

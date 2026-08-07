@@ -250,6 +250,7 @@ describe("ServeStack - Security Group egress", () => {
 
 describe("ServeStack - OE Monitoring", () => {
   let template: Template;
+
   beforeAll(() => {
     template = createStack();
   });
@@ -263,6 +264,7 @@ describe("ServeStack - OE Monitoring", () => {
 
 describe("ServeStack - Athena S3 permissions", () => {
   let template: Template;
+
   beforeAll(() => {
     template = createStack();
   });
@@ -328,5 +330,54 @@ describe("ServeStack - Athena S3 permissions", () => {
         expect(stmtActions).not.toContain("s3:*");
       }
     }
+  });
+});
+
+describe("ServeStack - Redshift execution engine IAM", () => {
+  let template: Template;
+
+  beforeAll(() => {
+    template = createStack();
+  });
+
+  it("grants the serve runtime the Redshift Data API actions", () => {
+    template.hasResourceProperties("AWS::IAM::Policy", {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Effect: "Allow",
+            Action: Match.arrayWith([
+              "redshift-data:ExecuteStatement",
+              "redshift-data:DescribeStatement",
+              "redshift-data:GetStatementResult",
+            ]),
+          }),
+        ]),
+      },
+    });
+  });
+
+  it("grants redshift-serverless:GetCredentials scoped to workgroups", () => {
+    template.hasResourceProperties("AWS::IAM::Policy", {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Effect: "Allow",
+            Action: "redshift-serverless:GetCredentials",
+            Resource: Match.stringLikeRegexp(
+              "arn:aws:redshift-serverless:.*:workgroup/\\*",
+            ),
+          }),
+        ]),
+      },
+    });
+  });
+
+  it("sets the REDSHIFT_SERVE_DATABASE env var on the runtime", () => {
+    template.hasResourceProperties("AWS::BedrockAgentCore::Runtime", {
+      EnvironmentVariables: Match.objectLike({
+        REDSHIFT_SERVE_DATABASE: "dev",
+      }),
+    });
   });
 });

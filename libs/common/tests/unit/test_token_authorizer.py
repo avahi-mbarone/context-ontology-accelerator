@@ -255,6 +255,54 @@ class TestTokenType:
         assert TokenType.AGENT_ACCESS_TOKEN == "AGENT_ACCESS_TOKEN"
 
 
+class TestVerifyClaimsAndExtractGroups:
+    """verify_claims/extract_groups: the email-agnostic path used by callers
+    (e.g. MCP server) whose identity model isn't email-keyed."""
+
+    def test_verify_claims_returns_raw_claims_without_email_requirement(self, _make_token, jwks_response):
+        claims = {
+            "sub": "agent-user-1",
+            "cognito:groups": ["admin"],
+            "iss": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_TestPool",
+            "exp": int(time.time()) + 3600,
+        }
+        token = _make_token(claims)
+        authorizer = CognitoTokenAuthorizer(user_pool_id="us-east-1_TestPool", region="us-east-1")
+
+        with patch.object(authorizer, "_get_jwks", return_value=jwks_response):
+            result = authorizer.verify_claims(f"Bearer {token}")
+
+        assert result["sub"] == "agent-user-1"
+
+    def test_verify_claims_still_rejects_forged_signature(self, jwks_response):
+        forged_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        forged = jwt.encode(
+            {
+                "sub": "attacker",
+                "cognito:groups": ["admin"],
+                "iss": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_TestPool",
+                "exp": int(time.time()) + 3600,
+            },
+            forged_key,
+            algorithm="RS256",
+            headers={"kid": "test-kid-1"},
+        )
+        authorizer = CognitoTokenAuthorizer(user_pool_id="us-east-1_TestPool", region="us-east-1")
+
+        with (
+            patch.object(authorizer, "_get_jwks", return_value=jwks_response),
+            pytest.raises(ValueError, match="Invalid token"),
+        ):
+            authorizer.verify_claims(f"Bearer {forged}")
+
+    def test_extract_groups_delegates_to_idp_specific_hook(self):
+        cognito = CognitoTokenAuthorizer(user_pool_id="us-east-1_TestPool", region="us-east-1")
+        assert cognito.extract_groups({"cognito:groups": ["a", "b"]}) == ["a", "b"]
+
+        oidc = OIDCTokenAuthorizer(issuer="https://idp.example.com", group_claim_name="memberOf")
+        assert oidc.extract_groups({"memberOf": ["c", "d"]}) == ["c", "d"]
+
+
 class TestJWKSCaching:
     def test_jwks_cached_within_ttl(self, jwks_response):
         authorizer = OIDCTokenAuthorizer(issuer="https://idp.example.com", jwks_uri="https://idp.example.com/jwks")

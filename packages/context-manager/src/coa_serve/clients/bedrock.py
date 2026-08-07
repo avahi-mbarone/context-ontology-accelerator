@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import os
 import threading
+import time
 from collections.abc import AsyncIterator, Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -27,6 +28,12 @@ from botocore.config import Config as BotoConfig
 from botocore.exceptions import ClientError
 from coa_common import BedrockEmbedder, resolve_region
 from coa_common.constants import DEFAULT_EMBED_MODEL_ID
+from coa_common.guardrail_metrics import (
+    COMPONENT_NL_TO_SPARQL,
+    assessments_from_trace,
+    emit_guardrail_decision,
+    filter_type_from_assessments,
+)
 
 from .base import ConverseResult, GuardrailBlockedError, instrumented
 
@@ -204,21 +211,15 @@ class BedrockLLMClient:
 
         client = self._get_client()
         loop = asyncio.get_running_loop()
+        start = time.monotonic()
         response = await loop.run_in_executor(
             _EXECUTOR, lambda: self._call_with_temperature_fallback(client.converse, kwargs)
         )
+        latency_ms = (time.monotonic() - start) * 1000
 
         stop_reason = response.get("stopReason", "")
-        content_blocks = response.get("output", {}).get("message", {}).get("content", [])
-        text_blocks = [b["text"] for b in content_blocks if isinstance(b, dict) and "text" in b]
-        if not text_blocks:
-            raise ValueError(f"No text content in Bedrock response: stopReason={stop_reason}")
-
-        # Join ALL text blocks. The Converse API may split a response across several
-        # content blocks; taking only the first silently truncated the generation
-        # (and for NL→SQL / NL→SPARQL that means a query cut off mid-statement).
-        text = "".join(text_blocks)
         blocked = False
+        guardrail_trace: dict[str, Any] = {}
 
         # Parse guardrail trace to distinguish BLOCK from ANONYMIZE.
         # stop_reason alone is insufficient — it fires for both actions.
@@ -236,7 +237,30 @@ class BedrockLLMClient:
                 # No trace available — conservatively treat as blocked
                 blocked = True
 
-        return ConverseResult(text=text, guardrail_blocked=blocked)
+        # Emitted before the no-text check below: a hard block is the decision we
+        # most need counted, and it is also the case most likely to return no
+        # text. Only when a guardrail was actually applied — counting unguarded
+        # calls as ALLOW would make the block rate meaningless (#111 AC10/AC11).
+        if guardrail_id:
+            emit_guardrail_decision(
+                component=COMPONENT_NL_TO_SPARQL,
+                blocked=blocked,
+                latency_ms=latency_ms,
+                filter_type=filter_type_from_assessments(assessments_from_trace(guardrail_trace)),
+                # Serve already emits its other custom metrics as stdout EMF —
+                # same transport here, so no PutMetricData grant is needed.
+                transport="emf",
+            )
+
+        content_blocks = response.get("output", {}).get("message", {}).get("content", [])
+        text_blocks = [b["text"] for b in content_blocks if isinstance(b, dict) and "text" in b]
+        if not text_blocks:
+            raise ValueError(f"No text content in Bedrock response: stopReason={stop_reason}")
+
+        # Join ALL text blocks. The Converse API may split a response across several
+        # content blocks; taking only the first silently truncated the generation
+        # (and for NL→SQL / NL→SPARQL that means a query cut off mid-statement).
+        return ConverseResult(text="".join(text_blocks), guardrail_blocked=blocked)
 
     async def converse_stream(
         self,

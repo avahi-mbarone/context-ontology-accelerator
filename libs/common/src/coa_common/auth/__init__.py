@@ -4,6 +4,7 @@
 """Authentication utilities — token authorizer ABC and implementations."""
 
 from coa_common.auth.cognito_authorizer import CognitoTokenAuthorizer
+from coa_common.auth.factory import build_token_authorizer, is_cognito_issuer
 from coa_common.auth.oidc_authorizer import OIDCTokenAuthorizer
 from coa_common.auth.token_authorizer import (
     TokenAuthorizer,
@@ -17,4 +18,6 @@ __all__ = [
     "TokenAuthorizer",
     "TokenType",
     "TokenValidationResult",
+    "build_token_authorizer",
+    "is_cognito_issuer",
 ]

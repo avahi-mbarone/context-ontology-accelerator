@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from coa_serve.exceptions import AccessDeniedError
 from coa_serve.tier2.nl_to_sql.strategy import NLtoSQLStrategy
-from coa_serve.tier2.strategy import StrategyContext, StrategyOption, StrategyResult
+from coa_serve.tier2.strategy import MAX_RESULT_ROWS, StrategyContext, StrategyOption, StrategyResult
 from coa_serve.trace import TraceCollector
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -410,18 +410,31 @@ class TestNLtoSQLStrategyResolve:
         )
 
     @pytest.mark.asyncio
-    async def test_max_rows_capped_at_1000(self, strategy, sql_generator, firewall, query_executor):
+    async def test_max_rows_capped_at_system_max(self, strategy, sql_generator, firewall, query_executor):
+        """Cap is MAX_RESULT_ROWS (raised 1000 -> 10_000 once Athena results paginate)."""
         sql_generator.generate.return_value = _make_nl_to_sql_result()
         firewall.evaluate.return_value = _make_firewall_result()
         query_executor.execute.return_value = _make_exec_result()
         context = _make_context()
-        context.options["maxResults"] = 5000  # Exceeds cap
+        context.options["maxResults"] = 5000  # below the new cap -> passes through
 
         await strategy.resolve("query", "ns1", context)
 
-        # Should be capped to 1000
         call_kwargs = query_executor.execute.call_args[1]
-        assert call_kwargs["max_rows"] == 1000
+        assert call_kwargs["max_rows"] == 5000
+
+    @pytest.mark.asyncio
+    async def test_max_rows_capped_above_system_max(self, strategy, sql_generator, firewall, query_executor):
+        sql_generator.generate.return_value = _make_nl_to_sql_result()
+        firewall.evaluate.return_value = _make_firewall_result()
+        query_executor.execute.return_value = _make_exec_result()
+        context = _make_context()
+        context.options["maxResults"] = MAX_RESULT_ROWS * 10
+
+        await strategy.resolve("query", "ns1", context)
+
+        call_kwargs = query_executor.execute.call_args[1]
+        assert call_kwargs["max_rows"] == MAX_RESULT_ROWS
 
     @pytest.mark.asyncio
     async def test_evidence_truncated_to_500_chars(self, strategy, sql_generator, firewall, query_executor):

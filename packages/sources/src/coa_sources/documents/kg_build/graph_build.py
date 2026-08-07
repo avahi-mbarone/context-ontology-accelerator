@@ -29,7 +29,11 @@ Environment variables:
     DELETE_PREV_VERSIONS      — "true" or "false" (default) — delete archived versions after ingestion
     BEDROCK_MODEL_ARN        — Bedrock inference profile ARN (set by Trigger Lambda, no default)
     AWS_REGION               — AWS region (default: us-east-1)
-    LOG_LEVEL                — structlog level (default: INFO)
+    LOG_LEVEL                — level for our own structlog loggers (default: INFO)
+    DEPENDENCY_LOG_LEVEL     — level for third-party stdlib loggers, notably
+                               graphrag-toolkit (default: INFO). DEBUG surfaces the
+                               batch-write retry ladder but is very verbose.
+    KG_HEARTBEAT_INTERVAL_SECONDS — liveness log interval (default: 60, 0 disables)
 
 Notes:
   AOSS NEXTGEN rejects knn_vector mappings with a 'method.engine' key.
@@ -46,6 +50,7 @@ import time
 import traceback
 
 import structlog
+from coa_common.config import resolve_region
 from coa_common.constants import (
     DEFAULT_DELETE_PREV_VERSIONS,
     DEFAULT_EMBED_DIMENSIONS,
@@ -69,14 +74,23 @@ from coa_control_plane_server.models.source_status import SourceStatus
 # Logging
 # ---------------------------------------------------------------------------
 
-setup_logging(os.environ.get("LOG_LEVEL", "INFO"))
+# graphrag-toolkit logs via stdlib ``logging``, so its records only reach
+# CloudWatch because setup_logging() bridges stdlib into structlog. Without the
+# bridge they fall to ``logging.lastResort`` (stderr, WARNING-only), which drops
+# every INFO line — including the per-batch "Running build pipeline [num_workers,
+# job_sizes, batch_write_size]" record that is the only place the effective write
+# parallelism is reported.
+setup_logging(
+    os.environ.get("LOG_LEVEL", "INFO"),
+    stdlib_log_level=os.environ.get("DEPENDENCY_LOG_LEVEL", "INFO"),
+)
 logger = structlog.get_logger()
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
-AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+AWS_REGION = resolve_region()
 EXTRACTION_MODE = ExtractionMode(os.environ.get("EXTRACTION_MODE", DEFAULT_EXTRACTION_MODE).lower())
 USE_BATCH_INFERENCE = os.environ.get("USE_BATCH_INFERENCE", DEFAULT_USE_BATCH_INFERENCE).lower() == "true"
 ENABLE_VERSIONING = os.environ.get("ENABLE_VERSIONING", DEFAULT_ENABLE_VERSIONING).lower() == "true"
@@ -960,6 +974,12 @@ def main() -> None:
         doc_source_id=doc_source_id,
     )
 
+    # Periodic liveness. The toolkit reports progress only at document-batch
+    # boundaries (15-25 min apart in practice), so a task that stalls mid-batch
+    # goes silent and looks identical to one that is working. The heartbeat also
+    # logs RSS, which is the only memory signal available on this cluster.
+    heartbeat_stop = kg_metrics.start_heartbeat(namespace_id=namespace_id, doc_source_id=doc_source_id)
+
     # 2b. Backend health check — fail fast if Neptune or AOSS is unreachable
     if not _check_backend_health(graph_store_uri, vector_store_uri, ddb, ddb_key):
         logger.error("Backend health check failed, aborting KG build")
@@ -1023,31 +1043,37 @@ def main() -> None:
         logger.info("content_screening_skipped", reason="RETRIEVAL_GUARDRAIL_ID not set")
 
     # 3. Run
-    if EXTRACTION_MODE == ExtractionMode.SEPARATED:
-        docs_ok, docs_fail = _run_separated(
-            documents,
-            graph_store_uri,
-            vector_store_uri,
-            tenant_id,
-            indexing_config,
-            bucket_name,
-            namespace_id,
-            doc_source_id,
-            ddb,
-            ddb_key,
-            progress_monitor,
-        )
-    else:
-        docs_ok, docs_fail = _run_continuous(
-            documents,
-            graph_store_uri,
-            vector_store_uri,
-            tenant_id,
-            indexing_config,
-            ddb,
-            ddb_key,
-            progress_monitor,
-        )
+    try:
+        if EXTRACTION_MODE == ExtractionMode.SEPARATED:
+            docs_ok, docs_fail = _run_separated(
+                documents,
+                graph_store_uri,
+                vector_store_uri,
+                tenant_id,
+                indexing_config,
+                bucket_name,
+                namespace_id,
+                doc_source_id,
+                ddb,
+                ddb_key,
+                progress_monitor,
+            )
+        else:
+            docs_ok, docs_fail = _run_continuous(
+                documents,
+                graph_store_uri,
+                vector_store_uri,
+                tenant_id,
+                indexing_config,
+                ddb,
+                ddb_key,
+                progress_monitor,
+            )
+    finally:
+        # Stop beating once the build is done, so the remaining teardown work
+        # (version deletion, metrics stamping) isn't interleaved with liveness
+        # lines that no longer mean anything.
+        heartbeat_stop.set()
 
     # Optional: delete previous archived versions from Neptune + AOSS.
     # Only runs when versioning is enabled and DELETE_PREV_VERSIONS=true.
