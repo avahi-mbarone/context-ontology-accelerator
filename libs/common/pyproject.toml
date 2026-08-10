@@ -9,7 +9,7 @@ dependencies = [
     # Cedar policy engine for coa_authorization (shared by the control-plane API
     # authorizer and the serve-path query authorizer). arm64 cp312 wheel exists.
     "cedarpy>=4.8.0",
-    "cryptography>=49.0.0",
+    "cryptography>=50.0.0",
     # Shared AOSS vector client (coa_common.opensearch). opensearch-py
     # provides the client + SigV4 signer; requests-aws4auth is a transitive of the
     # RequestsHttpConnection path. Consolidates the per-package clients that

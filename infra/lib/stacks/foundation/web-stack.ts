@@ -5,19 +5,24 @@ import * as cdk from "aws-cdk-lib";
 import * as cr from "aws-cdk-lib/custom-resources";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as route53 from "aws-cdk-lib/aws-route53";
+import * as ssm from "aws-cdk-lib/aws-ssm";
 import { Construct } from "constructs";
 import { PublicUIConstruct } from "../../constructs/public-ui-construct";
 import { RuntimeConfig } from "@coa/shared";
 import { SCLStack } from "../../constructs/scl-stack";
+import { resolveContext } from "../../context";
 import { CustomDomainConfig } from "../../types";
 
 export interface WebStackProps extends cdk.StackProps {
-  /** OIDC / Cognito authority URL (issuer). */
-  readonly authority: string;
-  /** OIDC / Cognito client ID. */
-  readonly clientId: string;
-  /** Cognito User Pool ID (required to update callback URLs). */
-  readonly userPoolId: string;
+  /**
+   * Whether the auth stack provisioned a Cognito User Pool (COGNITO/SAML
+   * idpType) — gates the Cognito-specific callback-URL patch below, which
+   * has no equivalent for a direct external-OIDC deployment (no user pool
+   * to patch). Read from SSM instead of the {@link WebStackProps}'s
+   * userPoolId directly to avoid a cross-stack export on the auth stack's
+   * UserPool/UserPoolClient (see idp-authentication-stack.ts).
+   */
+  readonly isCognitoMode: boolean;
   /** Backend API endpoint URL. */
   readonly apiEndpoint?: string;
   /** API Gateway REST API ID (used to update CORS origin after CloudFront creation). */
@@ -68,6 +73,29 @@ export class WebStack extends SCLStack {
   constructor(scope: Construct, id: string, props: WebStackProps) {
     super(scope, id, props);
 
+    const { ssmPrefix } = resolveContext(this.node);
+
+    // IdP issuer/client ID via SSM (avoids a cross-stack export on the auth
+    // stack's UserPool/UserPoolClient — see idp-authentication-stack.ts for
+    // the writer, populated on both the Cognito/SAML and direct-OIDC paths).
+    const authority = ssm.StringParameter.valueForStringParameter(
+      this,
+      `${ssmPrefix}/issuer`,
+    );
+    const clientId = ssm.StringParameter.valueForStringParameter(
+      this,
+      `${ssmPrefix}/userpool-client-id`,
+    );
+    // Only populated on the Cognito/SAML path (idp-authentication-stack.ts's
+    // OIDC branch never writes this parameter) — gated by isCognitoMode so a
+    // direct-OIDC deployment never attempts to resolve a nonexistent param.
+    const userPoolId = props.isCognitoMode
+      ? ssm.StringParameter.valueForStringParameter(
+          this,
+          `${ssmPrefix}/userpool-id`,
+        )
+      : "";
+
     const uiDomainName = props.customDomain?.uiDomainName;
     const uiCertificateArn = props.customDomain?.uiCertificateArn;
     const apiDomainName = props.customDomain?.apiDomainName;
@@ -75,8 +103,8 @@ export class WebStack extends SCLStack {
     const runtimeConfig: RuntimeConfig = {
       region: this.region,
       stage: this.envName,
-      authority: props.authority,
-      clientId: props.clientId,
+      authority,
+      clientId,
       // Prefer the custom API domain when configured; otherwise the direct
       // API endpoint.
       ...(apiDomainName
@@ -168,15 +196,15 @@ export class WebStack extends SCLStack {
     // Mapping: authFlows.userSrp → ALLOW_USER_SRP_AUTH,
     //          (implicit)        → ALLOW_REFRESH_TOKEN_AUTH,
     //          OAuthScope.OPENID → "openid", etc.
-    if (props.userPoolId) {
+    if (props.isCognitoMode) {
       new cr.AwsCustomResource(this, "UpdateCognitoCallbacks", {
         installLatestAwsSdk: false,
         onUpdate: {
           service: "CognitoIdentityServiceProvider",
           action: "updateUserPoolClient",
           parameters: {
-            UserPoolId: props.userPoolId,
-            ClientId: props.clientId,
+            UserPoolId: userPoolId,
+            ClientId: clientId,
             CallbackURLs: [
               `${siteUrl}/authenticate/`,
               ...(this.envName === "dev"
@@ -203,14 +231,14 @@ export class WebStack extends SCLStack {
             PreventUserExistenceErrors: "ENABLED",
           },
           physicalResourceId: cr.PhysicalResourceId.of(
-            `cognito-callbacks-${props.clientId}`,
+            `cognito-callbacks-${clientId}`,
           ),
         },
         policy: cr.AwsCustomResourcePolicy.fromStatements([
           new iam.PolicyStatement({
             actions: ["cognito-idp:UpdateUserPoolClient"],
             resources: [
-              `arn:aws:cognito-idp:${this.region}:${this.account}:userpool/${props.userPoolId}`,
+              `arn:aws:cognito-idp:${this.region}:${this.account}:userpool/${userPoolId}`,
             ],
           }),
         ]),

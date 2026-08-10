@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import structlog
@@ -38,8 +39,36 @@ _CLAIM_EMAIL = "email"
 _CLAIM_GROUPS = "groups"
 _CLAIM_COGNITO_GROUPS = "cognito:groups"
 
-_MAX_GROUPS = 10
-"""Maximum number of groups to query to prevent unbounded DynamoDB calls."""
+_MAX_GROUPS = 250
+"""Hard circuit-breaker on group fan-out, not an expected ceiling.
+
+Enterprise SSO users routinely carry 100+ group
+memberships (a real observed token had ~140) — a low cap here silently
+truncates the group list wherever a caller's granted group happens to fall
+past the cutoff, causing a principal's own grant to vanish from THIS listing
+(while `coa_control_plane.authorization.handler`'s uncapped `_resolve_roles`
+still enforces it correctly) with no error, no indication of an incomplete
+result, and no correlation to anything the caller did. That silent split
+between "what you're allowed to do" and "what you're shown you're allowed to
+do" is what the old `_MAX_GROUPS = 10` produced.
+
+250 is sized to comfortably exceed real-world group counts while still
+bounding the fan-out below (see `_MAX_GROUP_QUERY_WORKERS`). If a caller ever
+exceeds it, log loudly (``logger.error``, not ``warning``) rather than
+truncating silently — see the log call below.
+"""
+
+_MAX_GROUP_QUERY_WORKERS = 20
+"""Bound on concurrent DynamoDB queries for the group fan-out.
+
+Each principal key (self + each group) is one PrincipalIndex GSI query;
+executed sequentially, that scales request latency linearly with the
+caller's group count (100+ groups would add seconds to a single page load).
+Parallelizing over a small thread pool keeps latency roughly constant
+(bounded by the slowest single query, not their sum) while still bounding
+concurrent read load against the table — the DAO's boto3 client is safe for
+concurrent use across threads.
+"""
 
 _GROUP_NAME_RE = re.compile(r"^[\w.@\-]+$")
 """Valid group name pattern — alphanumeric, dots, @, hyphens."""
@@ -102,7 +131,17 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:  # noqa: ARG
                 logger.warning("invalid_group_name_skipped", group=group)
                 continue
             if groups_added >= _MAX_GROUPS:
-                logger.warning("groups_truncated", total_groups=groups_str.count(",") + 1, max=_MAX_GROUPS)
+                # Loud, not silent: this caller's own grant listing WILL be
+                # incomplete past this point (unlike the old cap, which hit
+                # real users' normal group counts and dropped their grants
+                # with no signal at all). error, not warning, so this is
+                # visible without needing debug-level log access.
+                logger.error(
+                    "group_fanout_cap_hit_grants_may_be_incomplete",
+                    total_groups=groups_str.count(",") + 1,
+                    max=_MAX_GROUPS,
+                    email=email,
+                )
                 break
             principal_keys.append(f"Group::{sanitize_principal_key(group)}")
             groups_added += 1
@@ -112,11 +151,11 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:  # noqa: ARG
         seen_grant_ids: set[str] = set()
         grants: list[dict[str, Any]] = []
 
-        for pk in principal_keys:
+        def _query_principal_key(pk: str) -> list[dict[str, Any]]:
             # query_all, not query: a single query returns one 1 MB page, so a
             # principal with many grants would see an arbitrary subset of their
             # own permissions here — with no indication the list is incomplete.
-            items = mappings_dao.query_all(
+            return mappings_dao.query_all(
                 QueryParams(
                     key_condition="#pk = :pk",
                     expression_values={":pk": pk},
@@ -124,11 +163,22 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:  # noqa: ARG
                     index_name="PrincipalIndex",
                 )
             )
-            for item in items:
-                summary = _to_grant_summary(item)
-                if summary["grantId"] not in seen_grant_ids:
-                    seen_grant_ids.add(summary["grantId"])
-                    grants.append(summary)
+
+        # Parallelize the per-principal-key fan-out (self + every group) over a
+        # small thread pool. Sequential queries scale request latency linearly
+        # with the caller's group count — an enterprise SSO
+        # user with 100+ group memberships would otherwise add seconds to a
+        # single page load. boto3 clients are safe for concurrent use across
+        # threads, so this is a plain I/O-bound fan-out, not a new concurrency
+        # model for the codebase.
+        worker_count = min(_MAX_GROUP_QUERY_WORKERS, len(principal_keys))
+        with ThreadPoolExecutor(max_workers=worker_count) as pool:
+            for items in pool.map(_query_principal_key, principal_keys):
+                for item in items:
+                    summary = _to_grant_summary(item)
+                    if summary["grantId"] not in seen_grant_ids:
+                        seen_grant_ids.add(summary["grantId"])
+                        grants.append(summary)
 
         return api_response(200, {"grants": grants})
 

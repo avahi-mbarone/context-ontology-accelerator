@@ -14,6 +14,8 @@ irreversibly corrupt legitimate datatypes on the persisted ontology).
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 from coa_ontology.datatype_canonicalizer import (
     canonicalize_datatypes,
@@ -198,3 +200,162 @@ class TestDetectDatatypeIssuesInTurtle:
         assert detect_datatype_issues_in_turtle(None) == []
         assert detect_datatype_issues_in_turtle("") == []
         assert detect_datatype_issues_in_turtle("this is not turtle {{{") == []
+
+
+class TestLiteralValuePreservation:
+    """A datatype repair must never alter or invalidate the literal's value.
+
+    The alias table maps SQL type names onto XSD types with much narrower lexical
+    spaces (bigint→long, number→decimal, timestamp→dateTime). Rewriting the
+    datatype alone turned "abc"^^xsd:bigint into the ill-typed "abc"^^xsd:long,
+    and constructing the replacement Literal without normalize=False rewrote
+    "2024-01-15" to "2024-01-15T00:00:00". Both are irreversible: this module runs
+    at the persist boundary and drops the original token.
+    """
+
+    def test_incompatible_value_is_left_untouched(self):
+        g = Graph()
+        g.add((S, P, Literal("abc", datatype=URIRef(f"{XSD}bigint"))))
+
+        changes = canonicalize_datatypes(g)
+
+        assert changes == [], "must not rewrite a token whose value would become ill-typed"
+        assert (S, P, Literal("abc", datatype=URIRef(f"{XSD}bigint"))) in g
+
+    def test_incompatible_value_never_yields_an_ill_typed_literal(self):
+        g = Graph()
+        g.add((S, P, Literal("abc", datatype=URIRef(f"{XSD}bigint"))))
+
+        canonicalize_datatypes(g)
+
+        for _s, _p, o in g:
+            assert not (isinstance(o, Literal) and o.ill_typed), f"produced ill-typed literal: {o!r}"
+
+    def test_lexical_form_survives_a_compatible_repair(self):
+        """timestamp→dateTime must not reformat the value."""
+        g = Graph()
+        g.add((S, P, Literal("2024-01-15", datatype=URIRef(f"{XSD}timestamp"))))
+
+        canonicalize_datatypes(g)
+
+        obj = next(o for _s, _p, o in g)
+        assert str(obj) == "2024-01-15", f"lexical form was rewritten to {str(obj)!r}"
+        assert obj.datatype == XSD.dateTime
+
+    def test_compatible_values_are_still_repaired(self):
+        """The guard must not disable the repair it is protecting."""
+        g = Graph()
+        g.add((S, P, Literal("hello", datatype=URIRef(f"{XSD}varchar"))))
+        g.add((URIRef("http://x#b"), P, Literal("42.5", datatype=URIRef(f"{XSD}number"))))
+
+        changes = canonicalize_datatypes(g)
+
+        assert len(changes) == 2
+        datatypes = {o.datatype for _s, _p, o in g}
+        assert datatypes == {XSD.string, XSD.decimal}
+
+    def test_incompatible_token_is_still_reported_to_the_user(self):
+        """Skipping the repair must not hide the malformed token."""
+        g = Graph()
+        g.add((S, P, Literal("abc", datatype=URIRef(f"{XSD}bigint"))))
+
+        issues = detect_datatype_issues(g)
+
+        assert len(issues) == 1
+        assert issues[0]["found"] == f"{XSD}bigint"
+        assert issues[0]["repairable"] == "false"
+
+    def test_repairable_flag_is_true_for_a_safe_rewrite(self):
+        g = Graph()
+        g.add((S, P, Literal("hello", datatype=URIRef(f"{XSD}varchar"))))
+
+        issues = detect_datatype_issues(g)
+
+        assert issues[0]["repairable"] == "true"
+
+    def test_datatype_uri_objects_are_unaffected_by_the_guard(self):
+        """rdfs:range / rr:datatype carry no value, so they always repair."""
+        g = Graph()
+        g.add((S, RDFS.range, URIRef(f"{XSD}bigint")))
+
+        changes = canonicalize_datatypes(g)
+
+        assert changes == [(f"{XSD}bigint", f"{XSD}long")]
+        assert (S, RDFS.range, XSD.long) in g
+
+    def test_turtle_round_trip_preserves_an_incompatible_literal(self):
+        ttl = (
+            "@prefix ex: <http://ex.org/> .\n"
+            "@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n"
+            'ex:a ex:p "abc"^^xsd:bigint .\n'
+        )
+
+        out, changes = canonicalize_turtle(ttl)
+
+        assert changes == []
+        assert out == ttl, "a graph with nothing safely repairable must keep its bytes"
+
+
+@pytest.mark.unit
+class TestGuardFailsClosed:
+    """``_rewrite_is_value_safe`` must never report an UNVALIDATED rewrite as safe.
+
+    ``Literal.ill_typed`` is three-valued: ``None`` when the datatype is outside
+    rdflib's recognized set. A truthy check (``not ill_typed``) reads that ``None``
+    as "safe", which would silently turn the guard into a no-op for any alias whose
+    target rdflib does not recognize.
+    """
+
+    def test_unrecognized_target_datatype_is_not_safe(self):
+        from coa_ontology.datatype_canonicalizer import _rewrite_is_value_safe
+
+        lit = Literal("abc", datatype=URIRef(f"{XSD}bigint"))
+        unrecognized = URIRef("http://example.org/notADatatype")
+        assert Literal("abc", datatype=unrecognized).ill_typed is None  # premise
+        assert _rewrite_is_value_safe(lit, unrecognized) is False
+
+    def test_valid_value_for_recognized_target_is_safe(self):
+        from coa_ontology.datatype_canonicalizer import _rewrite_is_value_safe
+
+        assert _rewrite_is_value_safe(Literal("42", datatype=URIRef(f"{XSD}bigint")), XSD.long) is True
+
+    def test_invalid_value_for_recognized_target_is_not_safe(self):
+        from coa_ontology.datatype_canonicalizer import _rewrite_is_value_safe
+
+        assert _rewrite_is_value_safe(Literal("abc", datatype=URIRef(f"{XSD}bigint")), XSD.long) is False
+
+    def test_validation_exception_degrades_to_not_safe(self, monkeypatch):
+        """An exception must skip the rewrite, not abort the persist pass."""
+        from coa_ontology import datatype_canonicalizer as dc
+
+        def boom(*_a, **_k):
+            raise RuntimeError("rdflib exploded")
+
+        monkeypatch.setattr(dc, "Literal", boom)
+        assert dc._rewrite_is_value_safe(Literal("42", datatype=URIRef(f"{XSD}bigint")), XSD.long) is False
+
+
+@pytest.mark.unit
+class TestIncompatibleValueLogging:
+    """The skip warning is the only signal on the accept path, so it carries the value."""
+
+    def test_logs_a_bounded_redacted_preview(self, caplog):
+        from coa_ontology.datatype_canonicalizer import canonicalize_datatypes
+
+        g = Graph()
+        long_value = "x" * 500
+        g.add((S, P, Literal(long_value, datatype=URIRef(f"{XSD}bigint"))))
+        with caplog.at_level(logging.WARNING):
+            canonicalize_datatypes(g)
+
+        recs = [r for r in caplog.records if r.msg == "datatype_alias_incompatible_with_value"]
+        assert len(recs) == 1
+        assert recs[0].value_length == 500
+        # Bounded: identifies the offender without emptying a column into the log.
+        assert len(recs[0].value_preview) < 50
+        assert recs[0].value_preview.startswith("xxxx")
+
+    def test_preview_folds_newlines_onto_one_line(self):
+        from coa_ontology.datatype_canonicalizer import _preview
+
+        assert "\n" not in _preview("a\nb")

@@ -6,6 +6,7 @@ import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import { Template, Match } from "aws-cdk-lib/assertions";
+import type { Construct } from "constructs";
 import { ApiStack } from "../../lib/stacks/services/api-stack";
 import { DEFAULT_RESOURCE_PREFIX, DEFAULT_ENV } from "../../lib/constants";
 
@@ -21,6 +22,19 @@ const TEST_CONTEXT = {
   "aws:cdk:bundling-stacks": [],
 };
 
+/**
+ * Stub table for ApiStack props. Streams are ON for every table, not just the
+ * two that need them: ApiStack attaches a DynamoEventSource to the Roles and
+ * ResourceRoleMappings tables, and DynamoEventSource fails synth outright on a
+ * stream-less table. Keeping this in ONE place means a new `describe` block
+ * can't reintroduce that failure by declaring its own stream-less helper.
+ */
+const mkTestTable = (scope: Construct, id: string) =>
+  new dynamodb.Table(scope, id, {
+    partitionKey: { name: "PK", type: dynamodb.AttributeType.STRING },
+    stream: dynamodb.StreamViewType.NEW_AND_OLD_IMAGES,
+  });
+
 describe("ApiStack authorizer — ARCHIVED guard wiring", () => {
   let template: Template;
 
@@ -31,18 +45,13 @@ describe("ApiStack authorizer — ARCHIVED guard wiring", () => {
       env: { account: "123456789012", region: "us-east-1" },
     });
     const vpc = new ec2.Vpc(depStack, "Vpc");
-    const mkTable = (id: string) =>
-      new dynamodb.Table(depStack, id, {
-        partitionKey: { name: "PK", type: dynamodb.AttributeType.STRING },
-      });
+    const mkTable = (id: string) => mkTestTable(depStack, id);
 
     template = Template.fromStack(
       new ApiStack(app, "TestApi", {
         env: { account: "123456789012", region: "us-east-1" },
         allowedOrigin: "*",
         vpc,
-        issuerUrl: "https://login.example.com",
-        clientId: "test-client",
         rolesTable: mkTable("Roles"),
         resourceRoleMappingsTable: mkTable("RRM"),
         cacheInvalidationTable: mkTable("Cache"),
@@ -57,6 +66,24 @@ describe("ApiStack authorizer — ARCHIVED guard wiring", () => {
       Environment: {
         Variables: Match.objectLike({
           NAMESPACES_TABLE_NAME: Match.anyValue(),
+        }),
+      },
+    });
+  });
+
+  it("resolves GROUP_CLAIM_NAME from SSM (not a hardcoded Cognito default)", () => {
+    // Regression: this used to be a hardcoded DEFAULT_GROUP_CLAIM
+    // ("cognito:groups") passed from app.ts regardless of idpType, which
+    // silently broke group-based role resolution on the direct-OIDC path
+    // (external IdPs configure their own claim name, e.g. plain "groups").
+    // Must be an SSM dynamic reference resolved from
+    // /authentication-group-token-name (written by idp-authentication-stack.ts
+    // on both the Cognito/SAML and OIDC paths), not a literal string.
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      FunctionName: Match.stringLikeRegexp(".*authorizer$"),
+      Environment: {
+        Variables: Match.objectLike({
+          GROUP_CLAIM_NAME: Match.anyValue(),
         }),
       },
     });
@@ -87,18 +114,13 @@ describe("ApiStack OE monitoring", () => {
       env: { account: "123456789012", region: "us-east-1" },
     });
     const vpc = new ec2.Vpc(depStack, "Vpc");
-    const mkTable = (id: string) =>
-      new dynamodb.Table(depStack, id, {
-        partitionKey: { name: "PK", type: dynamodb.AttributeType.STRING },
-      });
+    const mkTable = (id: string) => mkTestTable(depStack, id);
 
     template = Template.fromStack(
       new ApiStack(app, "TestApiOE", {
         env: { account: "123456789012", region: "us-east-1" },
         allowedOrigin: "*",
         vpc,
-        issuerUrl: "https://login.example.com",
-        clientId: "test-client",
         rolesTable: mkTable("Roles"),
         resourceRoleMappingsTable: mkTable("RRM"),
         cacheInvalidationTable: mkTable("Cache"),
@@ -120,17 +142,12 @@ describe("ApiStack WAF WebACL", () => {
       env: { account: "123456789012", region: "us-east-1" },
     });
     const vpc = new ec2.Vpc(depStack, "Vpc");
-    const mkTable = (id: string) =>
-      new dynamodb.Table(depStack, id, {
-        partitionKey: { name: "PK", type: dynamodb.AttributeType.STRING },
-      });
+    const mkTable = (id: string) => mkTestTable(depStack, id);
     return Template.fromStack(
       new ApiStack(app, "TestApiWaf", {
         env: { account: "123456789012", region: "us-east-1" },
         allowedOrigin: "*",
         vpc,
-        issuerUrl: "https://login.example.com",
-        clientId: "test-client",
         rolesTable: mkTable("Roles"),
         resourceRoleMappingsTable: mkTable("RRM"),
         cacheInvalidationTable: mkTable("Cache"),
@@ -204,17 +221,12 @@ describe("ApiStack request throttling", () => {
       env: { account: "123456789012", region: "us-east-1" },
     });
     const vpc = new ec2.Vpc(depStack, "Vpc");
-    const mkTable = (id: string) =>
-      new dynamodb.Table(depStack, id, {
-        partitionKey: { name: "PK", type: dynamodb.AttributeType.STRING },
-      });
+    const mkTable = (id: string) => mkTestTable(depStack, id);
     return Template.fromStack(
       new ApiStack(app, "TestApiThrottle", {
         env: { account: "123456789012", region: "us-east-1" },
         allowedOrigin: "*",
         vpc,
-        issuerUrl: "https://login.example.com",
-        clientId: "test-client",
         rolesTable: mkTable("Roles"),
         resourceRoleMappingsTable: mkTable("RRM"),
         cacheInvalidationTable: mkTable("Cache"),
@@ -267,6 +279,108 @@ describe("ApiStack request throttling", () => {
           ThrottlingBurstLimit: 3,
         }),
       ]),
+    });
+  });
+});
+
+describe("ApiStack cache invalidation stream handler", () => {
+  let template: Template;
+
+  beforeAll(() => {
+    const app = new cdk.App({ context: TEST_CONTEXT });
+
+    const depStack = new cdk.Stack(app, "DepStack", {
+      env: { account: "123456789012", region: "us-east-1" },
+    });
+    const vpc = new ec2.Vpc(depStack, "Vpc");
+    const mkTable = (id: string) => mkTestTable(depStack, id);
+
+    template = Template.fromStack(
+      new ApiStack(app, "TestApiStream", {
+        env: { account: "123456789012", region: "us-east-1" },
+        allowedOrigin: "*",
+        vpc,
+        rolesTable: mkTable("Roles"),
+        resourceRoleMappingsTable: mkTable("RRM"),
+        cacheInvalidationTable: mkTable("Cache"),
+      }),
+    );
+  });
+
+  it("creates the cache-invalidation Lambda with correct handler and env", () => {
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      FunctionName: Match.stringLikeRegexp(".*cache-invalidation$"),
+      // Must match the real package name — a stale module path here would
+      // deploy a Lambda that ImportErrors on every stream record, silently
+      // never invalidating the authorizer's cache.
+      Handler: "coa_control_plane.authorization.stream_handler.handler",
+      Environment: {
+        Variables: Match.objectLike({
+          CACHE_INVALIDATION_TABLE_NAME: Match.anyValue(),
+        }),
+      },
+      VpcConfig: Match.objectLike({ SubnetIds: Match.anyValue() }),
+    });
+  });
+
+  it("creates two DynamoDB event source mappings (Roles + RRM)", () => {
+    // Two EventSourceMappings: one for Roles, one for ResourceRoleMappings
+    const mappings = template.findResources("AWS::Lambda::EventSourceMapping", {
+      Properties: {
+        StartingPosition: "LATEST",
+        BatchSize: 10,
+      },
+    });
+    // The cache-invalidation Lambda should have exactly 2 DDB stream triggers
+    expect(Object.keys(mappings).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("retries indefinitely and parks failed invalidations in a DLQ", () => {
+    // A dropped record leaves the version counter stale, so revoked roles stay
+    // cached. Retry until the record ages out, then DLQ it — never discard.
+    const mappings = template.findResources("AWS::Lambda::EventSourceMapping");
+    const streamMappings = Object.values(mappings).filter(
+      (m) => m.Properties?.EventSourceArn !== undefined,
+    );
+    expect(streamMappings.length).toBeGreaterThanOrEqual(2);
+    for (const m of streamMappings) {
+      expect(m.Properties.MaximumRetryAttempts).toBe(-1);
+      expect(
+        m.Properties.DestinationConfig?.OnFailure?.Destination,
+      ).toBeDefined();
+    }
+    template.hasResourceProperties("AWS::SQS::Queue", {
+      QueueName: Match.stringLikeRegexp(".*cache-invalidation-dlq$"),
+      SqsManagedSseEnabled: true,
+    });
+  });
+
+  it("alarms when the cache-invalidation DLQ is non-empty", () => {
+    // A silent DLQ defeats its purpose: operators must be told when an
+    // invalidation was dropped, since that means revoked roles may stay cached.
+    template.hasResourceProperties("AWS::CloudWatch::Alarm", {
+      AlarmName: Match.stringLikeRegexp(".*cache-invalidation-dlq$"),
+      Namespace: "AWS/SQS",
+      MetricName: "ApproximateNumberOfMessagesVisible",
+      ComparisonOperator: "GreaterThanThreshold",
+      Threshold: 0,
+    });
+  });
+
+  it("grants read-write on the CacheInvalidation table", () => {
+    // The Lambda needs dynamodb:UpdateItem for atomic_increment
+    template.hasResourceProperties("AWS::IAM::Policy", {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: Match.arrayWith([
+              "dynamodb:BatchGetItem",
+              "dynamodb:PutItem",
+              "dynamodb:UpdateItem",
+            ]),
+          }),
+        ]),
+      },
     });
   });
 });

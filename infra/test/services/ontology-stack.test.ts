@@ -204,7 +204,10 @@ describe("OntologyStack", () => {
     });
   });
 
-  test("task role can publish CloudWatch metrics scoped to COA/Ontology", () => {
+  test("task role can publish CloudWatch metrics scoped to COA namespaces", () => {
+    // COA/Guardrails is here too because the SHACL-shape NL generator runs in
+    // this Fargate task and emits guardrail decisions (#111 AC10). Leaving it
+    // out silently drops those metrics — PutMetricData denials are async.
     template.hasResourceProperties("AWS::IAM::Policy", {
       PolicyDocument: Match.objectLike({
         Statement: Match.arrayWith([
@@ -213,7 +216,9 @@ describe("OntologyStack", () => {
             Effect: "Allow",
             Resource: "*",
             Condition: {
-              StringEquals: { "cloudwatch:namespace": "COA/Ontology" },
+              StringEquals: {
+                "cloudwatch:namespace": ["COA/Ontology", "COA/Guardrails"],
+              },
             },
           }),
         ]),

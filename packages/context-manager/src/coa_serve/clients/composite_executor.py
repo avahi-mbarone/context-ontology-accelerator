@@ -59,6 +59,7 @@ class CompositeQueryExecutor:
         source_db_executor: QueryExecutor | None = None,
         firewall: SQLFirewall | None = None,
         sources_registry=None,
+        redshift_executor: QueryExecutor | None = None,
     ):
         """Wire the Athena and optional JDBC executors and the routing helpers.
 
@@ -69,6 +70,9 @@ class CompositeQueryExecutor:
                 defaults to a fresh instance.
             sources_registry: Optional registry used solely for the
                 ``has_jdbc_endpoint`` routing gate.
+            redshift_executor: Optional Redshift Serverless executor for Glue/Iceberg
+                sources that opt into ``queryEngine=REDSHIFT``. When
+                ``None``, such sources fall through to Athena.
         """
         self._athena = athena_executor
         self._source_db = source_db_executor
@@ -80,6 +84,11 @@ class CompositeQueryExecutor:
         # id only; cross-source/no-id queries skip it). A cached source-metadata
         # read is a tracked follow-up if this lookup shows up in latency.
         self._sources = sources_registry
+        # Optional Redshift Serverless executor for Glue/Iceberg sources that opt
+        # into Redshift execution (queryEngine=REDSHIFT). When None, such
+        # sources fall through to Athena — i.e. the deployed Athena-only behaviour
+        # is never regressed; this only ADDS the Redshift path when wired.
+        self._redshift = redshift_executor
 
     async def execute(
         self,
@@ -142,13 +151,12 @@ class CompositeQueryExecutor:
         # DDB round-trip for that path. Otherwise fetch (and reuse) the record once.
         if is_jdbc_candidate and not sole_source_resolved:
             jdbc_source = await self._fetch_jdbc_source(namespace, resolved_source_id)
-        # A source whose engine has no direct adapter — or is withheld from the
-        # product (PREVIEW_DATABASE_ENGINES: Snowflake, Oracle) — must NOT take the
-        # direct route: get_adapter would hand back the PostgreSQL fail-safe and we
-        # would transpile Trino->postgres and execute it against the wrong engine.
-        # Athena federation speaks Trino natively and is the route these sources
-        # already take (queryEngine is ATHENA for them), so this is a belt-and-braces
-        # guard against a stale queryEngine value on the record.
+        # A source whose engine has no direct adapter (Snowflake, Oracle) must NOT
+        # take the direct route: get_adapter would hand back the PostgreSQL fail-safe
+        # and we would transpile Trino->postgres and execute it against the wrong
+        # engine. Athena federation speaks Trino natively and is the route these
+        # sources already take (queryEngine is ATHENA for them), so this is a
+        # belt-and-braces guard against a stale queryEngine value on the record.
         use_jdbc = is_jdbc_candidate and jdbc_source is not None and self._engine_has_direct_route(jdbc_source)
         if use_jdbc:
             # VKG translates to Trino dialect; re-transpile to the source engine's
@@ -203,6 +211,25 @@ class CompositeQueryExecutor:
                 max_rows=max_rows,
                 timeout_seconds=timeout_seconds,
             )
+
+        # Glue/Iceberg sources that opted into Redshift execution
+        # (queryEngine=REDSHIFT) route to the Redshift Serverless executor instead
+        # of Athena. Only attempted when a Redshift executor is wired AND the
+        # target source is confirmed Redshift-capable — otherwise falls through to
+        # Athena (deployed default). Uses the same data_source_id the Athena path
+        # would; the Redshift executor rewrites to `awsdatacatalog` 3-part names.
+        if self._redshift is not None:
+            redshift_source_id = await self._resolve_redshift_source(namespace, data_source_id)
+            if redshift_source_id:
+                logger.info("composite_dispatch", route="redshift_serverless", data_source_id=redshift_source_id)
+                return await self._redshift.execute(
+                    sql,
+                    namespace=namespace,
+                    data_source_id=redshift_source_id,
+                    params=params,
+                    max_rows=max_rows,
+                    timeout_seconds=timeout_seconds,
+                )
         # AthenaQueryExecutor.execute() takes NO ``params`` kwarg (it never used
         # bind params — federation SQL is fully materialized). Forwarding params
         # here would TypeError, so omit it — this keeps the Athena call shape
@@ -323,6 +350,48 @@ class CompositeQueryExecutor:
         engine = str(config.get("engine", "")).upper()
         return get_adapter(engine).sqlglot_dialect
 
+    @staticmethod
+    def _is_redshift_routed(source: dict[str, Any]) -> bool:
+        """A source routes to Redshift only when it opted in AND is queryable.
+
+        The defining gate of ``_resolve_redshift_source``: ``queryEngine=REDSHIFT``
+        (the opt-in) plus ``queryable is True`` (approved for serving). Anything
+        else stays on Athena.
+        """
+        return str(source.get("queryEngine", "")).upper() == "REDSHIFT" and source.get("queryable") is True
+
+    async def _resolve_redshift_source(self, namespace: str, data_source_id: str) -> str:
+        """Resolve a Redshift-execution source id, or "" if none applies.
+
+        Returns the source id when the target Glue source is confirmed
+        ``queryEngine=REDSHIFT`` AND ``queryable is True`` — either the explicit
+        ``data_source_id``, or the namespace's sole DATABASE source when no id was
+        supplied. Returns "" (→ Athena fallback) for any other case, a missing
+        registry, or a lookup error (fail-safe to Athena, never mis-route).
+        """
+        if self._sources is None:
+            return ""
+        try:
+            if data_source_id and data_source_id != "default":
+                source = await self._sources.get_source(namespace, data_source_id)
+            else:
+                source = await self._sources.find_sole_database_source(namespace)
+        except Exception as exc:
+            logger.warning(
+                "redshift_endpoint_check_failed",
+                namespace=namespace,
+                data_source_id=data_source_id,
+                error=type(exc).__name__,
+                error_msg=str(exc),
+            )
+            return ""
+        # The Redshift-routing gate (opted-in + queryable). Anything else → "" → Athena.
+        if not source or not self._is_redshift_routed(source):
+            return ""
+        # Return the resolved sourceId; never echo back a "default"/empty caller
+        # value (that would re-trigger the executor's weaker sole-source lookup).
+        return source.get("sourceId", "")
+
     async def _resolve_sole_jdbc_source(self, namespace: str) -> tuple[str, dict[str, Any] | None]:
         """Resolve the namespace's sole JDBC source for bare-table SQL routing.
 
@@ -375,17 +444,55 @@ class CompositeQueryExecutor:
                 has_bare_table = True
         return catalogs, has_bare_table
 
+    async def resolve_target_dialect(self, namespace: str, data_source_id: str = "") -> str:
+        """Resolve the sqlglot dialect for NL→SQL generation from the namespace sources.
+
+        Returns the target SQL dialect that should be used for LLM SQL generation,
+        matching the dialect the composite executor will use for execution. This
+        ensures the SQL the LLM generates is in the correct dialect for the target
+        engine, avoiding transpilation errors and dialect mismatches.
+
+        Args:
+            namespace: The namespace to resolve sources for.
+            data_source_id: Optional explicit source ID; when provided and resolvable,
+                its engine's dialect is returned. When absent or unresolvable, falls
+                back to sole-source resolution.
+
+        Returns:
+            A sqlglot dialect string (e.g. "postgresql", "athena"). Returns "athena"
+            for cross-source/Glue/ambiguous cases, and the source engine's dialect
+            when a single JDBC source is resolved.
+        """
+        if not self._sources:
+            return "athena"
+
+        # Explicit source ID provided — fetch it and derive dialect
+        if data_source_id and data_source_id != "default":
+            source = await self._fetch_jdbc_source(namespace, data_source_id)
+            if source:
+                return self._target_dialect_for_source(source)
+
+        # No explicit source or it didn't resolve — try sole-source resolution
+        _, sole_source = await self._resolve_sole_jdbc_source(namespace)
+        if sole_source:
+            return self._target_dialect_for_source(sole_source)
+
+        # Multiple sources or no JDBC sources → federated Athena/Trino
+        return "athena"
+
     async def health_check(self) -> dict[str, Any]:
         """Aggregate the Athena (and JDBC, if present) executor health into one dict."""
         athena_health = await self._athena.health_check()
         health: dict[str, Any] = {"status": athena_health.get("status", "unknown"), "athena": athena_health}
         if self._source_db is not None:
             health["source_db"] = await self._source_db.health_check()
+        if self._redshift is not None:
+            health["redshift"] = await self._redshift.health_check()
         return health
 
     async def close(self) -> None:
         """Close both wrapped executors, logging (not raising) any close errors."""
-        for executor in (self._athena, self._source_db):
+        for executor in (self._athena, self._source_db, self._redshift):
             close_fn = getattr(executor, "close", None)
             if close_fn and callable(close_fn):
                 try:

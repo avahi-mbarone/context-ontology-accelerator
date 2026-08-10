@@ -27,6 +27,7 @@ import type {
   StreamingErrorEvent,
 } from "@app-types/playground";
 import { isStreamingEvent } from "@utils/sse-type-guards";
+import { deriveRuntimeSessionId } from "@utils/runtime-session-id";
 
 export interface UsePlaygroundStreamOptions {
   /** AgentCore Runtime endpoint URL (public endpoint or CloudFront path). */
@@ -70,14 +71,16 @@ export function usePlaygroundStream({
       setIsStreaming(true);
 
       // Get ID token and user sub (carries email + groups for Cedar auth; AgentCore validates aud)
-      // Sub is used for X-Amzn-Bedrock-AgentCore-Runtime-Session-Id (≥33 chars, sticky routing)
+      // Sub feeds X-Amzn-Bedrock-AgentCore-Runtime-Session-Id (must be ≥33 chars,
+      // sticky routing) — deriveRuntimeSessionId pads/normalizes since some IdPs
+      // issue short subs (e.g. "noahpaig") that fail that constraint as-is.
       let token: string;
       let runtimeSessionId: string | undefined;
       try {
         const provider = OIDCProvider.build(oidcConfig);
         token = await provider.getIdToken();
         const user = await provider.getUser();
-        runtimeSessionId = user?.profile?.sub ?? undefined;
+        runtimeSessionId = deriveRuntimeSessionId(user?.profile?.sub);
         if (!token) {
           onEventRef.current(
             makeErrorEvent(

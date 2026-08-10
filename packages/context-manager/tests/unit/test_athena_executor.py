@@ -370,3 +370,88 @@ class TestAthenaDatabaseResolution:
         call_kwargs = mock_athena.start_query_execution.call_args[1]
         assert call_kwargs["QueryExecutionContext"]["Database"] == "explicit_db"
         mock_table.get_item.assert_not_called()
+
+
+@pytest.mark.unit
+class TestResultPagination:
+    """Athena returns at most 1000 rows per call; results must page via NextToken.
+
+    Regression coverage for the silent-truncation bug: `_get_results` issued a
+    single GetQueryResults call and discarded `NextToken`, so every result set
+    was capped at 999 rows (1000 minus the header) regardless of max_rows. It
+    surfaced in benchmarking as four TPC-H queries returning exactly 999 rows.
+    """
+
+    @staticmethod
+    def _page(start: int, count: int, *, header: bool, token: str | None):
+        """Build one GetQueryResults page. The header row appears ONLY on page 1."""
+        rows = []
+        if header:
+            rows.append({"Data": [{"VarCharValue": "id"}]})
+        rows += [{"Data": [{"VarCharValue": str(i)}]} for i in range(start, start + count)]
+        page = {"ResultSet": {"ResultSetMetadata": {"ColumnInfo": [{"Name": "id"}]}, "Rows": rows}}
+        if token:
+            page["NextToken"] = token
+        return page
+
+    async def _run(self, pages, max_rows):
+        with patch("boto3.client") as mock_boto:
+            mock_athena = MagicMock()
+            mock_boto.return_value = mock_athena
+            mock_athena.start_query_execution.return_value = {"QueryExecutionId": "qid"}
+            mock_athena.get_query_execution.return_value = {"QueryExecution": {"Status": {"State": "SUCCEEDED"}}}
+            mock_athena.get_query_results.side_effect = pages
+            with patch("boto3.resource"):
+                ex = AthenaQueryExecutor(region="us-east-1", sources_table="t")
+            res = await ex.execute("SELECT id FROM t", namespace="demo", database="db", max_rows=max_rows)
+            return res, mock_athena
+
+    async def test_follows_next_token_across_pages(self):
+        """2500 rows across 3 pages must all be returned, not truncated at 999."""
+        pages = [
+            self._page(0, 1000, header=True, token="t1"),
+            self._page(1000, 1000, header=False, token="t2"),
+            self._page(2000, 500, header=False, token=None),
+        ]
+        res, mock_athena = await self._run(pages, 5000)
+
+        assert res.row_count == 2500, f"expected all 2500 rows, got {res.row_count}"
+        assert mock_athena.get_query_results.call_count == 3
+        assert res.truncated is False
+        # No row lost or duplicated at page boundaries.
+        assert res.rows[0]["id"] == "0"
+        assert res.rows[999]["id"] == "999"
+        assert res.rows[1000]["id"] == "1000"
+        assert res.rows[-1]["id"] == "2499"
+
+    async def test_header_stripped_only_on_first_page(self):
+        """Stripping rows[1:] on every page would drop one real row per page."""
+        pages = [
+            self._page(0, 3, header=True, token="t1"),
+            self._page(3, 3, header=False, token=None),
+        ]
+        res, _ = await self._run(pages, 100)
+        assert [r["id"] for r in res.rows] == ["0", "1", "2", "3", "4", "5"]
+
+    async def test_stops_at_max_rows_and_flags_truncated(self):
+        pages = [
+            self._page(0, 1000, header=True, token="t1"),
+            self._page(1000, 1000, header=False, token="t2"),
+        ]
+        res, mock_athena = await self._run(pages, 1500)
+        assert res.row_count == 1500
+        assert res.truncated is True
+        assert mock_athena.get_query_results.call_count == 2
+
+    async def test_single_page_needs_one_call(self):
+        pages = [self._page(0, 5, header=True, token=None)]
+        res, mock_athena = await self._run(pages, 1000)
+        assert res.row_count == 5
+        assert res.truncated is False
+        assert mock_athena.get_query_results.call_count == 1
+
+    async def test_empty_result_set(self):
+        pages = [self._page(0, 0, header=True, token=None)]
+        res, _ = await self._run(pages, 1000)
+        assert res.row_count == 0
+        assert res.truncated is False

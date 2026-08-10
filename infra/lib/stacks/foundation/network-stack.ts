@@ -374,18 +374,62 @@ export class NetworkStack extends SCLStack {
     // PostgreSQL 5432, MySQL 3306, SQL Server 1433, Redshift 5439, Oracle 1521.
     // Snowflake (443) and any AWS API the connector calls are covered by the
     // 443 rule below.
-    for (const port of [5432, 3306, 1433, 5439, 1521]) {
+    //
+    // DESTINATION SCOPE: a managed Glue connector reaching a customer database
+    // or a SaaS warehouse has no enumerable destination set, so the default is
+    // `0.0.0.0/0` for these ports. Where the destinations ARE known — egress via
+    // a fixed NAT/proxy range, or source databases on known ranges — narrow all
+    // of this connector's internet-bound egress with one knob:
+    //   -c connector_egress_cidrs=10.20.0.0/16,192.0.2.10/32
+    // Same shape as `jdbc_peer_cidrs` (see addJdbcConnectivity), and it applies
+    // to the DB ports, OCSP 80 and 443 alike rather than special-casing one
+    // port. Cross-network JDBC (peering/TGW/PrivateLink) is already scoped to
+    // its configured CIDRs by the JdbcConnectivity construct.
+    const connectorEgressCidrs = this.ctxList("connector_egress_cidrs");
+    const connectorEgressPeers: ec2.IPeer[] = connectorEgressCidrs.length
+      ? connectorEgressCidrs.map((cidr) => ec2.Peer.ipv4(cidr))
+      : [ec2.Peer.anyIpv4()];
+    const egressScope = connectorEgressCidrs.length
+      ? connectorEgressCidrs.join(",")
+      : "anywhere";
+    for (const peer of connectorEgressPeers) {
+      for (const port of [5432, 3306, 1433, 5439, 1521]) {
+        this.connectorSecurityGroup.addEgressRule(
+          peer,
+          ec2.Port.tcp(port),
+          `Source database ${port}`,
+        );
+      }
+    }
+    // OCSP certificate-revocation checks. OCSP is an HTTP protocol and always
+    // uses port 80 — there is no HTTPS variant to fold into the 443 rule below.
+    // snowflake-connector-python checks revocation on every connect; without
+    // this rule each attempt burns ~5-30s per responder before failing open
+    // (measured ValidationLatency of 184s on a Snowflake scan, against a 900s
+    // Lambda timeout). Egress-only, and OCSP responses are signed, so plaintext
+    // transport is the intended design rather than a weakening.
+    //
+    // Only the Snowflake driver does internet OCSP — every other engine talks
+    // to a private endpoint. A deployment with no Snowflake source can drop the
+    // rule entirely with `-c connector_ocsp_egress=false`; the cost of doing so
+    // while Snowflake IS in use is soft-fail revocation checking plus the
+    // latency above, so it is on by default.
+    if (this.ctxString("connector_ocsp_egress") !== "false") {
+      for (const peer of connectorEgressPeers) {
+        this.connectorSecurityGroup.addEgressRule(
+          peer,
+          ec2.Port.tcp(80),
+          `OCSP certificate revocation (HTTP-only protocol) to ${egressScope}`,
+        );
+      }
+    }
+    for (const peer of connectorEgressPeers) {
       this.connectorSecurityGroup.addEgressRule(
-        ec2.Peer.anyIpv4(),
-        ec2.Port.tcp(port),
-        `Source database ${port}`,
+        peer,
+        ec2.Port.tcp(443),
+        "HTTPS: Snowflake wire protocol + AWS APIs (Glue/S3/STS)",
       );
     }
-    this.connectorSecurityGroup.addEgressRule(
-      ec2.Peer.anyIpv4(),
-      ec2.Port.tcp(443),
-      "HTTPS: Snowflake wire protocol + AWS APIs (Glue/S3/STS)",
-    );
 
     // ── Cross-network JDBC connectivity (optional, created-VPC only) ──
     // Imported VPCs are expected to bring their own peering/TGW/PrivateLink +
