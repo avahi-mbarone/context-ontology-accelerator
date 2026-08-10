@@ -27,12 +27,21 @@ SQL Extraction Strategy:
     - DEBUG log parsing (--dev + log file): fragile, disk growth risk, format-dependent
     - Structured query logging (ontop.queryLogging): still file-based, async flush issues
     - /ontop/reformulate: direct HTTP, no file I/O, no parsing — cleanest solution
+
+Runtime note: this file runs on the container's system ``python3``, which is
+Python 3.9 (Amazon Corretto AL2023 base image) — NOT the 3.12 the rest of the
+repo targets. ``from __future__ import annotations`` is therefore mandatory:
+without it a PEP 604 ``X | None`` annotation is evaluated at import time and
+raises ``TypeError``, killing the server before it can serve /health.
 """
+
+from __future__ import annotations
 
 import argparse
 import json
 import logging
 import os
+import re
 import threading
 import time
 import urllib.error
@@ -40,6 +49,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
+from typing import Any
 
 import sqlglot
 
@@ -180,6 +190,10 @@ def _translate_sparql(sparql, target_dialect):
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             raw = resp.read().decode("utf-8").strip()
+            # Parse SPARQL projection metadata from the ans1(...) / CONSTRUCT
+            # header before _extract_sql discards it. The SPARQL is needed for
+            # the DISTINCT modifier, which is not recoverable from the SQL.
+            projection = _parse_projection_header(raw, sparql)
             # Ontop's reformulate output includes metadata before the SQL.
             # Extract only the SQL portion (starts with SELECT/WITH).
             sql = _extract_sql(raw)
@@ -193,13 +207,16 @@ def _translate_sparql(sparql, target_dialect):
             source_table_refs = _extract_table_refs(sql)
             # Enrich table refs with datasource routing from R2RML annotations
             datasource_routing = _resolve_routing(source_table_refs)
-            return {
+            result = {
                 "sql": sql,
                 "dialect": target_dialect or "h2",
                 "ontologyVersion": _ontology_version,
                 "sourceTableRefs": source_table_refs,
                 "datasourceRouting": datasource_routing,
             }
+            if projection:
+                result["projection"] = projection
+            return result
     except urllib.error.HTTPError as e:
         error_body = e.read().decode("utf-8") if e.fp else str(e)
         raise RuntimeError(f"Ontop error {e.code}: {error_body}") from e
@@ -293,6 +310,141 @@ def _translate_dialect(sql, source_dialect, target_dialect):
         return sql
 
 
+def _split_top_level(text: str) -> list[str]:
+    """Split on commas that are not nested inside parentheses.
+
+    Ontop's CONSTRUCT term definitions contain commas inside function calls
+    (``RDF(CHARACTER VARYINGToTEXT(TITLE1m4),xsd:string)``), so a plain
+    ``str.split(",")`` would tear a single definition into fragments.
+    """
+    parts: list[str] = []
+    depth = 0
+    current: list[str] = []
+    for ch in text:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+    parts.append("".join(current))
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _parse_projection_header(raw: str, sparql: str) -> dict[str, Any] | None:
+    """Parse SPARQL projection metadata from Ontop's reformulate header.
+
+    Ontop's /ontop/reformulate output describes the SPARQL solution above the SQL:
+
+        ans1(employeeName)
+        CONSTRUCT [employeeName] [employeeName/RDF(CHARACTER VARYINGToTEXT(FULL_NAME1m3),xsd:string)]
+           NATIVE [EMPLOYEE_ID1m1, FULL_NAME1m3, ID1m7, TITLE1m4, v3]
+        SELECT V2."EMPLOYEE_ID" AS "EMPLOYEE_ID1m1", V3."FULL_NAME" AS "FULL_NAME1m3", ...
+
+    The variable→column correspondence comes from the CONSTRUCT term definitions
+    (second bracket), which name the source alias per variable. It is NOT
+    positional: above, ``employeeName`` is the ONLY selected variable yet its
+    column ``FULL_NAME1m3`` is the *second* entry in the SQL SELECT list — the
+    others are join keys and RDF-construction ingredients. Mapping by position
+    would label the column ``employeeName`` and fill it with employee IDs.
+
+    ``NATIVE [...]`` enumerates the SQL output aliases and is used as the
+    vocabulary for recognising which alias a term definition references.
+
+    ``distinct`` is read from the SPARQL itself, never inferred from the SQL:
+    Ontop emits ``SELECT DISTINCT`` for its own reasons (e.g. de-duplicating
+    rows behind a composite-key IRI template) on queries whose SPARQL has no
+    DISTINCT, and conversely omits it when it can prove distinctness redundant.
+
+    Returns a dict with:
+        selectVars: list of SPARQL variable names (in SELECT order)
+        varToColumn: dict mapping SPARQL var -> SQL output alias
+        distinct: bool (true only for SPARQL SELECT DISTINCT / REDUCED)
+
+    Returns None if the header is absent or unparseable, or if any selected
+    variable cannot be resolved to exactly one SQL alias — the caller then
+    falls back to returning raw SQL columns rather than mislabelling data.
+
+    Every degradation path logs its reason. Without that, a namespace silently
+    reverts to showing raw SQL aliases and there is no way to tell which of the
+    causes below fired (--dev disabled, an Ontop version change, or a genuine
+    parser bug). Non-SELECT queries have no ans1 header at all, so that one
+    case logs at debug to keep ASK/CONSTRUCT traffic quiet.
+    """
+    # A missing header is expected for non-SELECT forms and unexpected otherwise.
+    is_select = bool(re.search(r"\bSELECT\b", sparql, re.IGNORECASE))
+
+    def _drop(reason):
+        """Log why the projection was dropped, then signal the fallback."""
+        if is_select:
+            logger.warning("Projection unavailable (%s); results will use raw SQL aliases", reason)
+        else:
+            logger.debug("Projection unavailable (%s); non-SELECT query", reason)
+        return None
+
+    # Parse ans1(...) signature — the SPARQL SELECT variables, in SELECT order.
+    ans_match = re.search(r"ans1\(([\w,\s]+)\)", raw)
+    if not ans_match:
+        return _drop("no ans1(...) signature in reformulate output")
+    var_names = [v.strip() for v in ans_match.group(1).split(",") if v.strip()]
+    if not var_names:
+        return _drop("ans1(...) signature lists no variables")
+
+    # Parse NATIVE [...] — the SQL output aliases.
+    native_match = re.search(r"NATIVE\s+\[([^\]]*)\]", raw, re.IGNORECASE)
+    if not native_match:
+        return _drop("no NATIVE [...] alias list")
+    native_aliases = {a.strip() for a in native_match.group(1).split(",") if a.strip()}
+    if not native_aliases:
+        return _drop("NATIVE [...] alias list is empty")
+
+    # Parse the CONSTRUCT term-definition bracket (the SECOND bracket on the line):
+    #   CONSTRUCT [vars] [var/RDF(expr,type), ...]
+    construct_match = re.search(r"CONSTRUCT\s+\[[^\]]*\]\s+\[(.*)\]\s*$", raw, re.IGNORECASE | re.MULTILINE)
+    if not construct_match:
+        return _drop("no CONSTRUCT term-definition bracket")
+
+    # Each definition is "var/<term expression>"; the expression references the
+    # SQL alias holding the value. Match aliases on word boundaries so that
+    # e.g. "v0" does not match inside "v01".
+    var_to_column: dict[str, str] = {}
+    for definition in _split_top_level(construct_match.group(1)):
+        name, sep, expr = definition.partition("/")
+        if not sep:
+            continue
+        name = name.strip()
+        if name not in var_names:
+            continue
+        referenced = [a for a in native_aliases if re.search(rf"\b{re.escape(a)}\b", expr)]
+        # Exactly one alias == an unambiguous column to read the value from.
+        # Zero (a constant) or several (a value composed from multiple columns)
+        # cannot be projected onto a single column.
+        if len(referenced) == 1:
+            var_to_column[name] = referenced[0]
+
+    # Partial mappings would silently render an all-NULL column under a
+    # correct-looking header, so degrade the whole projection instead.
+    if len(var_to_column) != len(var_names):
+        unresolved = [v for v in var_names if v not in var_to_column]
+        # Naming the variables distinguishes the common benign cause (a
+        # constant-folded FILTER term, which references no alias) from a
+        # parser defect.
+        return _drop("no unique SQL alias for {}".format(", ".join(unresolved)))
+
+    # DISTINCT comes from the SPARQL's own projection modifier. Dedup is
+    # spec-legal for REDUCED, so both collapse duplicate solutions.
+    distinct = bool(re.search(r"\bSELECT\s+(DISTINCT|REDUCED)\b", sparql, re.IGNORECASE))
+
+    return {
+        "selectVars": var_names,
+        "varToColumn": var_to_column,
+        "distinct": distinct,
+    }
+
+
 def _extract_sql(raw):
     """Extract the SQL SELECT statement from Ontop's reformulation output.
 
@@ -304,12 +456,14 @@ def _extract_sql(raw):
 
     This function extracts only the SQL portion.
     """
-    import re
-
     # Find first SELECT or WITH statement
     match = re.search(r"(?m)^(SELECT|WITH)\b", raw, re.IGNORECASE)
     if match:
         return raw[match.start() :].strip()
+    # No recognisable statement start: the caller receives the raw blob, which
+    # will fail downstream. Log it here so the cause is visible rather than
+    # surfacing as an opaque SQL error.
+    logger.warning("No SELECT/WITH found in reformulate output; returning it unmodified")
     return raw
 
 

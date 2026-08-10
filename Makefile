@@ -44,20 +44,28 @@ coverage:
 ##   API_ENDPOINT        — skip CloudFormation lookup, use this API Gateway URL
 ##   INTEG_NAMESPACE_ID  — reuse an existing namespace (skip create)
 test-integ:
-	uv run pytest packages/*/tests/integ/ -m integ -v --tb=short --import-mode=importlib
+	@if ls packages/*/tests/integ/ >/dev/null 2>&1; then \
+		uv run pytest packages/*/tests/integ/ -m integ -v --tb=short --import-mode=importlib; \
+	else echo "⚠ integ tests not available (stripped from public mirror)"; fi
 
 ## Load test: validates the pipeline at scale (50 → 50k tables).
 ## `make load-test` runs the non-billable smoke rung only ('not slow').
 ## `make load-test-slow RUNG=500` opts into billable 500+ rungs.
 ## Crash recovery: make load-test-teardown RUN_ID=<id>
 load-test:
-	uv run pytest tests/integ/load/ -q -m "not slow" --rung $(or $(RUNG),50)
+	@if [ -d tests/integ/load ]; then \
+		uv run pytest tests/integ/load/ -q -m "not slow" --rung $(or $(RUNG),50); \
+	else echo "⚠ load tests not available (stripped from public mirror)"; fi
 
 load-test-slow:
-	uv run pytest tests/integ/load/ -q -m slow --rung $(or $(RUNG),500)
+	@if [ -d tests/integ/load ]; then \
+		uv run pytest tests/integ/load/ -q -m slow --rung $(or $(RUNG),500); \
+	else echo "⚠ load tests not available (stripped from public mirror)"; fi
 
 load-test-teardown:
-	uv run python tests/integ/load/teardown_orphan.py $(RUN_ID)
+	@if [ -f tests/integ/load/teardown_orphan.py ]; then \
+		uv run python tests/integ/load/teardown_orphan.py $(RUN_ID); \
+	else echo "⚠ load tests not available (stripped from public mirror)"; fi
 build: notice
 	pnpm nx run-many -t build
 
@@ -91,7 +99,8 @@ destroy-dev:
 	./scripts/destroy.sh dev
 
 docs:
-	cd docs && mkdocs serve
+	@if [ -d docs ]; then cd docs && mkdocs serve; \
+	else echo "⚠ docs/ not available (stripped from public mirror); see external-docs/"; fi
 
 web-dev:
 	cd packages/web-app && pnpm install && pnpm dev

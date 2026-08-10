@@ -270,11 +270,19 @@ describe("ChatBubble", () => {
       expect(screen.getByText("SQL")).toBeInTheDocument();
     });
 
-    it("shows Tier 2 caption when sparqlGenerated is present", () => {
+    it("shows Tier 2 caption with the executing engine when sparqlGenerated is present", () => {
       const artifactsResponse = {
         ...response,
         sparqlGenerated: "SELECT ?x WHERE { ?x rdf:type :Claim }",
         queryUsed: "SELECT * FROM claims",
+        trace: [
+          {
+            step: "t2.sql.execute",
+            status: "success",
+            durationMs: 5,
+            detail: { engine: "athena" },
+          },
+        ],
       };
       render(
         <ChatBubble
@@ -291,7 +299,89 @@ describe("ChatBubble", () => {
       ).toBeInTheDocument();
     });
 
-    it("shows SQL-only caption when only queryUsed is present (Tier 1)", () => {
+    it("shows SQL-only caption naming the ATHENA engine from the trace tag", () => {
+      const artifactsResponse = {
+        ...response,
+        tier: 1,
+        queryUsed: "SELECT COUNT(*) FROM claims",
+        trace: [
+          {
+            step: "t1.execute",
+            status: "success",
+            durationMs: 5,
+            detail: { engine: "athena" },
+          },
+        ],
+      };
+      render(
+        <ChatBubble
+          role="assistant"
+          state="success"
+          {...baseProps}
+          response={artifactsResponse}
+        />,
+      );
+      expect(screen.getByText("The SQL Athena executed.")).toBeInTheDocument();
+      expect(
+        screen.queryByText(/SPARQL/i, { selector: "*" }),
+      ).not.toBeInTheDocument();
+    });
+
+    it("names the REDSHIFT engine in the caption when the trace engine tag is redshift", () => {
+      const artifactsResponse = {
+        ...response,
+        tier: 1,
+        queryUsed: "SELECT COUNT(*) FROM claims",
+        trace: [
+          {
+            step: "t1.execute",
+            status: "success",
+            durationMs: 5,
+            detail: { engine: "redshift" },
+          },
+        ],
+      };
+      render(
+        <ChatBubble
+          role="assistant"
+          state="success"
+          {...baseProps}
+          response={artifactsResponse}
+        />,
+      );
+      expect(
+        screen.getByText("The SQL Redshift executed."),
+      ).toBeInTheDocument();
+    });
+
+    it("names the JDBC engine in the caption when the trace engine tag is jdbc", () => {
+      const artifactsResponse = {
+        ...response,
+        tier: 1,
+        queryUsed: "SELECT COUNT(*) FROM claims",
+        trace: [
+          {
+            step: "t2.sql.execute",
+            status: "success",
+            durationMs: 5,
+            detail: { engine: "jdbc" },
+          },
+        ],
+      };
+      render(
+        <ChatBubble
+          role="assistant"
+          state="success"
+          {...baseProps}
+          response={artifactsResponse}
+        />,
+      );
+      expect(
+        screen.getByText("The SQL the JDBC engine executed."),
+      ).toBeInTheDocument();
+    });
+
+    it("falls back to a neutral engine label when no trace engine tag is present", () => {
       const artifactsResponse = {
         ...response,
         tier: 1,
@@ -305,7 +395,9 @@ describe("ChatBubble", () => {
           response={artifactsResponse}
         />,
       );
-      expect(screen.getByText("The SQL Athena executed.")).toBeInTheDocument();
+      expect(
+        screen.getByText("The SQL the query engine executed."),
+      ).toBeInTheDocument();
       expect(
         screen.queryByText(/SPARQL/i, { selector: "*" }),
       ).not.toBeInTheDocument();

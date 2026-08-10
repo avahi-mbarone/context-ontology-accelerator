@@ -31,12 +31,6 @@ export interface ServeStackProps extends cdk.StackProps {
   readonly neptuneSecurityGroup: ec2.ISecurityGroup;
   /** Lambda security group (allowAllOutbound) for AOSS proxy. TODO(aoss-proxy): remove */
   readonly lambdaSecurityGroup: ec2.ISecurityGroup;
-  /** Cognito issuer URL for JWT auth (e.g., https://cognito-idp.<region>.amazonaws.com/<poolId>). */
-  readonly issuerUrl: string;
-  /** Cognito App Client ID — used as allowed audience for JWT validation. */
-  readonly clientId: string;
-  /** Additional client IDs to accept as audience (e.g. MCP CLI client). */
-  readonly additionalAudience?: string[];
   /** Neptune cluster ARN — graph store for ontology traversal. */
   readonly neptuneClusterArn: string;
   /** Neptune cluster writer endpoint (host for SigV4 Gremlin/SPARQL). */
@@ -59,8 +53,6 @@ export interface ServeStackProps extends cdk.StackProps {
   /** Resource-role-mappings DDB table (authnz stack) — resolves principal
    *  (user/group) grants to globalRoles/resourceRoles for Cedar evaluation. */
   readonly resourceRoleMappingsTable: dynamodb.ITable;
-  /** IdP group claim name forwarded to the runtime (same prop as api-stack). */
-  readonly groupClaimName?: string;
   /**
    * AgentCore-supported AZ **names** for the deploying account (resolved
    * in the app entrypoint). Used to defensively filter the subnets handed
@@ -132,6 +124,32 @@ export class ServeStack extends SCLStack {
     const namespacesTableName = ssm.StringParameter.valueForStringParameter(
       this,
       `${ssmPrefix}/namespace/namespaces-table-name`,
+    );
+
+    // IdP issuer/client IDs via SSM (avoids a cross-stack export on the auth
+    // stack's UserPool/UserPoolClient/McpClient — see idp-authentication-stack.ts
+    // for the writer). The MCP client ID is included in the allowed audience so
+    // ID tokens minted for the MCP/CLI client are also accepted.
+    const issuerUrl = ssm.StringParameter.valueForStringParameter(
+      this,
+      `${ssmPrefix}/issuer`,
+    );
+    const clientId = ssm.StringParameter.valueForStringParameter(
+      this,
+      `${ssmPrefix}/userpool-client-id`,
+    );
+    const mcpClientId = ssm.StringParameter.valueForStringParameter(
+      this,
+      `${ssmPrefix}/mcp-client-id`,
+    );
+    // The JWT claim name carrying group membership — "cognito:groups" for
+    // Cognito, or the customer's configured claim (oidcSettings.groupClaim,
+    // default "groups") for direct OIDC. Read from SSM instead of hardcoding
+    // DEFAULT_GROUP_CLAIM ("cognito:groups"): that constant is wrong on the
+    // OIDC path and silently breaks all group-based role resolution.
+    const groupClaimName = ssm.StringParameter.valueForStringParameter(
+      this,
+      `${ssmPrefix}/authentication-group-token-name`,
     );
     const namespacesTableArn = `arn:aws:dynamodb:${region}:${account}:table/${namespacesTableName}`;
 
@@ -401,7 +419,7 @@ export class ServeStack extends SCLStack {
           bedrockagentcore.AgentRuntimeArtifact.fromImageUri(imageUri),
         authorizerConfiguration:
           bedrockagentcore.RuntimeAuthorizerConfiguration.usingJWT(
-            `${props.issuerUrl}/.well-known/openid-configuration`,
+            `${issuerUrl}/.well-known/openid-configuration`,
             // allowedClients is intentionally omitted. AgentCore verifies ALL
             // configured fields (AND semantics), and `client_id` is an
             // access-token-only claim — setting it would reject ID tokens.
@@ -411,7 +429,7 @@ export class ServeStack extends SCLStack {
             // the WebSocket and REST (via data-layer) paths.
             undefined,
             // allowedAudience: accept ID tokens from web app AND MCP proxy
-            [props.clientId, ...(props.additionalAudience ?? [])], // allowedAudience — ID token `aud` == app client id
+            [clientId, mcpClientId], // allowedAudience — ID token `aud` == app client id
           ),
         // Defense-in-depth: even though NetworkStack pins the VPC's
         // AZs to AgentCore-supported ones, filter again here so an
@@ -447,6 +465,12 @@ export class ServeStack extends SCLStack {
           ATHENA_WORKGROUP_PREFIX: `${this.prefixed("")}`,
           // ATHENA_WORKGROUP_PREFIX is a fallback; primary resolution reads
           // athenaWorkgroupName from the namespaces DDB table at runtime.
+          // Redshift Data API `Database` used for awsdatacatalog queries.
+          // Redshift Serverless namespaces default their DB to "dev"; override
+          // via the redshift_serve_database context if a namespace differs.
+          REDSHIFT_SERVE_DATABASE:
+            (this.node.tryGetContext("redshift_serve_database") as string) ??
+            "dev",
           OSS_ONTOLOGY_INDEX: opensearchCollectionName,
           // Default engine for a request that does not set `options.mode`. Standard
           // (not agentic), because agentic runs ~90s at p50 and the REST/MCP callers
@@ -478,11 +502,15 @@ export class ServeStack extends SCLStack {
           // ceiling. Note the synthesis floor (retriever.py _MIN_SYNTHESIS_TIMEOUT_S)
           // is 60s, so worst case is budget + 60, not budget + reserve.
           AGENTIC_TIME_BUDGET_S:
-            (this.node.tryGetContext("agentic_time_budget_s") as string) ?? "110",
+            (this.node.tryGetContext("agentic_time_budget_s") as string) ??
+            "110",
           AGENTIC_PER_TOOL_TIMEOUT_S:
-            (this.node.tryGetContext("agentic_per_tool_timeout_s") as string) ?? "45",
+            (this.node.tryGetContext("agentic_per_tool_timeout_s") as string) ??
+            "45",
           AGENTIC_SYNTHESIS_RESERVE_S:
-            (this.node.tryGetContext("agentic_synthesis_reserve_s") as string) ?? "25",
+            (this.node.tryGetContext(
+              "agentic_synthesis_reserve_s",
+            ) as string) ?? "25",
           // Hard per-request cap inside serve (main.py RESOLVE_TIMEOUT_S, clamped
           // 10..300). Must exceed AGENTIC_TIME_BUDGET_S + SYNTHESIS_RESERVE_S or serve
           // aborts a session the agentic budget still considers live.
@@ -498,11 +526,8 @@ export class ServeStack extends SCLStack {
           ROLES_TABLE_NAME: props.rolesTable.tableName,
           // Role resolution: maps principal (user/group) to globalRoles/resourceRoles.
           RRM_TABLE_NAME: props.resourceRoleMappingsTable.tableName,
-          // IdP group claim name — optional (same pattern as api-stack); the
-          // runtime defaults to "groups" when unset.
-          ...(props.groupClaimName && {
-            GROUP_CLAIM_NAME: props.groupClaimName,
-          }),
+          // IdP group claim name, resolved via SSM above.
+          GROUP_CLAIM_NAME: groupClaimName,
           MEMORY_ID: memory.memoryId,
           SESSION_METADATA_TABLE: sessionMetadata.table.tableName,
           SCL_CEDAR_FAIL_OPEN_NO_ROLES: (() => {
@@ -685,6 +710,37 @@ export class ServeStack extends SCLStack {
           resources: [
             `arn:aws:athena:${region}:${account}:workgroup/*`,
             `arn:aws:athena:${region}:${account}:datacatalog/*`,
+          ],
+        }),
+      );
+
+      // Redshift Data API — execute Glue/Iceberg queries via Redshift
+      // Serverless (`awsdatacatalog` auto-mount) as an alternative to Athena for
+      // Glue sources that opt in (GlueConfiguration.executionEngine=REDSHIFT).
+      // The workgroup itself is provisioned/owned by the customer and named at
+      // onboarding; this grants the serve runtime the Data API + Serverless
+      // credential-vend actions to run statements against those workgroups. The
+      // Glue/Lake Formation/S3 grants below are shared with the Athena path and
+      // already cover the auto-mount's catalog + underlying-data reads.
+      runtime.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: [
+            "redshift-data:ExecuteStatement",
+            "redshift-data:DescribeStatement",
+            "redshift-data:GetStatementResult",
+            "redshift-data:ListStatements",
+          ],
+          // redshift-data actions do not support resource-level scoping to a
+          // specific workgroup/statement (statement ids are created at call time
+          // and owned by this principal); AWS models these as account-wide.
+          resources: ["*"],
+        }),
+      );
+      runtime.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ["redshift-serverless:GetCredentials"],
+          resources: [
+            `arn:aws:redshift-serverless:${region}:${account}:workgroup/*`,
           ],
         }),
       );

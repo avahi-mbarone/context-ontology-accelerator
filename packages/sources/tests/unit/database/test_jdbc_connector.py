@@ -15,7 +15,6 @@ import pytest
 _mock_pg8000 = MagicMock()
 sys.modules.setdefault("pg8000", _mock_pg8000)
 
-from coa_common.constants import PREVIEW_DATABASE_ENGINES  # noqa: E402
 from coa_sources.database.connectors import get_connector  # noqa: E402
 from coa_sources.database.connectors.jdbc import JdbcConnector  # noqa: E402
 
@@ -195,11 +194,10 @@ class TestTestConnection:
         mock_socket.assert_not_called()
         mock_boto3.Session.assert_not_called()
 
-    @pytest.mark.parametrize("engine", sorted(PREVIEW_DATABASE_ENGINES))
+    @pytest.mark.parametrize("engine", ["DB2", "TERADATA", "UNKNOWN"])
     @patch("coa_sources.database.connectors.jdbc.socket.create_connection")
-    def test_preview_engine_rejected(self, mock_socket, connector, base_config, engine):
-        # Snowflake/Oracle are implemented but withheld (PREVIEW_DATABASE_ENGINES),
-        # so they are unsupported at the connect boundary just like an unknown token.
+    def test_unknown_engine_rejected(self, mock_socket, connector, base_config, engine):
+        # Engines without a dialect are rejected at the connect boundary.
         base_config["engine"] = engine
 
         result = connector.test_connection(base_config)

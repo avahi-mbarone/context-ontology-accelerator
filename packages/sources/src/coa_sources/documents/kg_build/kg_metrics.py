@@ -26,11 +26,19 @@ Metrics written (Numbers, keyed under PK=METRICS#{ns}, SK=KGBUILD#{ds}):
 Each ``increment_*`` call issues one atomic ``ADD`` to the record. Best-effort:
 a DynamoDB error is logged and swallowed so instrumentation never fails the
 build. Disable with ``KG_METRICS_ENABLED=false``.
+
+This module also provides :func:`start_heartbeat`, a daemon thread that logs a
+periodic liveness line (elapsed, RSS, in-process counter deltas). The toolkit
+reports progress only at document-batch boundaries, which can be tens of minutes
+apart, so without a heartbeat a task that stalls mid-batch is indistinguishable
+from one that is working — the log simply goes silent until the task dies.
 """
 
 from __future__ import annotations
 
 import os
+import threading
+import time
 from typing import Any
 
 import structlog
@@ -38,6 +46,9 @@ import structlog
 logger = structlog.get_logger()
 
 METRICS_ENABLED = os.environ.get("KG_METRICS_ENABLED", "true").lower() == "true"
+
+# Seconds between heartbeat lines. 0 disables the heartbeat.
+HEARTBEAT_INTERVAL_SECONDS = int(os.environ.get("KG_HEARTBEAT_INTERVAL_SECONDS", "60"))
 
 # Field names on the metrics record. The Source Detail API (sources_handler.py)
 # reads these to surface documentsProcessed / chunksLLM / chunksEmbed / chunksGraph.
@@ -54,6 +65,86 @@ def _metrics_key(namespace_id: str, doc_source_id: str) -> dict[str, str]:
     item, so live progress polling never contends with the source row.
     """
     return {"PK": f"METRICS#{namespace_id}", "SK": f"KGBUILD#{doc_source_id}"}
+
+
+# Running in-process mirror of the counts sent to DynamoDB, so the heartbeat can
+# report progress without spending a DDB read per beat. Written by the progress
+# monitor (main process, single-threaded) and read by the heartbeat thread, hence
+# the lock.
+_counters: dict[str, int] = {}
+_counters_lock = threading.Lock()
+
+
+def _record_local(field: str, count: int) -> None:
+    """Mirror an increment into the in-process counter snapshot."""
+    with _counters_lock:
+        _counters[field] = _counters.get(field, 0) + count
+
+
+def counter_snapshot() -> dict[str, int]:
+    """Return a copy of the in-process counts recorded so far this run."""
+    with _counters_lock:
+        return dict(_counters)
+
+
+def _rss_mb() -> float | None:
+    """Resident set size of this process in MiB, or None if unavailable.
+
+    Read from ``/proc/self/status`` rather than via ``psutil`` to avoid adding a
+    dependency. Returns None on platforms without procfs (e.g. macOS dev boxes);
+    the container runs Linux, which is where this signal matters.
+    """
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return round(int(line.split()[1]) / 1024, 1)
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def start_heartbeat(*, namespace_id: str, doc_source_id: str) -> threading.Event:
+    """Start a daemon thread logging periodic liveness until the returned Event is set.
+
+    The toolkit only reports progress at document-batch boundaries, which in
+    practice can be 15-25 minutes apart. Between boundaries the task emits
+    nothing, so a stall and normal operation look identical in CloudWatch — a
+    task that dies mid-batch leaves no evidence of where it stopped or whether
+    memory was climbing. Each beat logs elapsed time, RSS, and the counter deltas
+    since the previous beat, which distinguishes "stalled" from "slow" and gives
+    memory-growth evidence without Container Insights.
+
+    Returns the stop Event. Setting it ends the thread; since the thread is a
+    daemon, forgetting to stop it will not block process exit.
+    """
+    stop = threading.Event()
+    if HEARTBEAT_INTERVAL_SECONDS <= 0:
+        return stop
+
+    started = time.time()
+
+    def _beat() -> None:
+        previous: dict[str, int] = {}
+        while not stop.wait(HEARTBEAT_INTERVAL_SECONDS):
+            current = counter_snapshot()
+            # Emitted even when nothing changed: a beat with all-zero deltas is
+            # precisely the signal that the task is alive but making no progress.
+            delta = {f"{k}_delta": current[k] - previous.get(k, 0) for k in current}
+            previous = current
+            logger.info(
+                "kg_build heartbeat",
+                elapsed_seconds=round(time.time() - started, 1),
+                rss_mb=_rss_mb(),
+                namespace_id=namespace_id,
+                doc_source_id=doc_source_id,
+                **current,
+                **delta,
+            )
+
+    threading.Thread(target=_beat, name="kg-build-heartbeat", daemon=True).start()
+    logger.info("kg_metrics: heartbeat started", interval_seconds=HEARTBEAT_INTERVAL_SECONDS)
+    return stop
 
 
 class NoOpProgressMonitor:
@@ -118,6 +209,7 @@ def make_progress_monitor(*, table: str, region: str, namespace_id: str, doc_sou
         def _add(self, field: str, count: int) -> None:
             if count <= 0:
                 return
+            _record_local(field, int(count))
             try:
                 self._dao.atomic_add(key, {field: int(count)})
                 logger.debug("kg_metrics increment", field=field, count=count, pk=key["PK"], sk=key["SK"])

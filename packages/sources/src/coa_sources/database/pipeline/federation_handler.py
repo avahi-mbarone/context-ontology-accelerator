@@ -39,6 +39,7 @@ from coa_sources.database.connectors.glue_connection_provisioner import (
     cleanup_federated_resources,
     grant_consumer_select,
     grant_consumer_select_native,
+    grant_iam_allowed_principals,
     provision_federated_catalog,
 )
 
@@ -260,6 +261,12 @@ def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
         public_schema_name=config.get("schemaName", "public"),
         subnet_id=os.environ.get("CONNECTOR_SUBNET_ID"),
         security_group_id=os.environ.get("CONNECTOR_SECURITY_GROUP_ID"),
+        # Snowflake-only; ignored by every other engine. Sourced from the same
+        # jdbcConfiguration field discovery already uses, so there is one place
+        # to configure a warehouse rather than two. `role` is intentionally NOT
+        # forwarded: Glue rejects a ROLE connection property, so the connector
+        # runs as the secret user's DEFAULT_ROLE instead.
+        warehouse=config.get("warehouse"),
     )
     catalog_name = result["athenaDataCatalogName"]
 
@@ -270,6 +277,16 @@ def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
     # by name — no need to list the catalog's databases (which the connector
     # materializes lazily, so GetDatabases can return empty right after create).
     schemas = sorted({s.lower() for s in (item.get("discoveredSchemas") or []) if s})
+
+    # Governs the databases that actually exist. provision_federated_catalog grants
+    # IAM_ALLOWED_PRINCIPALS on a single `public_schema_name` (default "public"),
+    # which only PostgreSQL and Redshift have — on every other engine that grant
+    # names a non-existent database, LF accepts it silently, and nothing is
+    # governed. The symptom is invisible to LF data lake admins (they bypass
+    # filtering) and surfaces for everyone else as GetDatabases returning an empty
+    # list on a catalog that resolves. Grant per discovered schema here, where the
+    # discovery results are available.
+    grant_iam_allowed_principals(catalog_name=catalog_name, schemas=schemas)
 
     # Grant LF SELECT/DESCRIBE on the federated catalog to the consumer query
     # principal, scoped to the catalog's actual (casing-correct) database names.

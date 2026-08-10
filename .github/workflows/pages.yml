@@ -37,7 +37,7 @@ env:
   PAGES_BASE: "/context-ontology-accelerator/"
   # Match the pnpm pinned in .mise.toml so the docs build uses the same pnpm as
   # every other build in the repo.
-  PNPM_VERSION: "10.27.0"
+  PNPM_VERSION: "10.34.5"
 
 jobs:
   build:

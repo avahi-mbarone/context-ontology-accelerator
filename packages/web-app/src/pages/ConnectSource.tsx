@@ -62,11 +62,7 @@ function extractErrorMessage(
   if (err instanceof Error && err.message) return err.message;
   return fallback;
 }
-import {
-  SUPPORTED_UPLOAD_CONTENT_TYPES,
-  MAX_UPLOAD_FILES,
-  PREVIEW_DATABASE_ENGINES,
-} from "@coa/shared";
+import { SUPPORTED_UPLOAD_CONTENT_TYPES, MAX_UPLOAD_FILES } from "@coa/shared";
 import { S3_ARN_RE, validateS3Prefix } from "@utils/helpers";
 
 // ── Source type options ───────────────────────────────────────────────────────
@@ -76,9 +72,7 @@ type SourceKind = "GLUE_DATABASE" | "JDBC_DATABASE" | "DOCUMENTS";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-// Every engine the backend has a dialect for. Engines withheld from the product
-// (PREVIEW_DATABASE_ENGINES) stay in this type and in DEFAULT_PORTS so their
-// form fields keep compiling — only ENGINE_OPTIONS below hides them.
+// Every engine the backend has a dialect for.
 type DatabaseEngine =
   | "POSTGRESQL"
   | "MYSQL"
@@ -86,6 +80,30 @@ type DatabaseEngine =
   | "ORACLE"
   | "SQLSERVER"
   | "SNOWFLAKE";
+
+// Execution engine for a Glue/Iceberg source at serve time. ATHENA is
+// the default; REDSHIFT routes queries through Redshift Serverless
+// (awsdatacatalog auto-mount). Distinct from DatabaseEngine (which types a
+// native JDBC *source*), so the Glue form can never pick a non-Glue engine.
+type GlueExecutionEngine = "ATHENA" | "REDSHIFT";
+
+const GLUE_EXECUTION_ENGINE_OPTIONS: {
+  value: GlueExecutionEngine;
+  label: string;
+  description: string;
+}[] = [
+  {
+    value: "ATHENA",
+    label: "Athena (default)",
+    description: "Query Glue/Iceberg tables via Amazon Athena.",
+  },
+  {
+    value: "REDSHIFT",
+    label: "Redshift Serverless",
+    description:
+      "Query Glue/Iceberg tables via Redshift Serverless (awsdatacatalog auto-mount).",
+  },
+];
 
 const DEFAULT_PORTS: Record<DatabaseEngine, string> = {
   POSTGRESQL: "5432",
@@ -96,7 +114,7 @@ const DEFAULT_PORTS: Record<DatabaseEngine, string> = {
   SNOWFLAKE: "443",
 };
 
-const ALL_ENGINE_OPTIONS: Array<{ value: DatabaseEngine; label: string }> = [
+const ENGINE_OPTIONS: Array<{ value: DatabaseEngine; label: string }> = [
   { value: "POSTGRESQL", label: "PostgreSQL" },
   { value: "MYSQL", label: "MySQL" },
   { value: "REDSHIFT", label: "Redshift" },
@@ -104,13 +122,6 @@ const ALL_ENGINE_OPTIONS: Array<{ value: DatabaseEngine; label: string }> = [
   { value: "SQLSERVER", label: "SQL Server" },
   { value: "SNOWFLAKE", label: "Snowflake" },
 ];
-
-// Selectable engines: everything except those withheld pending validation. To
-// offer an engine again, remove it from PREVIEW_DATABASE_ENGINES (@coa/shared)
-// — no change is needed in this file.
-const ENGINE_OPTIONS = ALL_ENGINE_OPTIONS.filter(
-  (o) => !PREVIEW_DATABASE_ENGINES.has(o.value),
-);
 
 // Engine list shown in the JDBC source-kind description. Derived from
 // ENGINE_OPTIONS so it can never advertise an engine the picker doesn't offer.
@@ -146,6 +157,13 @@ interface Model {
   glueAthenaDataCatalogName: string;
   glueCrossAccountRoleArn: string;
   glueExternalId: string;
+  // How this Glue/Iceberg source's queries execute at serve time.
+  // "ATHENA" (default) or "REDSHIFT" (Redshift Serverless awsdatacatalog
+  // auto-mount). NOTE: this is the *execution engine* for a Glue source — it is
+  // NOT the same as onboarding a Redshift database (that's a JDBC source).
+  glueExecutionEngine: GlueExecutionEngine;
+  // Redshift Serverless workgroup — required only when glueExecutionEngine is REDSHIFT.
+  glueRedshiftWorkgroup: string;
   // JDBC database config
   jdbcName: string;
   dbEngine: DatabaseEngine | null;
@@ -189,6 +207,8 @@ const initialModel: Model = {
   glueAthenaDataCatalogName: "",
   glueCrossAccountRoleArn: "",
   glueExternalId: "",
+  glueExecutionEngine: "ATHENA",
+  glueRedshiftWorkgroup: "",
   jdbcName: "",
   dbEngine: null,
   dbHost: "",
@@ -239,6 +259,7 @@ interface ValidationErrors {
   glueCatalogId?: string;
   glueDatabaseName?: string;
   glueCrossAccountRoleArn?: string;
+  glueRedshiftWorkgroup?: string;
   jdbcName?: string;
   dbEngine?: string;
   dbHost?: string;
@@ -266,6 +287,14 @@ function validateStep2(
       errs.glueDatabaseName = "Database name is required.";
     const roleErr = validateCrossAccountRoleArn(model.glueCrossAccountRoleArn);
     if (roleErr) errs.glueCrossAccountRoleArn = roleErr;
+    // A Redshift-executed Glue source must name its workgroup — the
+    // backend cannot infer which Serverless workgroup to use.
+    if (
+      model.glueExecutionEngine === "REDSHIFT" &&
+      !model.glueRedshiftWorkgroup.trim()
+    )
+      errs.glueRedshiftWorkgroup =
+        "Redshift workgroup is required when the execution engine is Redshift.";
   } else if (model.sourceKind === "JDBC_DATABASE") {
     if (!model.jdbcName.trim()) errs.jdbcName = "Name is required.";
     if (!model.dbEngine) errs.dbEngine = "Select a database engine.";
@@ -404,10 +433,22 @@ export const ConnectSource: React.FC = () => {
               tableExcludeFilter:
                 model.glueTableExcludeFilter.trim() || undefined,
               athenaDataCatalogName:
-                model.glueAthenaDataCatalogName.trim() || undefined,
+                model.glueExecutionEngine === "REDSHIFT"
+                  ? undefined
+                  : model.glueAthenaDataCatalogName.trim() || undefined,
               crossAccountRoleArn:
                 model.glueCrossAccountRoleArn.trim() || undefined,
               externalId: model.glueExternalId.trim() || undefined,
+              // Only send executionEngine/redshiftWorkgroup when the
+              // user opts into Redshift — omitting them keeps ATHENA the default.
+              executionEngine:
+                model.glueExecutionEngine === "REDSHIFT"
+                  ? "REDSHIFT"
+                  : undefined,
+              redshiftWorkgroup:
+                model.glueExecutionEngine === "REDSHIFT"
+                  ? model.glueRedshiftWorkgroup.trim()
+                  : undefined,
             },
           },
         },
@@ -698,17 +739,61 @@ export const ConnectSource: React.FC = () => {
                   />
                 </FormField>
                 <FormField
-                  label="Athena DataCatalog name"
-                  description="Optional. Required for JDBC-backed Glue databases to enable federated queries."
+                  label="Execution engine"
+                  description="How this Glue/Iceberg source's queries run at serve time. Redshift runs them via Redshift Serverless (awsdatacatalog auto-mount) instead of Athena. This does NOT connect to a Redshift database — to query a Redshift cluster's own tables, onboard a JDBC source instead."
                 >
-                  <Input
-                    value={model.glueAthenaDataCatalogName}
-                    onChange={({ detail }) =>
-                      setField("glueAthenaDataCatalogName", detail.value)
+                  <Select
+                    selectedOption={
+                      GLUE_EXECUTION_ENGINE_OPTIONS.find(
+                        (o) => o.value === model.glueExecutionEngine,
+                      ) ?? null
                     }
-                    placeholder="my_federated_catalog"
+                    onChange={({ detail }) => {
+                      const selected = GLUE_EXECUTION_ENGINE_OPTIONS.find(
+                        (o) => o.value === detail.selectedOption.value,
+                      );
+                      if (selected)
+                        setField("glueExecutionEngine", selected.value);
+                    }}
+                    options={GLUE_EXECUTION_ENGINE_OPTIONS}
                   />
                 </FormField>
+                {model.glueExecutionEngine === "REDSHIFT" && (
+                  <FormField
+                    label={
+                      <>
+                        Redshift workgroup{" "}
+                        <Box variant="span" color="text-status-error">
+                          *
+                        </Box>
+                      </>
+                    }
+                    description="The Amazon Redshift Serverless workgroup that executes this source's queries."
+                    errorText={step2Errs.glueRedshiftWorkgroup}
+                  >
+                    <Input
+                      value={model.glueRedshiftWorkgroup}
+                      onChange={({ detail }) =>
+                        setField("glueRedshiftWorkgroup", detail.value)
+                      }
+                      placeholder="my-workgroup"
+                    />
+                  </FormField>
+                )}
+                {model.glueExecutionEngine !== "REDSHIFT" && (
+                  <FormField
+                    label="Athena DataCatalog name"
+                    description="Optional. Required for JDBC-backed Glue databases to enable federated queries."
+                  >
+                    <Input
+                      value={model.glueAthenaDataCatalogName}
+                      onChange={({ detail }) =>
+                        setField("glueAthenaDataCatalogName", detail.value)
+                      }
+                      placeholder="my_federated_catalog"
+                    />
+                  </FormField>
+                )}
                 <FormField
                   label="Cross-account role ARN"
                   description="Optional. For a Glue catalog in another account, the IAM role Context Ontology Accelerator assumes to read catalog metadata. Must be named {prefix}-datasource-access-*."
@@ -926,10 +1011,8 @@ export const ConnectSource: React.FC = () => {
                     placeholder="tmp_*|staging_*"
                   />
                 </FormField>
-                {/* Snowflake-only fields. Currently unreachable — SNOWFLAKE is in
-                    PREVIEW_DATABASE_ENGINES so it isn't offered in ENGINE_OPTIONS.
-                    Kept intact so removing that token is all it takes to restore
-                    the full Snowflake connect flow. */}
+                {/* Snowflake-specific fields — shown when the user selects
+                    SNOWFLAKE as the engine. */}
                 {model.dbEngine === "SNOWFLAKE" && (
                   <>
                     <FormField
