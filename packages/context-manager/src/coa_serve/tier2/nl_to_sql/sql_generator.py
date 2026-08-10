@@ -213,6 +213,7 @@ class SQLGenerator:
         evidence: str = "",
         embedding: list[float] | None = None,
         model_id: str | None = None,
+        dialect: str | None = None,
     ) -> NLtoSQLResult:
         """Run the NL-to-SQL pipeline: retrieve → expand → generate SQL.
 
@@ -226,6 +227,9 @@ class SQLGenerator:
             evidence: Optional domain hints appended to the question for retrieval.
             embedding: Pre-computed query embedding (avoids redundant embed call).
             model_id: Optional per-call LLM model override.
+            dialect: Optional per-call SQL dialect override (e.g. "postgresql", "athena").
+                When provided, overrides the instance default for this generation call,
+                ensuring the LLM generates SQL in the target source's dialect.
         """
         trace: list[dict[str, Any]] = []
 
@@ -334,7 +338,9 @@ class SQLGenerator:
         # Step 5: Generate SQL via LLM
         start = time.perf_counter()
         try:
-            sql, confidence = await self._generate_sql(question, ddl_context, evidence, model_id=model_id)
+            sql, confidence = await self._generate_sql(
+                question, ddl_context, evidence, model_id=model_id, dialect=dialect
+            )
             trace.append({"step": "generate_sql", "status": "ok", "ms": _ms(start), "confidence": confidence})
         except Exception as e:
             trace.append({"step": "generate_sql", "status": "error", "ms": _ms(start), "error": str(e)})
@@ -440,8 +446,16 @@ class SQLGenerator:
         ddl_context: str,
         evidence: str,
         model_id: str | None = None,
+        dialect: str | None = None,
     ) -> tuple[str, float]:
         """Call LLM to generate SQL from question and DDL context.
+
+        Args:
+            question: Natural language question.
+            ddl_context: Schema context (tables, columns, FKs).
+            evidence: Optional domain hints.
+            model_id: Optional per-call LLM model override.
+            dialect: Optional per-call SQL dialect override.
 
         Returns:
             Tuple of (sql_string, confidence_score).
@@ -472,9 +486,12 @@ class SQLGenerator:
             "correctly answers the question. Format: Confidence: X.X"
         )
 
+        # Use per-request dialect if provided, otherwise fall back to instance default
+        system_prompt = _build_system_prompt(dialect) if dialect else self._system_prompt
+
         result: ConverseResult = await self._llm.converse(
             prompt,
-            system=self._system_prompt,
+            system=system_prompt,
             max_tokens=1024,
             temperature=0,
             model_id=model_id,

@@ -106,14 +106,15 @@ class TestCompositeDispatch:
         assert result.rows[0]["engine"] == "jdbc"
 
     @pytest.mark.parametrize("engine", ["SNOWFLAKE", "ORACLE"])
-    async def test_withheld_engine_routes_athena_not_jdbc(self, engine):
-        """A withheld engine (PREVIEW_DATABASE_ENGINES) must never take the direct route.
+    async def test_no_direct_adapter_routes_athena_not_jdbc(self, engine):
+        """Engines without a direct-query adapter route through Athena federation.
 
-        Snowflake/Oracle have no adapter, so get_adapter hands back the PostgreSQL
-        fail-safe — taking the direct route would transpile Trino->postgres and run it
-        against the wrong engine. Athena federation speaks Trino natively and is the
-        route these sources already get from their ATHENA queryEngine; this asserts the
-        guard holds even with a stale queryEngine=JDBC on the record.
+        Snowflake and Oracle have no adapter in db_adapters, so get_adapter hands
+        back the PostgreSQL fail-safe — taking the direct route would transpile
+        Trino->postgres and run it against the wrong engine. Athena federation speaks
+        Trino natively and is the route these sources already get from their ATHENA
+        queryEngine; this asserts the guard holds even with a stale queryEngine=JDBC
+        on the record.
         """
         athena = _make_executor("athena")
         jdbc = _make_executor("jdbc")
@@ -556,3 +557,199 @@ class TestAthenaLimitInjection:
     def test_outer_limit_within_cap_unchanged(self):
         out = self._inject("SELECT id FROM orders LIMIT 10", 1000)
         assert out == "SELECT id FROM orders LIMIT 10"
+
+
+def _redshift_glue_registry(queryable=True, source_id="src-redshift"):
+    """Registry mock returning a Glue source that opted into Redshift execution
+    (sourceType=DATABASE, queryEngine=REDSHIFT)."""
+    reg = AsyncMock()
+    record = {
+        "sourceId": source_id,
+        "sourceType": "DATABASE",
+        "sourceSubType": "GLUE_DATABASE",
+        "queryEngine": "REDSHIFT",
+        "queryable": queryable,
+        "redshiftWorkgroup": "my-wg",
+        "athenaDatabase": "insurance_lake",
+    }
+    reg.get_source.return_value = record
+    reg.find_sole_database_source.return_value = record
+    return reg
+
+
+@pytest.mark.unit
+class TestRedshiftDispatch:
+    """Glue sources with queryEngine=REDSHIFT route to the Redshift executor."""
+
+    async def test_redshift_glue_source_routes_redshift(self):
+        athena = _make_executor("athena")
+        redshift = _make_executor("redshift")
+        comp = CompositeQueryExecutor(
+            athena_executor=athena,
+            redshift_executor=redshift,
+            sources_registry=_redshift_glue_registry(),
+        )
+        result = await comp.execute(
+            "SELECT id FROM awsdatacatalog.insurance_lake.claims",
+            namespace="ns",
+            data_source_id="src-redshift",
+        )
+        redshift.execute.assert_awaited_once()
+        athena.execute.assert_not_awaited()
+        assert result.rows[0]["engine"] == "redshift"
+
+    async def test_redshift_sole_source_no_id_routes_redshift(self):
+        """No explicit data_source_id: the namespace's SOLE Glue source with
+        queryEngine=REDSHIFT is resolved via find_sole_database_source → Redshift
+        (mirrors the JDBC sole-source path)."""
+        athena = _make_executor("athena")
+        redshift = _make_executor("redshift")
+        comp = CompositeQueryExecutor(
+            athena_executor=athena,
+            redshift_executor=redshift,
+            sources_registry=_redshift_glue_registry(),
+        )
+        await comp.execute(
+            "SELECT id FROM awsdatacatalog.insurance_lake.claims",
+            namespace="ns",
+            data_source_id="",
+        )
+        redshift.execute.assert_awaited_once()
+        athena.execute.assert_not_awaited()
+
+    async def test_no_redshift_executor_falls_back_to_athena(self):
+        """Without a Redshift executor wired, a REDSHIFT-engine Glue source → Athena
+        (deployed behaviour never regresses)."""
+        athena = _make_executor("athena")
+        comp = CompositeQueryExecutor(
+            athena_executor=athena,
+            redshift_executor=None,
+            sources_registry=_redshift_glue_registry(),
+        )
+        await comp.execute(
+            "SELECT id FROM awsdatacatalog.insurance_lake.claims",
+            namespace="ns",
+            data_source_id="src-redshift",
+        )
+        athena.execute.assert_awaited_once()
+
+    async def test_athena_glue_source_never_routes_redshift(self):
+        """A normal ATHENA Glue source is untouched by the Redshift path."""
+        athena = _make_executor("athena")
+        redshift = _make_executor("redshift")
+        comp = CompositeQueryExecutor(
+            athena_executor=athena,
+            redshift_executor=redshift,
+            sources_registry=_glue_registry(),
+        )
+        await comp.execute("SELECT id FROM mydb.public.orders", namespace="ns", data_source_id="mydb")
+        athena.execute.assert_awaited_once()
+        redshift.execute.assert_not_awaited()
+
+    async def test_redshift_not_yet_queryable_falls_back_to_athena(self):
+        athena = _make_executor("athena")
+        redshift = _make_executor("redshift")
+        comp = CompositeQueryExecutor(
+            athena_executor=athena,
+            redshift_executor=redshift,
+            sources_registry=_redshift_glue_registry(queryable=False),
+        )
+        await comp.execute(
+            "SELECT id FROM awsdatacatalog.insurance_lake.claims",
+            namespace="ns",
+            data_source_id="src-redshift",
+        )
+        athena.execute.assert_awaited_once()
+        redshift.execute.assert_not_awaited()
+
+    async def test_redshift_registry_error_fails_safe_to_athena(self):
+        athena = _make_executor("athena")
+        redshift = _make_executor("redshift")
+        reg = AsyncMock()
+        reg.get_source.side_effect = RuntimeError("ddb throttled")
+        comp = CompositeQueryExecutor(athena_executor=athena, redshift_executor=redshift, sources_registry=reg)
+        await comp.execute(
+            "SELECT id FROM awsdatacatalog.insurance_lake.claims",
+            namespace="ns",
+            data_source_id="src-redshift",
+        )
+        athena.execute.assert_awaited_once()
+        redshift.execute.assert_not_awaited()
+
+    async def test_jdbc_still_wins_over_redshift_for_jdbc_source(self):
+        """A JDBC source routes to JDBC; the Redshift arm only handles REDSHIFT sources."""
+        athena = _make_executor("athena")
+        jdbc = _make_executor("jdbc")
+        redshift = _make_executor("redshift")
+        comp = CompositeQueryExecutor(
+            athena_executor=athena,
+            source_db_executor=jdbc,
+            redshift_executor=redshift,
+            sources_registry=_jdbc_registry(),
+        )
+        await comp.execute("SELECT id FROM mydb.public.orders", namespace="ns", data_source_id="mydb")
+        jdbc.execute.assert_awaited_once()
+        redshift.execute.assert_not_awaited()
+        athena.execute.assert_not_awaited()
+
+
+@pytest.mark.unit
+class TestResolveTargetDialect:
+    """Tests for resolve_target_dialect (used by NL→SQL to generate in target dialect)."""
+
+    async def test_explicit_postgresql_source_returns_postgres(self):
+        """When a PostgreSQL source ID is provided, returns 'postgres'."""
+        comp = CompositeQueryExecutor(
+            athena_executor=_make_executor("athena"),
+            sources_registry=_jdbc_registry(engine="POSTGRESQL"),
+        )
+        dialect = await comp.resolve_target_dialect("ns", data_source_id="mydb")
+        assert dialect == "postgres"
+
+    async def test_explicit_redshift_source_returns_redshift(self):
+        """When a Redshift source ID is provided, returns 'redshift'."""
+        comp = CompositeQueryExecutor(
+            athena_executor=_make_executor("athena"),
+            sources_registry=_jdbc_registry(engine="REDSHIFT"),
+        )
+        dialect = await comp.resolve_target_dialect("ns", data_source_id="mydb")
+        assert dialect == "redshift"
+
+    async def test_sole_jdbc_source_returns_its_dialect(self):
+        """When no source ID provided, but namespace has a sole JDBC source, returns its dialect."""
+        reg = _jdbc_registry(engine="POSTGRESQL")
+        reg.find_sole_database_source = AsyncMock(return_value=reg.get_source.return_value)
+        comp = CompositeQueryExecutor(
+            athena_executor=_make_executor("athena"),
+            sources_registry=reg,
+        )
+        dialect = await comp.resolve_target_dialect("ns", data_source_id="")
+        assert dialect == "postgres"
+
+    async def test_no_sources_returns_athena(self):
+        """When sources registry is not configured, returns 'athena'."""
+        comp = CompositeQueryExecutor(
+            athena_executor=_make_executor("athena"),
+        )
+        dialect = await comp.resolve_target_dialect("ns", data_source_id="")
+        assert dialect == "athena"
+
+    async def test_multiple_sources_returns_athena(self):
+        """When namespace has multiple sources, returns 'athena' for cross-source queries."""
+        reg = _jdbc_registry()
+        reg.find_sole_database_source = AsyncMock(return_value=None)  # multiple sources
+        comp = CompositeQueryExecutor(
+            athena_executor=_make_executor("athena"),
+            sources_registry=reg,
+        )
+        dialect = await comp.resolve_target_dialect("ns", data_source_id="")
+        assert dialect == "athena"
+
+    async def test_glue_source_returns_athena(self):
+        """Glue sources (queryEngine=ATHENA) return 'athena'."""
+        comp = CompositeQueryExecutor(
+            athena_executor=_make_executor("athena"),
+            sources_registry=_glue_registry(),
+        )
+        dialect = await comp.resolve_target_dialect("ns", data_source_id="glue-src")
+        assert dialect == "athena"

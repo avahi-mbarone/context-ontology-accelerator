@@ -30,6 +30,7 @@ import structlog
 from botocore.exceptions import ClientError
 from coa_common.metadata_store import SMUSClient
 from coa_common.response import api_response, iso_to_epoch
+from coa_control_plane_server.models.glue_execution_engine import GlueExecutionEngine
 from coa_control_plane_server.models.query_engine import QueryEngine
 from coa_control_plane_server.models.source_status import SourceStatus
 from coa_control_plane_server.models.source_sub_type import SourceSubType
@@ -109,14 +110,22 @@ def _resolve_query_engine(glue_config: Any, jdbc_config: Any) -> QueryEngine:
     """Preferred single-source execution engine for the source.
 
     ``JDBC`` (direct, low-latency) only when a direct dialect is implemented for
-    the engine (today PostgreSQL/Redshift). Glue, and JDBC engines without a
-    direct path yet, go through Athena — so serve never routes to a direct path
-    that doesn't exist. Multi-source queries always use Athena regardless.
+    the engine (today PostgreSQL/Redshift). ``REDSHIFT`` when a Glue/Iceberg
+    source opts in to Redshift Serverless (`awsdatacatalog` auto-mount) via
+    ``GlueConfiguration.executionEngine`` — else Glue defaults to Athena. JDBC
+    engines without a direct path also go through Athena — so serve never routes
+    to a path that doesn't exist. Multi-source queries always use Athena.
     """
     if jdbc_config is not None:
         engine = getattr(jdbc_config.engine, "value", jdbc_config.engine) or ""
         if str(engine).upper() in DIRECT_QUERY_ENGINES:
             return QueryEngine.JDBC
+        return QueryEngine.ATHENA
+    if glue_config is not None:
+        execution_engine = getattr(glue_config, "execution_engine", None)
+        engine = getattr(execution_engine, "value", execution_engine) or ""
+        if str(engine).upper() == GlueExecutionEngine.REDSHIFT.value:
+            return QueryEngine.REDSHIFT
     return QueryEngine.ATHENA
 
 
@@ -130,6 +139,20 @@ def _create_database_source(db_req: Any, namespace_id: str) -> dict[str, Any]:
     jdbc_config = db_req.jdbc_configuration
     if not glue_config and not jdbc_config:
         return api_response(400, {"error": "glueConfiguration or jdbcConfiguration is required"})
+
+    # A Glue source opting into Redshift execution must name the workgroup that
+    # runs its queries — the backend cannot infer which Serverless workgroup to
+    # use. Athena (the default) needs no workgroup.
+    if glue_config is not None:
+        execution_engine = getattr(glue_config, "execution_engine", None)
+        engine_value = getattr(execution_engine, "value", execution_engine) or ""
+        if str(engine_value).upper() == GlueExecutionEngine.REDSHIFT.value and not getattr(
+            glue_config, "redshift_workgroup", None
+        ):
+            return api_response(
+                400,
+                {"error": "redshiftWorkgroup is required when executionEngine is REDSHIFT"},
+            )
 
     sub_type = SourceSubType.JDBC_DATABASE if jdbc_config else SourceSubType.GLUE_DATABASE
     source_id = str(uuid.uuid4())
@@ -181,6 +204,13 @@ def _create_database_source(db_req: Any, namespace_id: str) -> dict[str, Any]:
     # Persist athenaDataCatalogName at top level for Glue sources (used by query layer)
     if glue_config and getattr(glue_config, "athena_data_catalog_name", None):
         item["athenaDataCatalogName"] = glue_config.athena_data_catalog_name
+    # Persist redshiftWorkgroup at top level ONLY for Glue sources that actually
+    # execute via Redshift (queryEngine=REDSHIFT). Read by serve's Redshift
+    # executor the way athenaCatalog/athenaDatabase are read by the Athena
+    # executor. A workgroup on an ATHENA source is meaningless, so it is
+    # not persisted — keeps the record honest and avoids a dead column.
+    if glue_config and item["queryEngine"] == QueryEngine.REDSHIFT and getattr(glue_config, "redshift_workgroup", None):
+        item["redshiftWorkgroup"] = glue_config.redshift_workgroup
 
     try:
         _get_dao().put(item)

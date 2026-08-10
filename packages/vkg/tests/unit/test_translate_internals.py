@@ -82,6 +82,238 @@ def test_extract_sql_returns_raw_when_no_select():
     assert translate_server._extract_sql(raw) == raw
 
 
+# --- _parse_projection_header ------------------------------------------------
+#
+# The `raw` fixtures below are VERBATIM output captured from Ontop 5.5.0's
+# /ontop/reformulate (the version pinned in packages/vkg/Dockerfile) against a
+# 3-table employees/projects/project_assignments schema. Do not hand-simplify
+# them: the SQL SELECT list order, the CONSTRUCT term-definition syntax and the
+# NATIVE alias list are exactly what the parser contracts on.
+
+# "Who worked on project Spaceballs?" — the query from issue #829.
+# Note the SELECT list order: the selected variable's column (FULL_NAME1m3) is
+# SECOND. EMPLOYEE_ID1m1 comes first. A positional var→alias mapping puts
+# employee IDs under an "employeeName" header.
+_GT_SPACEBALLS = """ans1(employeeName)
+CONSTRUCT [employeeName] [employeeName/RDF(CHARACTER VARYINGToTEXT(FULL_NAME1m3),xsd:string)]
+   NATIVE [EMPLOYEE_ID1m1, FULL_NAME1m3, ID1m7, TITLE1m4, v3]
+SELECT V2."EMPLOYEE_ID" AS "EMPLOYEE_ID1m1", V3."FULL_NAME" AS "FULL_NAME1m3", V1."ID" AS "ID1m7", \
+V1."TITLE" AS "TITLE1m4", V3."FULL_NAME" AS "v3"
+FROM "PROJECTS" V1, "PROJECT_ASSIGNMENTS" V2, "EMPLOYEES" V3
+WHERE (LOWER(V1."TITLE") = 'spaceballs' AND V1."ID" = V2."PROJECT_ID" AND V2."EMPLOYEE_ID" = V3."ID")
+ORDER BY V3."FULL_NAME" NULLS FIRST"""
+
+_SPARQL_SPACEBALLS = """PREFIX ind: <http://example.org/ind#>
+SELECT ?employeeName
+WHERE {
+  ?project a ind:Projects ; ind:projects_title ?title .
+  FILTER(LCASE(?title) = "spaceballs")
+  ?assignment a ind:ProjectAssignments ;
+    ind:projectAssignments_projectId ?project ;
+    ind:projectAssignments_employeeId ?employee .
+  ?employee a ind:Employees ; ind:employees_fullName ?employeeName .
+}
+ORDER BY ?employeeName"""
+
+
+def test_parse_projection_header_maps_var_to_its_own_column_not_by_position():
+    """The selected var's column is 2nd in the SQL SELECT list; position != mapping."""
+    proj = translate_server._parse_projection_header(_GT_SPACEBALLS, _SPARQL_SPACEBALLS)
+    assert proj is not None
+    assert proj["selectVars"] == ["employeeName"]
+    assert proj["varToColumn"] == {"employeeName": "FULL_NAME1m3"}
+    assert proj["distinct"] is False
+
+
+def test_parse_projection_header_multiple_vars_skips_intermediate_columns():
+    """Multi-var: join-key columns interleave the selected ones and are skipped."""
+    raw = """ans1(employeeName, projectTitle)
+CONSTRUCT [employeeName, projectTitle] [employeeName/RDF(CHARACTER VARYINGToTEXT(FULL_NAME1m3),xsd:string), \
+projectTitle/RDF(CHARACTER VARYINGToTEXT(TITLE1m4),xsd:string)]
+   NATIVE [EMPLOYEE_ID1m1, FULL_NAME1m3, ID1m7, TITLE1m4]
+SELECT V2."EMPLOYEE_ID" AS "EMPLOYEE_ID1m1", V3."FULL_NAME" AS "FULL_NAME1m3", V1."ID" AS "ID1m7", \
+V1."TITLE" AS "TITLE1m4"
+FROM "PROJECTS" V1, "PROJECT_ASSIGNMENTS" V2, "EMPLOYEES" V3
+WHERE (V1."ID" = V2."PROJECT_ID" AND V2."EMPLOYEE_ID" = V3."ID")"""
+    sparql = "SELECT ?employeeName ?projectTitle WHERE { ?e a <x> }"
+    proj = translate_server._parse_projection_header(raw, sparql)
+    assert proj is not None
+    assert proj["selectVars"] == ["employeeName", "projectTitle"]
+    assert proj["varToColumn"] == {"employeeName": "FULL_NAME1m3", "projectTitle": "TITLE1m4"}
+
+
+def test_parse_projection_header_iri_var_maps_to_its_id_column():
+    """An IRI-valued var maps to the column inside its IRI template.
+
+    The CONSTRUCT definitions are keyed by name and are NOT in ans1 order here:
+    employeeName is defined before employee.
+    """
+    raw = """ans1(employee, employeeName)
+CONSTRUCT [employee, employeeName] [employeeName/RDF(CHARACTER VARYINGToTEXT(FULL_NAME1m3),xsd:string), \
+employee/RDF(http://example.org/ind#employee{}(CHARACTER VARYINGToTEXT(ID1m8)),IRI)]
+   NATIVE [FULL_NAME1m3, ID1m8]
+SELECT V1."FULL_NAME" AS "FULL_NAME1m3", V1."ID" AS "ID1m8"
+FROM "EMPLOYEES" V1"""
+    sparql = "SELECT ?employee ?employeeName WHERE { ?employee a <x> }"
+    proj = translate_server._parse_projection_header(raw, sparql)
+    assert proj is not None
+    assert proj["varToColumn"] == {"employeeName": "FULL_NAME1m3", "employee": "ID1m8"}
+
+
+def test_parse_projection_header_aggregate_maps_to_synthetic_column():
+    """COUNT(...) projects to Ontop's synthetic v0 alias."""
+    raw = """ans1(n)
+CONSTRUCT [n] [n/RDF(BIGINTToTEXT(v0),xsd:integer)]
+   NATIVE [v0]
+SELECT COUNT(*) AS "v0"
+FROM "EMPLOYEES" V1"""
+    proj = translate_server._parse_projection_header(raw, "SELECT (COUNT(?e) AS ?n) WHERE { ?e a <x> }")
+    assert proj is not None
+    assert proj["varToColumn"] == {"n": "v0"}
+
+
+def test_parse_projection_header_distinct_read_from_sparql():
+    """SPARQL SELECT DISTINCT sets the flag (Ontop also emits SQL DISTINCT here)."""
+    raw = """ans1(employeeName)
+CONSTRUCT [employeeName] [employeeName/RDF(CHARACTER VARYINGToTEXT(FULL_NAME1m3),xsd:string)]
+   NATIVE [FULL_NAME1m3]
+SELECT DISTINCT V3."FULL_NAME" AS "FULL_NAME1m3"
+FROM "PROJECTS" V1, "PROJECT_ASSIGNMENTS" V2, "EMPLOYEES" V3"""
+    sparql = 'SELECT DISTINCT ?employeeName WHERE { ?e <p> ?employeeName . FILTER(?t = "spaceballs") }'
+    proj = translate_server._parse_projection_header(raw, sparql)
+    assert proj is not None
+    assert proj["distinct"] is True
+
+
+def test_parse_projection_header_sql_distinct_without_sparql_distinct_is_a_bag():
+    """Ontop emits SQL DISTINCT for its own reasons — must NOT imply SPARQL DISTINCT.
+
+    Verbatim Ontop output for a plain `SELECT ?asg ?label`: Ontop adds SQL
+    DISTINCT while de-duplicating rows behind a composite-key IRI template.
+    Treating that as SPARQL DISTINCT would drop legitimate duplicate solutions.
+    """
+    raw = """ans1(asg, label)
+CONSTRUCT [asg, label] [asg/RDF(v0,IRI), label/RDF(CHARACTER VARYINGToTEXT(ID1m5),xsd:string)]
+   NATIVE [ID1m5, v0]
+SELECT DISTINCT V2."ID" AS "ID1m5", ('http://example.org/ind#asg' || V1."PROJECT_ID" || '-' || \
+V1."EMPLOYEE_ID") AS "v0"
+FROM "PROJECT_ASSIGNMENTS" V1, "PROJECT_ASSIGNMENTS" V2"""
+    sparql = "SELECT ?asg ?label WHERE { ?asg a <x> ; <p> ?label . }"
+    proj = translate_server._parse_projection_header(raw, sparql)
+    assert proj is not None
+    assert proj["varToColumn"] == {"asg": "v0", "label": "ID1m5"}
+    assert proj["distinct"] is False
+
+
+def test_parse_projection_header_reduced_dedupes():
+    """SPARQL REDUCED permits dedup, so the flag is set."""
+    raw = """ans1(x)
+CONSTRUCT [x] [x/RDF(CHARACTER VARYINGToTEXT(ID1m1),xsd:string)]
+   NATIVE [ID1m1]
+SELECT V1."ID" AS "ID1m1" FROM "T" V1"""
+    proj = translate_server._parse_projection_header(raw, "SELECT REDUCED ?x WHERE { ?x a <y> }")
+    assert proj is not None
+    assert proj["distinct"] is True
+
+
+def test_parse_projection_header_missing_ans1_returns_none():
+    raw = "SELECT * FROM table"
+    assert translate_server._parse_projection_header(raw, "SELECT ?x WHERE { ?x a <y> }") is None
+
+
+def test_parse_projection_header_missing_construct_returns_none():
+    raw = "ans1(x)\n   NATIVE [ID1m1]\nSELECT * FROM table"
+    assert translate_server._parse_projection_header(raw, "SELECT ?x WHERE { ?x a <y> }") is None
+
+
+def test_parse_projection_header_missing_native_returns_none():
+    raw = 'ans1(x)\nCONSTRUCT [x] [x/RDF(ID1m1,xsd:string)]\nSELECT V1."ID" AS "ID1m1" FROM "T" V1'
+    assert translate_server._parse_projection_header(raw, "SELECT ?x WHERE { ?x a <y> }") is None
+
+
+def test_parse_projection_header_unresolvable_var_returns_none():
+    """A var whose definition references no known alias degrades the whole projection.
+
+    Mapping only the resolvable vars would render the rest as an all-NULL
+    column under a correct-looking header — worse than showing SQL aliases.
+    """
+    raw = """ans1(x, y)
+CONSTRUCT [x, y] [x/RDF(CHARACTER VARYINGToTEXT(ID1m1),xsd:string), y/RDF("constant",xsd:string)]
+   NATIVE [ID1m1]
+SELECT V1."ID" AS "ID1m1" FROM "T" V1"""
+    assert translate_server._parse_projection_header(raw, "SELECT ?x ?y WHERE { ?x a <y> }") is None
+
+
+def test_parse_projection_header_multi_column_var_returns_none():
+    """A var composed from several columns has no single source column."""
+    raw = """ans1(x)
+CONSTRUCT [x] [x/RDF(CONCAT(A1m1,B1m2),xsd:string)]
+   NATIVE [A1m1, B1m2]
+SELECT V1."A" AS "A1m1", V1."B" AS "B1m2" FROM "T" V1"""
+    assert translate_server._parse_projection_header(raw, "SELECT ?x WHERE { ?x a <y> }") is None
+
+
+# --- projection-drop observability -------------------------------------------
+#
+# A dropped projection silently reverts the namespace to raw SQL aliases (the
+# original bug). Each cause must name itself in the log, or an operator has no
+# way to tell --dev-disabled from an Ontop format change from a parser defect.
+
+_SELECT_SPARQL = "SELECT ?x WHERE { ?x a <y> }"
+
+
+@pytest.mark.parametrize(
+    "case,raw,expect_in_message",
+    [
+        ("missing ans1", "SELECT * FROM table", "ans1"),
+        ("empty ans1 vars", "ans1()\nSELECT * FROM t", "ans1"),
+        ("missing native", 'ans1(x)\nCONSTRUCT [x] [x/RDF(ID1m1,xsd:string)]\nSELECT 1 AS "ID1m1"', "NATIVE"),
+        ("empty native", "ans1(x)\nCONSTRUCT [x] [x/RDF(ID1m1,xsd:string)]\n   NATIVE []\nSELECT 1", "NATIVE"),
+        ("missing construct", "ans1(x)\n   NATIVE [ID1m1]\nSELECT * FROM table", "CONSTRUCT"),
+    ],
+)
+def test_parse_projection_header_logs_reason_for_each_drop(case, raw, expect_in_message, caplog):
+    """Every unparseable-header path names its cause at warning level."""
+    with caplog.at_level("WARNING", logger=translate_server.logger.name):
+        assert translate_server._parse_projection_header(raw, _SELECT_SPARQL) is None
+    messages = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert messages, f"{case}: dropped the projection without logging"
+    assert any(expect_in_message in m for m in messages), f"{case}: cause not named in {messages}"
+
+
+def test_parse_projection_header_logs_unresolved_variable_names(caplog):
+    """The unresolvable-var drop names the offending variables.
+
+    This is the one drop with a common benign cause (a constant-folded FILTER
+    term references no alias), so the message must distinguish it from a bug.
+    """
+    raw = """ans1(x, y)
+CONSTRUCT [x, y] [x/RDF(CHARACTER VARYINGToTEXT(ID1m1),xsd:string), y/RDF("constant",xsd:string)]
+   NATIVE [ID1m1]
+SELECT V1."ID" AS "ID1m1" FROM "T" V1"""
+    with caplog.at_level("WARNING", logger=translate_server.logger.name):
+        assert translate_server._parse_projection_header(raw, "SELECT ?x ?y WHERE { ?x a <y> }") is None
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("y" in m for m in warnings), f"unresolved var not named in {warnings}"
+    # x resolved fine; only y should be reported as unresolved.
+    assert not any("x, y" in m for m in warnings), f"reported a resolved var as unresolved: {warnings}"
+
+
+def test_parse_projection_header_non_select_does_not_warn(caplog):
+    """ASK/CONSTRUCT have no ans1 header by design — must not spam warnings."""
+    with caplog.at_level("DEBUG", logger=translate_server.logger.name):
+        assert translate_server._parse_projection_header("true", "ASK { ?x a <y> }") is None
+    assert not [r for r in caplog.records if r.levelname == "WARNING"], "non-SELECT query logged a warning"
+
+
+def test_extract_sql_logs_when_no_statement_found(caplog):
+    """An unrecognised blob is returned as-is; the cause must be visible."""
+    with caplog.at_level("WARNING", logger=translate_server.logger.name):
+        out = translate_server._extract_sql("ans1(x)\nsome unexpected output")
+    assert out == "ans1(x)\nsome unexpected output"
+    assert [r for r in caplog.records if r.levelname == "WARNING"], "returned raw blob without logging"
+
+
 # --- _extract_table_refs -----------------------------------------------------
 
 
@@ -255,6 +487,29 @@ def test_translate_sparql_happy_path(monkeypatch):
     assert out["ontologyVersion"] == "9.9.9"
     assert out["sourceTableRefs"] == ["customer"]
     assert out["datasourceRouting"] == {"customer": {"datasourceId": "ds1"}}
+
+
+def test_translate_sparql_includes_projection_when_header_present(monkeypatch):
+    translate_server._table_routing = {}
+    translate_server._ontology_version = "1.0.0"
+    monkeypatch.setattr(
+        translate_server.urllib.request, "urlopen", lambda *a, **k: _fake_ontop_response(_GT_SPACEBALLS)
+    )
+    out = translate_server._translate_sparql(_SPARQL_SPACEBALLS, "trino")
+    assert "projection" in out
+    proj = out["projection"]
+    assert proj["selectVars"] == ["employeeName"]
+    assert proj["varToColumn"] == {"employeeName": "FULL_NAME1m3"}
+    assert proj["distinct"] is False
+
+
+def test_translate_sparql_omits_projection_when_header_unparseable(monkeypatch):
+    translate_server._table_routing = {}
+    # No ans1 header — projection should be None/absent
+    body = "SELECT t0.name FROM customer t0"
+    monkeypatch.setattr(translate_server.urllib.request, "urlopen", lambda *a, **k: _fake_ontop_response(body))
+    out = translate_server._translate_sparql("q", "trino")
+    assert "projection" not in out
 
 
 def test_translate_sparql_h2_dialect_skips_transpile(monkeypatch):
