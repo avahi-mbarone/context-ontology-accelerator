@@ -326,12 +326,41 @@ export class SourcesStack extends SCLStack {
         resources: ["*"],
       }),
     );
-    // Mutating ENI actions — Glue's managed connector provisioner validates the
-    // connection by creating ENIs and may access subnets beyond the explicitly
-    // configured connector subnet (e.g. VPC endpoint subnets for service
-    // communication). Scoping to specific subnets causes "Unable to access VPC"
-    // failures. Use wildcard for subnet resources while keeping SG and ENI scoped
-    // to the account.
+    // Mutating ENI actions — MUST be `*`, not resource-scoped.
+    //
+    // Glue's managed connector runs a PRE-FLIGHT authorization check before it
+    // touches any real ENI: it dry-runs CreateNetworkInterface,
+    // DescribeNetworkInterfaces and DeleteNetworkInterface. That check authorizes
+    // against the WILDCARD resource `arn:aws:ec2:<region>:<account>:*/*`, which no
+    // enumeration of concrete resource types can satisfy. Captured from CloudTrail
+    // in a failing account (2026-08-06):
+    //
+    //   ec2:DeleteNetworkInterface  Client.UnauthorizedOperation
+    //   "...is not authorized to perform: ec2:DeleteNetworkInterface on resource:
+    //    arn:aws:ec2:us-east-1:<acct>:*/* because no identity-based policy allows
+    //    the ec2:DeleteNetworkInterface action"
+    //
+    // The connection is then reported as
+    //   "Unable to access VPC provided in the connection. Please check SubnetId and
+    //    SecurityGroup passed in the request and the policies and trust
+    //    relationships on the IAM role."
+    // — a generic message that names the subnet and SG and never mentions which
+    // action was denied, which is why this was repeatedly misdiagnosed as a
+    // networking problem. It is not: the SG, subnet, route table and peering are
+    // all irrelevant to this failure. Verified by experiment in the failing
+    // account: 4 consecutive connections FAILED with the scoped policy, and one
+    // created ~10s after adding these actions on `*` reached READY.
+    //
+    // AWS's own managed policy for Glue (`AWSGlueServiceRole`) grants
+    // CreateNetworkInterface / DeleteNetworkInterface / DescribeNetworkInterfaces
+    // on `Resource: ["*"]` for exactly this reason, so this matches the documented
+    // service contract rather than loosening past it.
+    //
+    // CAUTION when tightening: Glue CACHES a successful validation per
+    // (role, VPC, subnet, security group). After one success, later connections
+    // skip the pre-flight and keep succeeding even if the policy is narrowed
+    // again — so a narrowing looks safe in a warm account and only breaks the
+    // next environment built from scratch. Test any change here in a fresh VPC.
     federatedCatalogRole.addToPolicy(
       new iam.PolicyStatement({
         sid: "Ec2NetworkInterfaceManagement",
@@ -340,11 +369,7 @@ export class SourcesStack extends SCLStack {
           "ec2:DeleteNetworkInterface",
           "ec2:CreateTags",
         ],
-        resources: [
-          `arn:aws:ec2:${this.region}:${this.account}:network-interface/*`,
-          `arn:aws:ec2:${this.region}:${this.account}:subnet/*`,
-          `arn:aws:ec2:${this.region}:${this.account}:security-group/*`,
-        ],
+        resources: ["*"],
       }),
     );
 
@@ -850,6 +875,18 @@ export class SourcesStack extends SCLStack {
         NAMESPACES_TABLE: namespacesTableName,
         SMUS_DOMAIN_ID: domainId,
         PROJECT_ACCESS_ROLE_ARN: projectAccessRoleArn,
+        // ECS does not inject a region into task containers, so without this
+        // resolve_region() falls back to us-east-1 and every Bedrock call —
+        // including ApplyGuardrail — targets the wrong region. In a non-us-east-1
+        // deployment ApplyGuardrail is then DENIED by the region-scoped IAM
+        // policy below and screening fails open. Guardrail metrics would also
+        // land in the wrong region's namespace.
+        AWS_DEFAULT_REGION: cdk.Aws.REGION,
+        BEDROCK_REGION: cdk.Aws.REGION,
+        // Without this the enrichment task's Bedrock calls run UNGUARDED —
+        // table_enricher._resolve_guardrail_id() reads this param name to look
+        // up the guardrail id. Same param the ontology task reads (#111 AC5).
+        GUARDRAIL_SSM_PARAM: `${ssmPrefix}/bedrock/guardrail-id`,
       },
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: "sources-db-enrichment",
@@ -869,6 +906,35 @@ export class SourcesStack extends SCLStack {
           `arn:aws:bedrock:*::foundation-model/*`,
           `arn:aws:bedrock:*:${this.account}:inference-profile/*`,
         ],
+      }),
+    );
+    // Guardrail enforcement on enrichment prompts, plus the SSM read that
+    // resolves the guardrail id from GUARDRAIL_SSM_PARAM above (#111 AC6).
+    dbEnrichmentTaskDef.taskRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        actions: ["bedrock:ApplyGuardrail"],
+        resources: [
+          `arn:aws:bedrock:${this.region}:${this.account}:guardrail/*`,
+        ],
+      }),
+    );
+    dbEnrichmentTaskDef.taskRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        actions: ["ssm:GetParameter"],
+        resources: [
+          `arn:aws:ssm:${this.region}:${this.account}:parameter${ssmPrefix}/bedrock/guardrail-id`,
+        ],
+      }),
+    );
+    // Guardrail decision metrics (#111 AC10) go out via PutMetricData, matching
+    // how this task publishes its other custom metrics, so it needs the grant.
+    dbEnrichmentTaskDef.taskRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        actions: ["cloudwatch:PutMetricData"],
+        resources: ["*"],
+        conditions: {
+          StringEquals: { "cloudwatch:namespace": "COA/Guardrails" },
+        },
       }),
     );
     dbEnrichmentTaskDef.taskRole.addToPrincipalPolicy(
@@ -1276,9 +1342,13 @@ export class SourcesStack extends SCLStack {
     );
 
     // ── KgBuild ECS Task ─────────────────────────────────────────────
+    // Container Insights on: kg-build tasks have died with no exit code and no
+    // memory data, leaving OOM impossible to confirm or rule out. Task-level
+    // memory/CPU metrics are the only way to tell an OOM kill apart from a hang.
     const kgBuildCluster = new ecs.Cluster(this, "SourcesKgBuildCluster", {
       clusterName: this.prefixed("sources-doc-kg-build-cluster"),
       vpc,
+      containerInsightsV2: ecs.ContainerInsights.ENABLED,
     });
     const kgBuildLogGroup = new logs.LogGroup(this, "SourcesKgBuildLogGroup", {
       logGroupName: `/ecs/${this.prefixed("sources-doc-kg-build")}`,
@@ -1342,6 +1412,13 @@ export class SourcesStack extends SCLStack {
         NEPTUNE_ENDPOINT: neptuneEndpoint,
         OPENSEARCH_ENDPOINT: opensearchEndpoint,
         BATCH_INFERENCE_ROLE_ARN: batchInferenceRole.roleArn,
+        // ECS does not inject a region into task containers, so without this
+        // resolve_region() falls back to us-east-1 and the ingestion-time
+        // ApplyGuardrail call below targets the wrong region — DENIED by the
+        // region-scoped IAM policy, and graph_build screening fails OPEN
+        // (screens nothing). Guardrail metrics would also land in us-east-1.
+        AWS_DEFAULT_REGION: cdk.Aws.REGION,
+        BEDROCK_REGION: cdk.Aws.REGION,
         // Content screening: retrieval guardrail for ingestion-time ApplyGuardrail
         // (SDO-188). Empty string disables screening gracefully.
         RETRIEVAL_GUARDRAIL_ID: ssm.StringParameter.valueForStringParameter(
@@ -1365,6 +1442,12 @@ export class SourcesStack extends SCLStack {
         // is not the bottleneck, which is why the box stays at 4 vCPU.
         EXTRACTION_NUM_WORKERS: "4",
         BUILD_NUM_WORKERS: "4",
+        // graphrag-toolkit logs via stdlib logging. INFO surfaces the per-batch
+        // "Running build pipeline [num_workers, job_sizes, batch_write_size]"
+        // line — the only report of effective write parallelism. DEBUG adds the
+        // batch-write retry ladder but is very verbose; raise it temporarily when
+        // diagnosing write contention, don't leave it on.
+        DEPENDENCY_LOG_LEVEL: "INFO",
       },
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: "sources-doc-kg-build",
@@ -1408,6 +1491,17 @@ export class SourcesStack extends SCLStack {
         resources: [
           `arn:aws:bedrock:${this.region}:${this.account}:guardrail/*`,
         ],
+      }),
+    );
+    // Guardrail decision metrics (#111 AC10) go out via PutMetricData, matching
+    // how this task publishes its other custom metrics, so it needs the grant.
+    kgBuildTaskDef.taskRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        actions: ["cloudwatch:PutMetricData"],
+        resources: ["*"],
+        conditions: {
+          StringEquals: { "cloudwatch:namespace": "COA/Guardrails" },
+        },
       }),
     );
     // Bedrock batch job actions scoped to the same model ARN patterns as InvokeModel above.

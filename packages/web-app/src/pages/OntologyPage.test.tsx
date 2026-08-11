@@ -660,6 +660,81 @@ describe("Induce Ontology modal — grounding is available for both strategies",
     expect(inducedOpt).toHaveAttribute("aria-selected", "true");
     expect(foundationalOpt).toHaveAttribute("aria-selected", "false");
   });
+
+  it("surfaces not-ready ontologies as disabled with a per-row status label (issue #540)", async () => {
+    // A namespace with one ready, one still-embedding, one failed, and one
+    // legacy (no parse_status but embedded) ontology. Before #540 the three
+    // non-ready rows were the still-embedding and failed ones — silently
+    // dropped from the dropdown with no signal. Now every loaded ontology is
+    // SHOWN; readiness (selectability) is derived from ontologyIngestState so
+    // it can never disagree with the Ontologies-list StatusIndicator.
+    listOntologies.mockResolvedValue([
+      record({
+        ontology_id: "http://ns/ready",
+        uri: "http://ns/ready",
+        title: "Ready Onto",
+        ontology_type: "foundational",
+        parse_status: "ok",
+        embedding_count: 9,
+      }),
+      record({
+        ontology_id: "http://ns/embedding",
+        uri: "http://ns/embedding",
+        title: "Embedding Onto",
+        ontology_type: "foundational",
+        parse_status: "pending",
+        embedding_count: 0,
+      }),
+      record({
+        ontology_id: "http://ns/failed",
+        uri: "http://ns/failed",
+        title: "Failed Onto",
+        ontology_type: "foundational",
+        parse_status: "parse_error",
+        embedding_count: 0,
+      }),
+      record({
+        ontology_id: "http://ns/legacy",
+        uri: "http://ns/legacy",
+        title: "Legacy Onto",
+        ontology_type: "foundational",
+        // Legacy row persisted before parse_status existed: null parse_status
+        // but embeddings present ⇒ ready (matches ontologyIngestState()).
+        parse_status: null,
+        embedding_count: 7,
+      }),
+    ]);
+    await openInductionModal();
+
+    const groundingTrigger = screen
+      .getByText("Pick loaded ontologies to ground against")
+      .closest("button");
+    expect(groundingTrigger).not.toBeNull();
+    fireEvent.mouseDown(groundingTrigger!);
+
+    // Ready + legacy(embedded) rows are ENABLED (selectable).
+    const readyOpt = await screen.findByRole("option", { name: /Ready Onto/ });
+    const legacyOpt = await screen.findByRole("option", {
+      name: /Legacy Onto/,
+    });
+    expect(readyOpt).toHaveAttribute("aria-disabled", "false");
+    expect(legacyOpt).toHaveAttribute("aria-disabled", "false");
+
+    // Still-embedding row is SHOWN but DISABLED with the embedding label.
+    const embeddingOpt = await screen.findByRole("option", {
+      name: /Embedding Onto/,
+    });
+    expect(embeddingOpt).toHaveAttribute("aria-disabled", "true");
+    expect(embeddingOpt).toHaveTextContent("⏳ Embedding…");
+
+    // Failed-ingest row is SHOWN but DISABLED with the failed label — the
+    // failed-vs-pending distinction #540 asked for.
+    const failedOpt = await screen.findByRole("option", {
+      name: /Failed Onto/,
+    });
+    expect(failedOpt).toHaveAttribute("aria-disabled", "true");
+    expect(failedOpt).toHaveTextContent("⚠️ Ingest failed");
+  });
 });
 
 describe("Induction in-flight visibility + trigger lock (issue I-3f1f50cc)", () => {

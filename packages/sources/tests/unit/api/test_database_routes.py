@@ -67,7 +67,7 @@ def _parse(result):
     return result["statusCode"], json.loads(result["body"]) if result.get("body") else {}
 
 
-def _make_glue_db_req(athena_data_catalog_name=None):
+def _make_glue_db_req(athena_data_catalog_name=None, execution_engine=None, redshift_workgroup=None):
     req = MagicMock()
     req.name = "my-glue-db"
     req.glue_configuration = MagicMock()
@@ -76,6 +76,11 @@ def _make_glue_db_req(athena_data_catalog_name=None):
     req.glue_configuration.region = "us-east-1"
     req.glue_configuration.catalog_id = "123456789012"
     req.glue_configuration.athena_data_catalog_name = athena_data_catalog_name
+    # Default a Glue source to no Redshift opt-in. MagicMock auto-creates
+    # truthy attributes, which would falsely trip the Redshift branch — set both
+    # explicitly so ATHENA remains the default unless a test opts in.
+    req.glue_configuration.execution_engine = execution_engine
+    req.glue_configuration.redshift_workgroup = redshift_workgroup
     req.jdbc_configuration = None
     req.metadata_enrichment_enabled = None
     return req
@@ -240,6 +245,98 @@ class TestCreateDatabaseSource:
             _dr._create_database_source(_make_glue_db_req(), _NAMESPACE_ID)
 
         assert "athenaDataCatalogName" not in mock_dao.put.call_args[0][0]
+
+    # ── Redshift execution engine for Glue sources ──────────────
+
+    def test_glue_source_defaults_to_athena_engine(self):
+        """A Glue source with no executionEngine keeps queryEngine=ATHENA and
+        persists no redshiftWorkgroup (default, unchanged behaviour)."""
+        mock_dao = MagicMock()
+        with (
+            patch(f"{_DR}._get_dao", return_value=mock_dao),
+            patch(f"{_DR}._get_scan_dao", return_value=MagicMock()),
+            patch(f"{_DR}._get_sqs", return_value=MagicMock()),
+        ):
+            _dr._create_database_source(_make_glue_db_req(), _NAMESPACE_ID)
+        put_item = mock_dao.put.call_args[0][0]
+        assert put_item["queryEngine"] == "ATHENA"
+        assert "redshiftWorkgroup" not in put_item
+
+    def test_glue_redshift_engine_sets_query_engine_and_persists_workgroup(self):
+        """executionEngine=REDSHIFT → queryEngine=REDSHIFT + redshiftWorkgroup persisted."""
+        mock_dao = MagicMock()
+        req = _make_glue_db_req(execution_engine="REDSHIFT", redshift_workgroup="my-wg")
+        with (
+            patch(f"{_DR}._get_dao", return_value=mock_dao),
+            patch(f"{_DR}._get_scan_dao", return_value=MagicMock()),
+            patch(f"{_DR}._get_sqs", return_value=MagicMock()),
+        ):
+            _dr._create_database_source(req, _NAMESPACE_ID)
+        put_item = mock_dao.put.call_args[0][0]
+        assert put_item["queryEngine"] == "REDSHIFT"
+        assert put_item["redshiftWorkgroup"] == "my-wg"
+
+    def test_glue_redshift_engine_object_value_is_unwrapped(self):
+        """executionEngine may arrive as an enum-like object with a .value —
+        the resolver must read .value, not str(obj)."""
+        mock_dao = MagicMock()
+        engine_obj = MagicMock()
+        engine_obj.value = "REDSHIFT"
+        req = _make_glue_db_req(execution_engine=engine_obj, redshift_workgroup="wg2")
+        with (
+            patch(f"{_DR}._get_dao", return_value=mock_dao),
+            patch(f"{_DR}._get_scan_dao", return_value=MagicMock()),
+            patch(f"{_DR}._get_sqs", return_value=MagicMock()),
+        ):
+            _dr._create_database_source(req, _NAMESPACE_ID)
+        assert mock_dao.put.call_args[0][0]["queryEngine"] == "REDSHIFT"
+
+    def test_glue_redshift_engine_without_workgroup_rejected(self):
+        """A Redshift-engine Glue source with no workgroup is a 400 — the backend
+        cannot infer which Serverless workgroup to use."""
+        mock_dao = MagicMock()
+        req = _make_glue_db_req(execution_engine="REDSHIFT", redshift_workgroup=None)
+        with (
+            patch(f"{_DR}._get_dao", return_value=mock_dao),
+            patch(f"{_DR}._get_scan_dao", return_value=MagicMock()),
+            patch(f"{_DR}._get_sqs", return_value=MagicMock()),
+        ):
+            status, body = _parse(_dr._create_database_source(req, _NAMESPACE_ID))
+        assert status == 400
+        assert "redshiftWorkgroup" in body["error"]
+        mock_dao.put.assert_not_called()
+
+    def test_glue_athena_engine_does_not_persist_stray_workgroup(self):
+        """An ATHENA (default) Glue source that happens to carry a workgroup does
+        NOT persist it — the workgroup is only meaningful (and stored) for the
+        REDSHIFT execution path."""
+        mock_dao = MagicMock()
+        req = _make_glue_db_req(execution_engine="ATHENA", redshift_workgroup="stray")
+        with (
+            patch(f"{_DR}._get_dao", return_value=mock_dao),
+            patch(f"{_DR}._get_scan_dao", return_value=MagicMock()),
+            patch(f"{_DR}._get_sqs", return_value=MagicMock()),
+        ):
+            _dr._create_database_source(req, _NAMESPACE_ID)
+        put_item = mock_dao.put.call_args[0][0]
+        assert put_item["queryEngine"] == "ATHENA"
+        assert "redshiftWorkgroup" not in put_item
+
+    def test_jdbc_redshift_source_unaffected_by_glue_engine_logic(self):
+        """A native Redshift JDBC source still resolves to queryEngine=JDBC — the
+        new Glue executionEngine branch must not touch the JDBC path."""
+        mock_dao = MagicMock()
+        with (
+            patch(f"{_DR}._get_dao", return_value=mock_dao),
+            patch(f"{_DR}._get_scan_dao", return_value=MagicMock()),
+            patch(f"{_DR}._get_sqs", return_value=MagicMock()),
+        ):
+            _dr._create_database_source(_make_jdbc_db_req(engine="REDSHIFT"), _NAMESPACE_ID)
+        put_item = mock_dao.put.call_args[0][0]
+        assert put_item["queryEngine"] == "JDBC"
+        assert "redshiftWorkgroup" not in put_item
+
+    def test_create_jdbc_source_happy_path(self):
         mock_dao = MagicMock()
         mock_scan_dao = MagicMock()
         mock_sqs = MagicMock()

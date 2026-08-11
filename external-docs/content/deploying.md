@@ -113,7 +113,7 @@ there too or per-model cost metrics will be missing.
 !!! warning "Changing the embedding model is a data migration"
     All embeddings must use the same model — existing indexes were written with the previous one and
     must be re-ingested, or retrieval degrades silently. See the note on `DEFAULT_EMBED_MODEL_ID` in
-    `libs/common/src/semantic_context_common/constants.py`.
+    `libs/common/src/coa_common/constants.py`.
 
 !!! warning "Only `us-east-1` has been tested"
     `us-east-1` is the default and the only region this solution has been deployed and validated in.
@@ -339,6 +339,124 @@ The web app URL is in the `coa-dev-web` stack's CloudFormation output (`WebAppUr
 ### 3. Grant Platform Admin
 
 To give a user full access, grant the `platform-admin` role via the API or web app Permissions page.
+
+## Guardrail Observability
+
+Every Bedrock call routed through a guardrail — the kg-build content screener,
+the enrichment and ontology-shape inference tasks, and the serve NL→SPARQL and
+retrieval paths — emits a CloudWatch metric and a structured log line on **both**
+the allow and the block outcome. This lets operators watch the block rate and
+the latency the guardrail adds without any content or PII leaving the request.
+
+### CloudWatch Metrics
+
+All three metrics live in the **`COA/Guardrails`** namespace:
+
+| Metric | Unit | Dimensions | Meaning |
+|--------|------|------------|---------|
+| `GuardrailInvocations` | Count | `Component`, `Decision` | One per guarded call. `Decision` is `ALLOW` or `BLOCK`. |
+| `GuardrailBlocked` | Count | `Component` | Emitted (value `1`) only when the guardrail intervened with a block. |
+| `GuardrailLatency` | Milliseconds | `Component` | Wall-clock time the guarded Bedrock call took. |
+
+`Component` is one of `kg-build`, `enrichment`, `ontology-shapes`,
+`nl-to-sparql`, or `serve-retrieval`.
+
+**Block rate is not a stored metric** — compute it in a CloudWatch math
+expression so there is a single source of truth:
+
+```
+100 * (GuardrailBlocked / GuardrailInvocations)
+```
+
+(Sum `GuardrailInvocations` across both `Decision` values, or drop the
+`Decision` dimension in the metric selector, before dividing.)
+
+### Viewing the metrics
+
+List the metrics and read the last hour of a component's invocations:
+
+```bash
+# What's being published
+aws cloudwatch list-metrics --namespace COA/Guardrails
+
+# ALLOW+BLOCK invocations for the NL→SPARQL path, 5-min buckets
+aws cloudwatch get-metric-statistics \
+  --namespace COA/Guardrails --metric-name GuardrailInvocations \
+  --dimensions Name=Component,Value=nl-to-sparql \
+  --start-time "$(date -u -d '1 hour ago' +%FT%TZ)" \
+  --end-time "$(date -u +%FT%TZ)" \
+  --period 300 --statistics Sum
+```
+
+### Dashboard block-rate widget
+
+A metric-math widget that graphs the per-component block-rate percentage:
+
+```json
+{
+  "type": "metric",
+  "properties": {
+    "title": "Guardrail block rate (%)",
+    "region": "us-west-2",
+    "metrics": [
+      [ "COA/Guardrails", "GuardrailBlocked", "Component", "nl-to-sparql", { "id": "b", "visible": false } ],
+      [ "COA/Guardrails", "GuardrailInvocations", "Component", "nl-to-sparql", { "id": "i", "visible": false } ],
+      [ { "expression": "100 * b / i", "label": "nl-to-sparql", "id": "rate" } ]
+    ],
+    "stat": "Sum",
+    "period": 300
+  }
+}
+```
+
+### Recommended alarm
+
+Guardrails are a security control, so a sustained spike in the block rate is
+worth paging on — it signals either an attack (prompt injection, PII probing) or
+a misconfigured upstream. Alarm on the block-rate math expression:
+
+```bash
+aws cloudwatch put-metric-alarm \
+  --alarm-name coa-guardrail-block-rate-high \
+  --alarm-description "Guardrail block rate exceeded 20% for 15 minutes" \
+  --comparison-operator GreaterThanThreshold --threshold 20 \
+  --evaluation-periods 3 --datapoints-to-alarm 3 \
+  --metrics '[
+    {"Id":"rate","Expression":"100 * b / i","Label":"block-rate","ReturnData":true},
+    {"Id":"b","MetricStat":{"Metric":{"Namespace":"COA/Guardrails","MetricName":"GuardrailBlocked"},"Period":300,"Stat":"Sum"},"ReturnData":false},
+    {"Id":"i","MetricStat":{"Metric":{"Namespace":"COA/Guardrails","MetricName":"GuardrailInvocations"},"Period":300,"Stat":"Sum"},"ReturnData":false}
+  ]'
+```
+
+A high `GuardrailLatency` p90/p99 (e.g. above a few hundred ms) is also worth an
+alarm — it surfaces guardrail evaluation slowing down the request path.
+
+### Structured decision logs
+
+Alongside the metrics, each decision writes one JSON log line
+(`event: "guardrail_decision"`) to the component's CloudWatch Logs group:
+
+| Field | Example | Meaning |
+|-------|---------|---------|
+| `component` | `nl-to-sparql` | Which decision site emitted the line. |
+| `decision` | `ALLOW` / `BLOCK` | The guardrail outcome. |
+| `filter_type` | `CONTENT` / `PII` / `TOPIC` / `NONE` | Which policy family fired (most-severe wins; `NONE` on an allow). |
+| `latency_ms` | `142.3` | Wall-clock of the guarded call. |
+
+The log **never** carries the matched content or the PII value — only the
+policy *category* — so these lines are safe to retain and query. Find recent
+blocks across a log group with CloudWatch Logs Insights:
+
+```
+fields @timestamp, component, filter_type, latency_ms
+| filter event = "guardrail_decision" and decision = "BLOCK"
+| sort @timestamp desc
+```
+
+> **Note on the region.** Metrics are published in the deployed region (the ECS
+> tasks resolve it from `BEDROCK_REGION`/`LLM_REGION`, not `AWS_REGION`). If a
+> dashboard is empty, confirm you are looking at the region the stack deployed
+> to, not `us-east-1`.
 
 ## Updating
 

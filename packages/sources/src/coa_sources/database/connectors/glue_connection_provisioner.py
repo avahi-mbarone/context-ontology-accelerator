@@ -55,10 +55,43 @@ _CATALOG_NAME_MAX = 41
 # Glue's CreateConnection validates ConnectionProperties per connection type.
 # The managed Redshift connector rejects CATALOG_CASING_FILTER ("...are not
 # allowed in the request object") — it already folds identifiers to lowercase,
-# matching what discovery records. For the other JDBC connectors the filter
-# normalizes schema/table names to lowercase so federated DB names line up with
-# the discovered (lowercase) schemas.
-_CASING_FILTER_UNSUPPORTED_ENGINES = frozenset({"REDSHIFT"})
+# matching what discovery records. For lowercase-native engines (PostgreSQL,
+# MySQL) the filter normalizes schema/table names to lowercase so federated DB
+# names line up with the discovered schemas.
+#
+# Snowflake must also be excluded, for a subtler reason than Redshift's: Glue
+# ACCEPTS the property, the connection reaches READY, and the catalog is created
+# — it just silently exposes NOTHING. Snowflake stores unquoted identifiers in
+# UPPERCASE (TPCH_SF1, CUSTOMER), so LOWERCASE_ONLY filters out every object.
+# Measured on one Snowflake account, two catalogs differing only in this
+# property:
+#   with LOWERCASE_ONLY  -> GetDatabases returns 0 databases
+#   without it           -> tpch_sf1, tpch_sf10, ... and all 8 TPC-H tables
+# The property is a SELECTOR on source-side casing, not a transform: it picks
+# which objects to expose, then names are normalized to lowercase for Athena
+# either way. Snowflake has no natively-lowercase objects, so LOWERCASE_ONLY
+# selects none of them.
+#
+# Omitting it does not mean "no filter" — Glue substitutes an engine-appropriate
+# default. Verified on the recreated connection: GetConnection reports
+# CATALOG_CASING_FILTER=UPPERCASE_ONLY, which we never sent, and the catalog then
+# exposes all 8 TPC-H tables (reported lowercase: tpch_sf1, customer). So the
+# correct action is to stay out of Glue's way rather than to pick a value here;
+# hardcoding UPPERCASE_ONLY would re-break the moment an engine disagrees.
+#
+# Oracle is excluded for exactly the same reason, confirmed the same way:
+# onboarding a real Oracle Database Free instance produced a READY connection
+# and a catalog with 0 databases, because Oracle also folds unquoted identifiers
+# to UPPERCASE. So the rule is not "Snowflake is special" but "the filter is
+# only safe on lowercase-native engines" — PostgreSQL and MySQL, verified
+# unaffected (byte-identical table lists with and without it).
+#
+# This failure mode is expensive to diagnose because it surfaces far downstream:
+# scan succeeds, source is marked queryable, and serve fails at query time with
+# Athena TABLE_NOT_FOUND on a catalog that resolves but is empty. The property
+# is also NON-UPDATABLE, so a connection created with it cannot be repaired —
+# it has to be deleted and recreated.
+_CASING_FILTER_UNSUPPORTED_ENGINES = frozenset({"REDSHIFT", "SNOWFLAKE", "ORACLE"})
 
 _HOST_RE = re.compile(
     r"^(?=.{1,253}$)"
@@ -168,6 +201,7 @@ def provision_federated_catalog(
     subnet_id: str | None = None,
     security_group_id: str | None = None,
     availability_zone: str | None = None,
+    warehouse: str | None = None,
 ) -> dict[str, str]:
     """Provision a managed Glue federated catalog for a JDBC source.
 
@@ -201,6 +235,29 @@ def provision_federated_catalog(
     }
     if engine.upper() not in _CASING_FILTER_UNSUPPORTED_ENGINES:
         connection_properties["CATALOG_CASING_FILTER"] = "LOWERCASE_ONLY"
+    # Snowflake cannot execute anything without an active warehouse, and Glue
+    # enforces this at CreateConnection time rather than at query time:
+    # omitting it fails the whole call with
+    #   InvalidInputException: [WAREHOUSE are missing in the request object]
+    # Because federation failure is fatal for JDBC sources, that surfaced as a
+    # SCAN_FAILED even though discovery had already found every table. Engine-
+    # specific properties therefore have to be threaded through here — the rest
+    # of this function is deliberately engine-agnostic, so keep additions keyed
+    # on the engine rather than set unconditionally.
+    if engine.upper() == "SNOWFLAKE":
+        if not warehouse:
+            raise RuntimeError(
+                "Snowflake federation requires a warehouse: set jdbcConfiguration.warehouse on the source."
+            )
+        connection_properties["WAREHOUSE"] = warehouse
+        # Deliberately NOT setting ROLE. Glue's managed Snowflake connector
+        # rejects it outright:
+        #   InvalidInputException: [ROLE are not allowed in the request object.]
+        # The connector session therefore runs as the secret user's DEFAULT_ROLE,
+        # which is why that user is created with
+        # DEFAULT_ROLE = <least-privilege role> rather than relying on a
+        # per-connection override. Discovery still honours jdbcConfiguration.role
+        # because the Python driver accepts it — only federation cannot.
     connection_input: dict = {
         "Name": name,
         "ConnectionType": engine.upper(),
@@ -243,14 +300,17 @@ def provision_federated_catalog(
     # ── Step 1b: Poll the managed connection to READY and surface the real error ──
     # create_connection returns immediately; the managed connector then validates
     # asynchronously (it provisions an ENI in the connection's VPC using ROLE_ARN).
-    # Previously we never checked the result, so a FAILED connection (e.g. the
-    # generic "Unable to access VPC ... check ... the IAM role" validation error)
-    # went undetected and the source was still marked queryable — only to fail at
-    # query time with Athena HIVE_METASTORE_ERROR. Poll here and log the concrete
-    # StatusReason so the failure is diagnosable in this account's Lambda logs
-    # (the managed connector runs in AWS's service account, so its own error is
-    # otherwise invisible to us). Non-fatal: a source that fails validation is not
-    # usable, so surface it rather than silently proceeding.
+    # Poll here and log the concrete StatusReason so the failure is diagnosable in
+    # this account's Lambda logs (the managed connector runs in AWS's service
+    # account, so its own error is otherwise invisible to us).
+    #
+    # NON-FATAL, deliberately. Making this fatal was tried and reverted: a
+    # not-READY connection is an ENVIRONMENT defect (VPC/SG/IAM), and failing the
+    # scan on it takes down every JDBC source in the account — discovery has
+    # already succeeded at this point and its results are worth keeping. The
+    # catalog-emptiness integ assertion (`assert_federated_catalog_not_empty`) is
+    # what fails loudly on a broken connection; this log line is what tells you
+    # why. Search `glue_connection_not_ready` in the federation-provisioner logs.
     try:
         conn_status = ""
         status_reason = ""
@@ -329,6 +389,60 @@ def provision_federated_catalog(
             raise RuntimeError(f"Failed to grant LF permissions on {name}/{public_schema_name}: {exc}") from exc
 
     return {"glueConnectionName": name, "athenaDataCatalogName": name}
+
+
+def grant_iam_allowed_principals(*, catalog_name: str, schemas: list[str]) -> bool:
+    """Grant IAM_ALLOWED_PRINCIPALS on each DISCOVERED schema of a federated catalog.
+
+    Federated catalogs don't support ``CreateTableDefaultPermissions``, so tables
+    inherit access from a database-level IAM_ALLOWED_PRINCIPALS grant — the same
+    intent as the ``public_schema_name`` grant in ``provision_federated_catalog``,
+    but applied to the schemas that actually exist.
+
+    That single hardcoded grant defaulted to ``"public"``, a database only
+    PostgreSQL and Redshift have. Lake Formation accepts a grant naming a database
+    that doesn't exist (no error, nothing granted), so on MySQL / SQL Server /
+    Oracle no real database ended up governed. The failure is invisible to an LF
+    data lake admin — admins bypass filtering and see every database — and shows up
+    for every other principal as ``GetDatabases`` returning an EMPTY LIST on a
+    catalog that resolves fine. Measured on one account, same engine and connection,
+    differing only in this grant:
+
+        granted on the real database -> GetDatabases -> ["integration_test"]
+        granted on "public" only     -> GetDatabases -> []
+
+    Idempotent. Best-effort: returns False on any error without raising, so a
+    transient LF failure defers governance rather than failing the scan.
+    """
+    if not schemas:
+        return False
+    # Defensive by design: this runs as a scan-pipeline step whose failure is caught
+    # by the state machine's error chain and marks the source SCAN_FAILED. Governance
+    # is not worth failing a scan whose discovery already succeeded, so every error
+    # (including a failed STS account lookup) degrades to "not granted".
+    try:
+        lf = _get_lakeformation()
+        catalog_id = f"{_get_account_id()}:{catalog_name}"
+    except Exception:
+        logger.warning("lf_iam_allowed_principals_setup_failed", extra={"catalog": catalog_name}, exc_info=True)
+        return False
+    principal = {"DataLakePrincipalIdentifier": "IAM_ALLOWED_PRINCIPALS"}
+    all_granted = True
+    for schema in schemas:
+        if not _lf_grant(
+            lf,
+            principal,
+            {"Database": {"CatalogId": catalog_id, "Name": schema}},
+            ["ALL"],
+            database_name=schema,
+            resource_type="federated_database",
+        ):
+            all_granted = False
+    logger.info(
+        "lf_iam_allowed_principals_granted",
+        extra={"catalog": catalog_name, "schemas": schemas, "all_granted": all_granted},
+    )
+    return all_granted
 
 
 def grant_consumer_select(*, catalog_name: str, schemas: list[str], principal_arn: str) -> bool:

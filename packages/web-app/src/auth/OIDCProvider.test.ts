@@ -18,6 +18,7 @@ vi.mock("oidc-client-ts", () => {
     metadataService: {
       getRevocationEndpoint: vi.fn(),
       getTokenEndpoint: vi.fn(),
+      getEndSessionEndpoint: vi.fn(),
     },
     events: {
       addUserLoaded: vi.fn((cb: (user: User) => void) => {
@@ -61,6 +62,14 @@ describe("OIDCProvider", () => {
     // Reset cached user between tests to avoid singleton leakage
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (mockUM.events as any)._emit("userUnloaded");
+    // Default to an IdP that advertises an end-session endpoint (e.g.
+    // Cognito's hosted-UI logout) so existing signOut tests exercise the
+    // signoutRedirect path unless a test explicitly overrides this to
+    // simulate an IdP without one (e.g. Amazon Federate).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (mockUM.metadataService as any).getEndSessionEndpoint.mockResolvedValue(
+      "https://mock-authority/logout",
+    );
   });
 
   describe("build (singleton)", () => {
@@ -326,6 +335,53 @@ describe("OIDCProvider", () => {
       expect(mockUM.signoutRedirect).toHaveBeenCalled();
 
       vi.unstubAllGlobals();
+    });
+
+    it("falls back to a local redirect when the IdP has no end_session_endpoint (Federate)", async () => {
+      // Amazon Federate's discovery document has no end_session_endpoint —
+      // there's no IdP-hosted logout page to redirect through. Without this
+      // fallback, signoutRedirect() throws "No end session endpoint"
+      // uncaught: local state is cleared but the browser never navigates,
+      // so sign-out silently appears to do nothing.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (mockUM.metadataService as any).getEndSessionEndpoint.mockResolvedValue(
+        undefined,
+      );
+      const hrefSetter = vi.fn();
+      // jsdom's window.location.href setter can't be spied on directly;
+      // redefine the property to observe assignments without needing a full
+      // Location mock.
+      Object.defineProperty(window, "location", {
+        value: {
+          ...window.location,
+          set href(v: string) {
+            hrefSetter(v);
+          },
+        },
+        writable: true,
+      });
+
+      await provider.signOut();
+
+      expect(mockUM.removeUser).toHaveBeenCalled();
+      expect(mockUM.signoutRedirect).not.toHaveBeenCalled();
+      // logoutRedirectUri is computed once at construction time as
+      // `${origin}${onLogoutRedirectPath ?? "/"}` — assert the fallback
+      // navigates there, not to some other URL.
+      expect(hrefSetter).toHaveBeenCalledWith(expect.stringMatching(/\/$/));
+    });
+
+    it("falls back to a local redirect when getEndSessionEndpoint rejects", async () => {
+      // Defensive: a metadata-fetch failure must not surface as an uncaught
+      // rejection from signOut() — still complete the local sign-out.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (mockUM.metadataService as any).getEndSessionEndpoint.mockRejectedValue(
+        new Error("discovery fetch failed"),
+      );
+
+      await expect(provider.signOut()).resolves.toBeUndefined();
+      expect(mockUM.removeUser).toHaveBeenCalled();
+      expect(mockUM.signoutRedirect).not.toHaveBeenCalled();
     });
   });
 });

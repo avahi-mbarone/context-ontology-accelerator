@@ -7,6 +7,10 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+# Imported for its side effect: mock.patch() resolves dotted targets by
+# attribute traversal, so this submodule must be bound on its parent
+# package before any patch(f"{MODULE}...") is evaluated.
+import coa_sources.database.pipeline.federation_handler  # noqa: F401
 import pytest
 
 MODULE = "coa_sources.database.pipeline.federation_handler"
@@ -238,6 +242,7 @@ class TestFederationHandler:
             ctx,
             patch(f"{MODULE}.provision_federated_catalog") as prov,
             patch(f"{MODULE}._consumer_role_arn", return_value="arn:aws:iam::123:role/consumer"),
+            patch(f"{MODULE}.grant_iam_allowed_principals", return_value=True) as iam_grant,
             patch(f"{MODULE}.grant_consumer_select", return_value=True) as grant,
         ):
             prov.return_value = {"glueConnectionName": "c", "athenaDataCatalogName": "cat"}
@@ -245,6 +250,10 @@ class TestFederationHandler:
         grant.assert_called_once_with(
             catalog_name="cat", schemas=["public", "sales"], principal_arn="arn:aws:iam::123:role/consumer"
         )
+        # Tables inherit access from a database-level IAM_ALLOWED_PRINCIPALS grant,
+        # which must target the DISCOVERED schemas — granting only the hardcoded
+        # "public" governs nothing on engines that have no "public" database.
+        iam_grant.assert_called_once_with(catalog_name="cat", schemas=["public", "sales"])
         assert dao.update.call_args.kwargs["update_fields"]["queryable"] is True
 
     def test_not_queryable_when_grant_fails(self):
@@ -255,6 +264,7 @@ class TestFederationHandler:
             ctx,
             patch(f"{MODULE}.provision_federated_catalog") as prov,
             patch(f"{MODULE}._consumer_role_arn", return_value=""),
+            patch(f"{MODULE}.grant_iam_allowed_principals", return_value=True),
             patch(f"{MODULE}.grant_consumer_select", return_value=False) as grant,
         ):
             prov.return_value = {"glueConnectionName": "c", "athenaDataCatalogName": "cat"}

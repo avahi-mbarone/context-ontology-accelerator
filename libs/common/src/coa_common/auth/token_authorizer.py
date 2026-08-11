@@ -107,9 +107,34 @@ class TokenAuthorizer(ABC):
         Raises ``ValueError`` if the token is missing, malformed, expired,
         or has an invalid signature.
         """
-        token = self._extract_bearer_token(authorization_header)
-        claims = self._verify_and_decode(token)
+        claims = self.verify_claims(authorization_header)
         return self._build_result(claims)
+
+    def verify_claims(self, authorization_header: str) -> dict[str, Any]:
+        """Verify a ``Bearer <token>`` header's signature/issuer/audience/expiry and return raw claims.
+
+        Returned claims skip the ``email`` requirement ``validate`` imposes.
+        Use this instead of :meth:`validate` when the caller's identity model
+        is not email-keyed (``validate``'s ``TokenValidationResult`` always
+        requires ``email`` — the control-plane authorizer's principal model).
+        The cryptographic verification performed is identical to ``validate``;
+        only the post-verification claim requirements differ.
+
+        Raises ``ValueError`` if the token is missing, malformed, expired,
+        or has an invalid signature.
+        """
+        token = self._extract_bearer_token(authorization_header)
+        return self._verify_and_decode(token)
+
+    def extract_groups(self, claims: dict[str, Any]) -> list[str]:
+        """Public entry point for the IdP-specific group-claim extraction.
+
+        Delegates to the same :meth:`_extract_groups` hook subclasses
+        implement for :meth:`validate`, so callers using :meth:`verify_claims`
+        (email-agnostic identity models) get identical group/role resolution
+        without duplicating the Cognito-vs-generic-OIDC claim-name handling.
+        """
+        return self._extract_groups(claims)
 
     # ------------------------------------------------------------------
     # Template-method hooks for subclasses

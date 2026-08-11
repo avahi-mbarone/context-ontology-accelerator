@@ -218,6 +218,9 @@ def _build_database_detail(item: dict[str, Any]) -> dict[str, Any] | None:
         "tablesApproved",
         "lastScanJobId",
         "metadataEnrichmentEnabled",
+        # Execution engine (ATHENA default, or REDSHIFT for Glue-via-Redshift).
+        # Read-only, system-set at creation from the resolved queryEngine.
+        "queryEngine",
         # Athena federation references — read-only, system-managed.
         # Populated only for JDBC sub-types after a successful first scan.
         "glueConnectionName",
@@ -225,6 +228,12 @@ def _build_database_detail(item: dict[str, Any]) -> dict[str, Any] | None:
     ):
         if field in item and item[field] is not None:
             db[field] = item[field]
+    # redshiftWorkgroup is persisted as a top-level column (only when the Glue source
+    # executes via Redshift). Surface it inside glueConfiguration so the source-detail
+    # API + UI can show the chosen engine's workgroup.
+    if item.get("redshiftWorkgroup") and isinstance(db.get("glueConfiguration"), dict):
+        db["glueConfiguration"]["redshiftWorkgroup"] = item["redshiftWorkgroup"]
+        db["glueConfiguration"].setdefault("executionEngine", "REDSHIFT")
     if item.get("lastScanAt"):
         db["lastScanAt"] = iso_to_epoch(item["lastScanAt"])
     return db or None

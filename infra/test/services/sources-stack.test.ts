@@ -162,8 +162,7 @@ describe("SourcesStack", () => {
         FunctionName: Match.stringLikeRegexp(
           ".*sources-federation-provisioner$",
         ),
-        Handler:
-          "coa_sources.database.pipeline.federation_handler.handler",
+        Handler: "coa_sources.database.pipeline.federation_handler.handler",
         VpcConfig: Match.objectLike({ SubnetIds: Match.anyValue() }),
         Environment: {
           Variables: Match.objectLike({
@@ -287,6 +286,30 @@ describe("SourcesStack", () => {
                   "kms:ViaService": "secretsmanager.*.amazonaws.com",
                 },
               },
+            }),
+          ]),
+        },
+      });
+    });
+
+    it("grants the federated-catalog role ENI actions on * (Glue dry-runs them against a wildcard)", () => {
+      // Regression cover for a failure that presents as a networking problem:
+      // Glue's managed connector pre-flight authorizes DeleteNetworkInterface
+      // against `arn:aws:ec2:<region>:<account>:*/*`, so any resource-scoped
+      // statement is denied and the connection reports "Unable to access VPC
+      // provided in the connection" — naming the subnet and SG, never the denied
+      // action. Scoping this statement breaks every federated catalog in a fresh
+      // environment. AWS's own AWSGlueServiceRole uses `*` for the same actions.
+      template.hasResourceProperties("AWS::IAM::Policy", {
+        PolicyDocument: {
+          Statement: Match.arrayWith([
+            Match.objectLike({
+              Sid: "Ec2NetworkInterfaceManagement",
+              Action: Match.arrayWith([
+                "ec2:CreateNetworkInterface",
+                "ec2:DeleteNetworkInterface",
+              ]),
+              Resource: "*",
             }),
           ]),
         },
@@ -555,9 +578,7 @@ describe("SourcesStack", () => {
 
     it("SourcesDocDeletionCleanupFn is deployed in VPC", () => {
       template.hasResourceProperties("AWS::Lambda::Function", {
-        FunctionName: Match.stringLikeRegexp(
-          ".*sources-doc-deletion-cleanup$",
-        ),
+        FunctionName: Match.stringLikeRegexp(".*sources-doc-deletion-cleanup$"),
         VpcConfig: Match.objectLike({
           SubnetIds: Match.anyValue(),
           SecurityGroupIds: Match.anyValue(),
@@ -575,6 +596,48 @@ describe("SourcesStack", () => {
           SecurityGroupIds: Match.anyValue(),
         }),
       });
+    });
+  });
+
+  describe("KG Build Observability", () => {
+    it("enables Container Insights on the kg-build cluster so task memory is measurable", () => {
+      // Without this, a task killed with no exit code leaves no memory data and
+      // an OOM cannot be confirmed or ruled out.
+      const clusters = template.findResources("AWS::ECS::Cluster");
+      const kgBuildCluster = Object.values(clusters).find((c: any) =>
+        String(c.Properties?.ClusterName ?? "").includes(
+          "sources-doc-kg-build-cluster",
+        ),
+      ) as any;
+
+      expect(kgBuildCluster).toBeDefined();
+      expect(kgBuildCluster.Properties.ClusterSettings).toEqual(
+        expect.arrayContaining([
+          { Name: "containerInsights", Value: "enabled" },
+        ]),
+      );
+    });
+
+    it("sets DEPENDENCY_LOG_LEVEL on the kg-build container so graphrag INFO logs are retained", () => {
+      // graphrag-toolkit logs via stdlib logging; its per-batch pipeline line
+      // (num_workers, job_sizes) is INFO and is the only report of effective
+      // write parallelism.
+      const taskDefs = template.findResources("AWS::ECS::TaskDefinition");
+      const kgBuildTaskDef = Object.values(taskDefs).find((t: any) =>
+        t.Properties?.ContainerDefinitions?.some((c: any) =>
+          String(c.Name ?? "").includes("sources-doc-kg-build"),
+        ),
+      ) as any;
+
+      expect(kgBuildTaskDef).toBeDefined();
+      const container = kgBuildTaskDef.Properties.ContainerDefinitions.find(
+        (c: any) => String(c.Name ?? "").includes("sources-doc-kg-build"),
+      );
+      expect(container.Environment).toEqual(
+        expect.arrayContaining([
+          { Name: "DEPENDENCY_LOG_LEVEL", Value: "INFO" },
+        ]),
+      );
     });
   });
 
@@ -646,5 +709,117 @@ describe("SourcesStack", () => {
         ]),
       );
     });
+
+    it("kg-build task role can publish guardrail metrics to COA/Guardrails", () => {
+      // The screener emits decisions via PutMetricData (matching the task's
+      // other custom metrics), so the task role needs this grant.
+      template.hasResourceProperties("AWS::IAM::Policy", {
+        PolicyDocument: Match.objectLike({
+          Statement: Match.arrayWith([
+            Match.objectLike({
+              Action: "cloudwatch:PutMetricData",
+              Effect: "Allow",
+              Resource: "*",
+              Condition: {
+                StringEquals: { "cloudwatch:namespace": "COA/Guardrails" },
+              },
+            }),
+          ]),
+        }),
+      });
+    });
+  });
+
+  describe("DB Enrichment Guardrail Wiring (#111 AC5/AC6)", () => {
+    // Regression guard: the enrichment task ran UNGUARDED because
+    // GUARDRAIL_SSM_PARAM was never set, so _resolve_guardrail_id() always
+    // returned None and every Converse call went out without a guardrail.
+    const enrichmentContainer = (): any => {
+      const taskDefs = template.findResources("AWS::ECS::TaskDefinition");
+      const taskDef = Object.values(taskDefs).find((t: any) =>
+        JSON.stringify(t.Properties?.Family ?? "").includes(
+          "sources-db-enrichment-agent",
+        ),
+      ) as any;
+      expect(taskDef).toBeDefined();
+      return taskDef.Properties.ContainerDefinitions[0];
+    };
+
+    it("sets GUARDRAIL_SSM_PARAM on the enrichment container", () => {
+      const env = enrichmentContainer().Environment as Array<{
+        Name: string;
+        Value: unknown;
+      }>;
+      const param = env.find((e) => e.Name === "GUARDRAIL_SSM_PARAM");
+      expect(param).toBeDefined();
+      expect(JSON.stringify(param!.Value)).toContain("/bedrock/guardrail-id");
+    });
+
+    it("grants the enrichment task role bedrock:ApplyGuardrail", () => {
+      template.hasResourceProperties("AWS::IAM::Policy", {
+        PolicyDocument: Match.objectLike({
+          Statement: Match.arrayWith([
+            Match.objectLike({
+              Action: "bedrock:ApplyGuardrail",
+              Resource: Match.stringLikeRegexp("arn:aws:bedrock:.*guardrail/"),
+            }),
+          ]),
+        }),
+      });
+    });
+
+    it("grants the enrichment task role ssm:GetParameter on that exact param", () => {
+      // Scoped to the one param, not the whole prefix — ApplyGuardrail is
+      // useless without the id, and a wildcard here would leak every param.
+      const policies = template.findResources("AWS::IAM::Policy");
+      const statements = Object.values(policies).flatMap(
+        (p: any) => p.Properties?.PolicyDocument?.Statement ?? [],
+      );
+      const ssmReads = statements.filter(
+        (s: any) => s.Action === "ssm:GetParameter",
+      );
+      const guardrailRead = ssmReads.find((s: any) =>
+        JSON.stringify(s.Resource).includes("/bedrock/guardrail-id"),
+      );
+      expect(guardrailRead).toBeDefined();
+      expect(JSON.stringify(guardrailRead.Resource)).not.toContain("*");
+    });
+  });
+
+  describe("Guarded ECS task defs carry the deployment region", () => {
+    // Regression guard: both task defs shipped with GUARDRAIL_SSM_PARAM /
+    // RETRIEVAL_GUARDRAIL_ID but no region env var. ECS injects none, so
+    // resolve_region() fell back to us-east-1 and ApplyGuardrail was DENIED
+    // by the region-scoped IAM policy in every non-us-east-1 deployment —
+    // graph_build screening then failed OPEN.
+    const containerFor = (family: string): { Environment?: unknown[] } => {
+      const taskDefs = template.findResources("AWS::ECS::TaskDefinition");
+      const taskDef = Object.values(taskDefs).find((t) =>
+        JSON.stringify(
+          (t as { Properties?: { Family?: unknown } }).Properties?.Family ?? "",
+        ).includes(family),
+      ) as {
+        Properties: { ContainerDefinitions: { Environment?: unknown[] }[] };
+      };
+      expect(taskDef).toBeDefined();
+      return taskDef.Properties.ContainerDefinitions[0];
+    };
+
+    for (const family of [
+      "sources-db-enrichment-agent",
+      "sources-doc-kg-build",
+    ]) {
+      it(`${family} sets AWS_DEFAULT_REGION and BEDROCK_REGION to the stack region`, () => {
+        const env = (containerFor(family).Environment ?? []) as {
+          Name: string;
+          Value: unknown;
+        }[];
+        for (const name of ["AWS_DEFAULT_REGION", "BEDROCK_REGION"]) {
+          const entry = env.find((e) => e.Name === name);
+          expect(entry).toBeDefined();
+          expect(entry!.Value).toEqual({ Ref: "AWS::Region" });
+        }
+      });
+    }
   });
 });

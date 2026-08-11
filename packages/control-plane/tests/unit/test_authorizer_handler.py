@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -125,7 +126,7 @@ class TestCacheInvalidation:
         import coa_control_plane.authorization.handler as h
         from coa_control_plane.authorization.handler import _check_cache_version, _roles_cache
 
-        _roles_cache["some-key"] = (["ADMIN"], [])
+        _roles_cache["some-key"] = (time.monotonic() + 60, ["ADMIN"], [])
         h._local_cache_version = 1
 
         mock_dao = MagicMock()
@@ -143,7 +144,7 @@ class TestCacheInvalidation:
         import coa_control_plane.authorization.handler as h
         from coa_control_plane.authorization.handler import _check_cache_version, _roles_cache
 
-        _roles_cache["some-key"] = (["ADMIN"], [])
+        _roles_cache["some-key"] = (time.monotonic() + 60, ["ADMIN"], [])
         h._local_cache_version = 5
 
         mock_dao = MagicMock()
@@ -159,9 +160,9 @@ class TestCacheInvalidation:
 class TestRolesCaching:
     """Tests for _resolve_roles cache behavior.
 
-    NOTE: role cache is currently DISABLED pending security review (MR !622).
-    These tests verify the disabled state — cache is never populated.
-    Re-enable assertions when MR !620 lands.
+    The cache is populated on miss and invalidated two ways: the version
+    counter bumped by the DynamoDB-Streams handler (see TestCacheInvalidation)
+    and a per-entry max age (_ROLES_CACHE_TTL_SECONDS).
     """
 
     def test_cache_miss_queries_ddb_and_populates_cache(self, env_vars):
@@ -177,9 +178,11 @@ class TestRolesCaching:
 
         assert global_roles == ["ADMIN"]
         assert resource_roles == [{"role": "data-steward", "resourceUID": "ns-123"}]
-        # Cache population disabled — verify cache remains empty
         cache_key = "user@example.com:Admins"
-        assert cache_key not in _roles_cache
+        assert cache_key in _roles_cache
+        _, cached_global, cached_resource = _roles_cache[cache_key]
+        assert cached_global == ["ADMIN"]
+        assert cached_resource == [{"role": "data-steward", "resourceUID": "ns-123"}]
 
     def test_principal_id_with_special_characters_is_url_encoded(self, env_vars):
         """Verify that principal IDs with special characters are URL-encoded when querying.
@@ -203,8 +206,11 @@ class TestRolesCaching:
         from coa_control_plane.authorization.handler import _resolve_roles, _roles_cache
 
         cache_key = "cached-user@example.com:GroupA"
-        cached_value = (["VIEWER"], [{"role": "data-analyst", "resourceUID": "ns-456"}])
-        _roles_cache[cache_key] = cached_value
+        _roles_cache[cache_key] = (
+            time.monotonic() + 60,
+            ["VIEWER"],
+            [{"role": "data-analyst", "resourceUID": "ns-456"}],
+        )
 
         mock_dao = MagicMock()
         global_roles, resource_roles = _resolve_roles("cached-user@example.com", ["GroupA"], mock_dao)
@@ -212,6 +218,27 @@ class TestRolesCaching:
         assert global_roles == ["VIEWER"]
         assert resource_roles == [{"role": "data-analyst", "resourceUID": "ns-456"}]
         mock_dao.query_all.assert_not_called()
+
+    def test_expired_cache_entry_requeries_ddb(self, env_vars):
+        """A stale entry past its max age must be re-queried, not served.
+
+        This is the backstop for a broken stream/version-counter path: without
+        it a warm container could serve revoked roles indefinitely.
+        """
+        from coa_control_plane.authorization.handler import _resolve_roles, _roles_cache
+
+        cache_key = "stale-user@example.com:GroupA"
+        _roles_cache[cache_key] = (time.monotonic() - 1, ["ADMIN"], [])
+
+        mock_dao = MagicMock()
+        mock_dao.query_all.side_effect = [[{"role": "VIEWER", "resourceId": "GLOBAL"}], []]
+
+        global_roles, _ = _resolve_roles("stale-user@example.com", ["GroupA"], mock_dao)
+
+        assert mock_dao.query_all.called
+        assert global_roles == ["VIEWER"]
+        # Re-populated with the fresh result, not the stale one.
+        assert _roles_cache[cache_key][1] == ["VIEWER"]
 
     def test_cache_key_groups_sorted(self, env_vars):
         from coa_control_plane.authorization.handler import _resolve_roles, _roles_cache
@@ -221,8 +248,7 @@ class TestRolesCaching:
 
         _resolve_roles("user@example.com", ["GroupB", "GroupA"], mock_dao)
 
-        # Cache population disabled — verify cache not written
-        assert "user@example.com:GroupA,GroupB" not in _roles_cache
+        assert "user@example.com:GroupA,GroupB" in _roles_cache
 
     def test_corrupt_cache_entry_evicted_and_requeried(self, env_vars):
         """A corrupt/legacy cache entry should be evicted and the query re-run."""
@@ -244,8 +270,76 @@ class TestRolesCaching:
         # Should have queried DDB since cache was corrupt
         assert mock_dao.query_all.called
         assert global_roles == ["VIEWER"]
-        # Cache population disabled — entry should not exist after eviction
-        assert cache_key not in _roles_cache
+        # Re-populated with a well-formed entry in the current shape.
+        assert len(_roles_cache[cache_key]) == 3
+        assert _roles_cache[cache_key][1] == ["VIEWER"]
+
+    def test_legacy_two_tuple_entry_evicted_and_requeried(self, env_vars):
+        """An entry written before the max-age field existed must not be served."""
+        from coa_control_plane.authorization.handler import _resolve_roles, _roles_cache
+
+        cache_key = "legacy-user@example.com:GroupY"
+        _roles_cache[cache_key] = (["ADMIN"], [])  # type: ignore[assignment]
+
+        mock_dao = MagicMock()
+        mock_dao.query_all.side_effect = [[{"role": "VIEWER", "resourceId": "GLOBAL"}], []]
+
+        global_roles, _ = _resolve_roles("legacy-user@example.com", ["GroupY"], mock_dao)
+
+        assert mock_dao.query_all.called
+        assert global_roles == ["VIEWER"]
+
+    def test_cap_evicts_oldest_entries_not_whole_cache(self, env_vars):
+        """At the size cap, only the oldest slice is evicted — not a full flush.
+
+        A full clear would stampede the PrincipalIndex GSI on the next burst of
+        requests; bounded eviction keeps most warm entries.
+        """
+        import coa_control_plane.authorization.handler as h
+        from coa_control_plane.authorization.handler import _resolve_roles, _roles_cache
+
+        # Fill to exactly the cap with well-formed, non-expired entries.
+        future = time.monotonic() + 3600
+        for i in range(h._ROLES_CACHE_MAX_ENTRIES):
+            _roles_cache[f"user{i}@example.com:"] = (future, ["VIEWER"], [])
+        assert len(_roles_cache) == h._ROLES_CACHE_MAX_ENTRIES
+
+        mock_dao = MagicMock()
+        mock_dao.query_all.side_effect = [[{"role": "ADMIN", "resourceId": "GLOBAL"}], []]
+
+        # A miss at the cap triggers eviction of the oldest ~10%, then insert.
+        _resolve_roles("new-user@example.com", ["GroupA"], mock_dao)
+
+        evicted = max(1, h._ROLES_CACHE_MAX_ENTRIES // 10)
+        # cap - evicted survivors + the freshly inserted entry.
+        assert len(_roles_cache) == h._ROLES_CACHE_MAX_ENTRIES - evicted + 1
+        # Oldest key gone, newest key present — not a full clear.
+        assert "user0@example.com:" not in _roles_cache
+        assert f"user{h._ROLES_CACHE_MAX_ENTRIES - 1}@example.com:" in _roles_cache
+        assert "new-user@example.com:GroupA" in _roles_cache
+
+
+class TestParseTtlSeconds:
+    """Fail-soft parsing of ROLES_CACHE_TTL_SECONDS (never crash on cold start)."""
+
+    def test_valid_value_parsed(self, monkeypatch):
+        from coa_control_plane.authorization.handler import _parse_ttl_seconds
+
+        monkeypatch.setenv("ROLES_CACHE_TTL_SECONDS", "120")
+        assert _parse_ttl_seconds() == 120.0
+
+    def test_unset_uses_default(self, monkeypatch):
+        import coa_control_plane.authorization.handler as h
+
+        monkeypatch.delenv("ROLES_CACHE_TTL_SECONDS", raising=False)
+        assert h._parse_ttl_seconds() == h._ROLES_CACHE_TTL_DEFAULT_SECONDS
+
+    def test_malformed_value_falls_back_to_default(self, monkeypatch):
+        import coa_control_plane.authorization.handler as h
+
+        monkeypatch.setenv("ROLES_CACHE_TTL_SECONDS", "60s")
+        # Must not raise — a bad env var would otherwise crash the authorizer.
+        assert h._parse_ttl_seconds() == h._ROLES_CACHE_TTL_DEFAULT_SECONDS
 
 
 class TestGetTokenAuthorizer:
@@ -615,6 +709,64 @@ class TestMapRequestToCedar:
         action, _rtype, _rid = _map_request_to_cedar(method, path, path_params)
         assert action != "denyAll", f"{method} {path} fell through to denyAll"
         assert action == expected_action, f"{method} {path} mapped to {action}, expected {expected_action}"
+
+    def test_no_secured_smithy_operation_is_left_unmapped(self):
+        """Derive the route list from the Smithy model, not from a hand-written table.
+
+        CONTROL_PLANE_ROUTES above records the *intended* action per route, which is
+        worth asserting — but it cannot catch a route nobody remembered to add to
+        either place. Thirteen operations were unmapped for exactly that reason, and
+        because an unmapped route resolves to ``denyAll`` they returned 403 for every
+        role except platform-admin, whose policy permits any action — which is why it
+        went unnoticed. This test reads the service's own operation list, so a new
+        @http operation fails here until it is mapped.
+
+        Parses the .smithy sources rather than the generated OpenAPI: the latter lives
+        under smithy-generated/, which is gitignored and absent unless codegen has
+        run, so a test depending on it would error during collection on a clean
+        checkout.
+        """
+        import re
+        from pathlib import Path
+
+        from coa_control_plane.authorization.handler import _PATH_MAPPING
+
+        smithy_dir = Path(__file__).resolve().parents[4] / "models" / "src" / "main" / "smithy"
+        if not smithy_dir.is_dir():  # pragma: no cover - only in a partial checkout
+            pytest.skip(f"Smithy sources not present at {smithy_dir}")
+
+        service = re.search(
+            r"service ControlPlaneService\s*\{(.*?)\n\}",
+            (smithy_dir / "control-plane.smithy").read_text(),
+            re.S,
+        )
+        assert service, "could not locate the ControlPlaneService declaration"
+        ops_block = service.group(1)[service.group(1).index("operations: [") :]
+        operation_names = re.findall(r"^\s+(\w+)\s*$", ops_block[: ops_block.index("]")], re.M)
+        assert len(operation_names) > 50, f"parsed only {len(operation_names)} operations; parser is wrong"
+
+        # Tolerates both the single-line and multi-line @http(...) forms, and any
+        # traits sitting between the trait and the operation keyword.
+        http_trait = re.compile(
+            r'@http\(\s*method:\s*"(\w+)"\s*,?\s*uri:\s*"([^"]+)"[^)]*\)'
+            r'((?:\s*@[\w()"\s:,.\-]*?)*)\s*operation\s+(\w+)'
+        )
+        routes = {
+            match.group(4): (match.group(1), match.group(2))
+            for path in smithy_dir.glob("*.smithy")
+            for match in http_trait.finditer(path.read_text())
+        }
+
+        unresolved = [n for n in operation_names if n not in routes]
+        assert unresolved == [], f"operations with no parsable @http trait: {unresolved}"
+
+        # HealthCheck is @optionalAuth — it is in unsecuredPaths and has no authorizer.
+        unmapped = [
+            f"{routes[name][0]} {routes[name][1]} ({name})"
+            for name in operation_names
+            if name != "HealthCheck" and _PATH_MAPPING.get(routes[name][1], {}).get(routes[name][0]) is None
+        ]
+        assert unmapped == [], "secured operations that fall through to denyAll:\n  " + "\n  ".join(unmapped)
 
     def test_no_mapped_action_is_outside_cedar_schema(self):
         """Every action referenced by the path mapping must be a real Cedar

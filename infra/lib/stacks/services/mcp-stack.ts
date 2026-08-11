@@ -19,18 +19,10 @@ import { SCLStack } from "../../constructs";
 export interface McpStackProps extends cdk.StackProps {
   /** VPC for AgentCore Runtime network interfaces. */
   readonly vpc: ec2.IVpc;
-  /** Cognito issuer URL for JWT auth. */
-  readonly issuerUrl: string;
-  /** Cognito App Client ID (web app) for JWT audience validation. */
-  readonly clientId: string;
-  /** Cognito MCP/CLI Client ID (public client with localhost redirect). */
-  readonly mcpClientId: string;
   /** Roles DDB table for Cedar auth in MCP grant resolver. */
   readonly rolesTable: dynamodb.ITable;
   /** Resource-role-mappings DDB table for role resolution. */
   readonly resourceRoleMappingsTable: dynamodb.ITable;
-  /** IdP group claim name. */
-  readonly groupClaimName?: string;
   /** AgentCore-supported AZ names for subnet filtering. */
   readonly agentCoreAzNames?: string[];
 }
@@ -64,6 +56,31 @@ export class McpStack extends SCLStack {
     const cmRuntimeArn = ssm.StringParameter.valueForStringParameter(
       this,
       `${ssmPrefix}/serve/runtime-arn`,
+    );
+
+    // IdP issuer/client IDs via SSM (avoids a cross-stack export on the auth
+    // stack's UserPool/UserPoolClient/McpClient — see idp-authentication-stack.ts
+    // for the writer).
+    const issuerUrl = ssm.StringParameter.valueForStringParameter(
+      this,
+      `${ssmPrefix}/issuer`,
+    );
+    const clientId = ssm.StringParameter.valueForStringParameter(
+      this,
+      `${ssmPrefix}/userpool-client-id`,
+    );
+    const mcpClientId = ssm.StringParameter.valueForStringParameter(
+      this,
+      `${ssmPrefix}/mcp-client-id`,
+    );
+    // The JWT claim name carrying group membership — "cognito:groups" for
+    // Cognito, or the customer's configured claim (oidcSettings.groupClaim,
+    // default "groups") for direct OIDC. Read from SSM instead of hardcoding
+    // DEFAULT_GROUP_CLAIM ("cognito:groups"): that constant is wrong on the
+    // OIDC path and silently breaks all group-based role resolution.
+    const groupClaimName = ssm.StringParameter.valueForStringParameter(
+      this,
+      `${ssmPrefix}/authentication-group-token-name`,
     );
 
     // ── Resolve backend Lambda ARNs from SSM (discovery tools) ────────
@@ -122,12 +139,12 @@ export class McpStack extends SCLStack {
       protocolConfiguration: bedrockagentcore.ProtocolType.MCP,
       authorizerConfiguration:
         bedrockagentcore.RuntimeAuthorizerConfiguration.usingJWT(
-          `${props.issuerUrl}/.well-known/openid-configuration`,
+          `${issuerUrl}/.well-known/openid-configuration`,
           // allowedClients omitted: AgentCore uses AND semantics, and ID tokens
           // don't carry client_id. We use allowedAudience (aud claim) instead,
           // which is present on both ID tokens and works with the CM runtime.
           undefined,
-          [props.clientId, props.mcpClientId],
+          [clientId, mcpClientId],
         ),
       networkConfiguration:
         bedrockagentcore.RuntimeNetworkConfiguration.usingVpc(this, {
@@ -153,9 +170,7 @@ export class McpStack extends SCLStack {
         // Grant resolver needs roles/RRM tables
         ROLES_TABLE_NAME: props.rolesTable.tableName,
         RRM_TABLE_NAME: props.resourceRoleMappingsTable.tableName,
-        ...(props.groupClaimName && {
-          GROUP_CLAIM_NAME: props.groupClaimName,
-        }),
+        GROUP_CLAIM_NAME: groupClaimName,
         // Execution tools forward to Context Manager via HTTP
         CM_RUNTIME_ARN: cmRuntimeArn,
         // Discovery tools invoke backend Lambdas directly
@@ -163,6 +178,14 @@ export class McpStack extends SCLStack {
         ONTOLOGY_PROXY_LAMBDA_ARN: ontologyProxyLambdaArn,
         // Override entrypoint to run MCP server instead of Context Manager
         SCL_MCP_MODE: "true",
+        // Independent JWT signature verification in claims.py, as
+        // defense-in-depth behind the AgentCore RuntimeAuthorizerConfiguration
+        // below. Same issuer/audience trust anchor, IdP-agnostic (Cognito,
+        // Okta, EntraID, ...) via coa_common.auth.build_token_authorizer.
+        // MCP callers authenticate as the MCP/CLI client, so JWT_CLIENT_ID
+        // uses mcpClientId (not the web app's clientId).
+        JWT_ISSUER_URL: issuerUrl,
+        JWT_CLIENT_ID: mcpClientId,
       },
       description:
         "MCP Server - protocol adapter with PKCE auth, forwards execution to Context Manager",

@@ -94,7 +94,7 @@ echo "✓ OpenAPI specs copied"
 echo ""
 echo "Generating Python server models from OpenAPI..."
 
-OPENAPI_GEN_JAR="$HOME/.local/share/openapi-generator/openapi-generator-cli-${OPENAPI_GENERATOR_VERSION}.jar"
+OPENAPI_GEN_JAR="${OPENAPI_GENERATOR_HOME:-$HOME/.local/share/openapi-generator}/openapi-generator-cli-${OPENAPI_GENERATOR_VERSION}.jar"
 if [ ! -f "$OPENAPI_GEN_JAR" ]; then
     echo "Downloading openapi-generator-cli ${OPENAPI_GENERATOR_VERSION}..."
     mkdir -p "$(dirname "$OPENAPI_GEN_JAR")"
