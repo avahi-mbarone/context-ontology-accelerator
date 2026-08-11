@@ -198,17 +198,96 @@ class TestSequentialPolicy:
 @pytest.mark.unit
 class TestParallelPolicy:
     @pytest.mark.asyncio
-    async def test_highest_confidence_wins(self):
-        s1 = _make_strategy("a", result=_make_result("a", confidence=0.6))
-        s2 = _make_strategy("b", result=_make_result("b", confidence=0.9))
-        tier = StructuredQueryTier(strategies=[s1, s2])
+    async def test_precedence_order_wins_not_confidence(self):
+        """Declared strategy order decides the winner, NOT self-reported confidence.
+
+        Behaviour change (was `test_highest_confidence_wins`): selection used to
+        sort on StrategyResult.confidence, which is a model self-assessment. Two
+        strategies scoring within noise of each other swapped the winner between
+        identical requests, changing the SQL and the answer — measured as
+        per-question F1 flipping 0<->1 across identical benchmark runs. Order is
+        stable and encodes real authority (governed metric > VKG > free NL->SQL).
+        """
+        ontop = _make_strategy("ontop", result=_make_result("ontop", confidence=0.9))
+        nl = _make_strategy("nl_to_sql", result=_make_result("nl_to_sql", confidence=0.6))
+        tier = StructuredQueryTier(strategies=[ontop, nl])
 
         ctx = StrategyContext(trace=TraceCollector())
         result = await tier.resolve("query", "ns", ctx, option="best")
 
         assert result is not None
-        assert result.strategy_name == "b"
-        assert result.confidence == 0.9
+        # nl_to_sql outranks ontop on MEASURED reliability (0.590 vs 0.055 mean
+        # F1), so it wins despite lower self-reported confidence and despite
+        # ontop being declared first.
+        assert result.strategy_name == "nl_to_sql"
+        assert result.confidence == 0.6
+
+    @pytest.mark.asyncio
+    async def test_selection_is_stable_across_repeated_runs(self):
+        """Same inputs must yield the same winner every time."""
+        winners = []
+        for _ in range(10):
+            o = _make_strategy("ontop", result=_make_result("ontop", confidence=0.5001))
+            n = _make_strategy("nl_to_sql", result=_make_result("nl_to_sql", confidence=0.5))
+            tier = StructuredQueryTier(strategies=[o, n])
+            res = await tier.resolve("query", "ns", StrategyContext(trace=TraceCollector()), option="best")
+            winners.append(res.strategy_name)
+        assert set(winners) == {"nl_to_sql"}, f"winner flipped across runs: {set(winners)}"
+
+    @pytest.mark.asyncio
+    async def test_near_tie_confidence_does_not_flip_winner(self):
+        """A confidence delta inside model noise must not change the outcome."""
+        for conf_ontop in (0.49, 0.50, 0.51, 0.99):
+            o = _make_strategy("ontop", result=_make_result("ontop", confidence=conf_ontop))
+            n = _make_strategy("nl_to_sql", result=_make_result("nl_to_sql", confidence=0.50))
+            tier = StructuredQueryTier(strategies=[o, n])
+            res = await tier.resolve("query", "ns", StrategyContext(trace=TraceCollector()), option="best")
+            assert res.strategy_name == "nl_to_sql", f"precedence lost to confidence={conf_ontop}"
+
+    @pytest.mark.asyncio
+    async def test_confidence_still_gates_empty_results(self):
+        """Confidence remains an admission FLOOR even though it no longer ranks.
+
+        A low-confidence empty result from the first-precedence strategy must not
+        win just because it is first; it is inadmissible, so the next strategy's
+        real rows win.
+        """
+        n = _make_strategy("nl_to_sql", result=_make_empty_result("nl_to_sql", confidence=0.1))
+        o = _make_strategy("ontop", result=_make_result("ontop", confidence=0.4))
+        tier = StructuredQueryTier(strategies=[n, o])
+
+        res = await tier.resolve("query", "ns", StrategyContext(trace=TraceCollector()), option="best")
+        assert res is not None
+        # nl_to_sql has higher precedence but its empty result is inadmissible.
+        assert res.strategy_name == "ontop"
+
+    @pytest.mark.asyncio
+    async def test_degenerate_no_mapping_result_is_rejected(self):
+        """Ontop's no-mapping "SELECT 1 AS uselessVariable" must never win.
+
+        It is syntactically valid, returns a row, and was observed carrying
+        confidence 0.73 — so neither the row count nor the confidence floor
+        catches it. Only the SQL shape does.
+        """
+        degenerate = _make_result("ontop", confidence=0.95)
+        degenerate.sql = "SELECT 1 AS uselessVariable FROM (SELECT 1) AS tdummy"
+        o = _make_strategy("ontop", result=degenerate)
+        n = _make_strategy("nl_to_sql", result=_make_result("nl_to_sql", confidence=0.3))
+        tier = StructuredQueryTier(strategies=[o, n])
+
+        res = await tier.resolve("query", "ns", StrategyContext(trace=TraceCollector()), option="best")
+        assert res is not None
+        assert res.strategy_name == "nl_to_sql"
+
+    @pytest.mark.asyncio
+    async def test_all_degenerate_falls_through_to_tier3(self):
+        degenerate = _make_result("ontop", confidence=0.9)
+        degenerate.sql = "SELECT 1 AS uselessVariable FROM (SELECT 1) AS tdummy"
+        o = _make_strategy("ontop", result=degenerate)
+        tier = StructuredQueryTier(strategies=[o])
+
+        res = await tier.resolve("query", "ns", StrategyContext(trace=TraceCollector()), option="best")
+        assert res is None
 
     @pytest.mark.asyncio
     async def test_ignores_exceptions(self):
@@ -457,7 +536,8 @@ class TestStrategyExecutionByOption:
         ontop.resolve.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_best_runs_both_and_highest_confidence_wins(self):
+    async def test_best_runs_both_and_precedence_wins(self):
+        """`best` runs both strategies; the earlier-declared one wins deterministically."""
         nl = _make_strategy("nl_to_sql", result=_make_result("nl_to_sql", confidence=0.6))
         ontop = _make_strategy("ontop", result=_make_result("ontop", confidence=0.9))
         tier = StructuredQueryTier(strategies=[nl, ontop])
@@ -465,7 +545,8 @@ class TestStrategyExecutionByOption:
         ctx = StrategyContext(trace=TraceCollector())
         result = await tier.resolve("q", "ns", ctx, option="best")
 
-        assert result.strategy_name == "ontop"  # higher confidence
+        # Declared first wins regardless of the higher-confidence alternative.
+        assert result.strategy_name == "nl_to_sql"
         # Parallel: both strategies are invoked.
         nl.resolve.assert_awaited_once()
         ontop.resolve.assert_awaited_once()

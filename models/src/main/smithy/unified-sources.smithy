@@ -69,6 +69,13 @@ string GlueCatalogId
 @pattern("^[a-zA-Z][a-zA-Z0-9_]*$")
 string AthenaDataCatalogName
 
+/// Amazon Redshift Serverless workgroup name (3-64 chars, lowercase
+/// alphanumeric and hyphens; must start with a letter — Redshift Serverless
+/// naming rules).
+@length(min: 3, max: 64)
+@pattern("^[a-z][a-z0-9-]*$")
+string RedshiftWorkgroupName
+
 /// AWS region identifier.
 @length(min: 1, max: 64)
 string AwsRegion
@@ -149,6 +156,12 @@ enum QueryEngine {
 
     /// Query the database directly over JDBC (no Athena).
     JDBC
+
+    /// Query Glue/Iceberg tables via Amazon Redshift Serverless using the
+    /// `awsdatacatalog` auto-mount (an alternative execution engine to Athena
+    /// for Glue-backed sources; opt-in per source via
+    /// GlueConfiguration.executionEngine).
+    REDSHIFT
 }
 
 /// JDBC database connection configuration.
@@ -219,6 +232,27 @@ structure GlueConfiguration {
     /// `AwsDataCatalog.<athenaDataCatalogName>.<databaseName>.<table>`; when
     /// omitted, as `AwsDataCatalog.<databaseName>.<table>`.
     athenaDataCatalogName: AthenaDataCatalogName
+
+    /// Execution engine for this Glue/Iceberg source's serve-time queries.
+    /// Defaults to ATHENA when omitted. Set REDSHIFT to route queries through
+    /// Amazon Redshift Serverless (`awsdatacatalog` auto-mount); requires
+    /// `redshiftWorkgroup` to be set.
+    executionEngine: GlueExecutionEngine
+
+    /// Redshift Serverless workgroup used to execute queries when
+    /// `executionEngine` is REDSHIFT. Ignored (and unnecessary) for ATHENA.
+    redshiftWorkgroup: RedshiftWorkgroupName
+}
+
+/// Execution engine choice for a Glue/Iceberg source. A deliberately narrow
+/// enum (only the engines valid for a Glue source) so the onboarding UI/API
+/// cannot select an engine — e.g. direct JDBC — that doesn't apply to Glue.
+enum GlueExecutionEngine {
+    /// Execute via Amazon Athena (default).
+    ATHENA
+
+    /// Execute via Amazon Redshift Serverless `awsdatacatalog` auto-mount.
+    REDSHIFT
 }
 
 /// Business-facing metadata for a table or column returned in responses:

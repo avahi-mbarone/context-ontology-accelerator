@@ -7,7 +7,7 @@ Layered pipeline:
   1. Exact-name match (normalized label equality → score 1.0)
   2. Embedding recall (top-K via vector search)
   3. LLM rerank (discriminative: pick best match or abstain)
-  4. Margin-aware confidence classification
+  4. Score-thresholded tier classification (exact / high_confidence / ambiguous / novel)
 
 Modes (controlled by ``grounding_mode`` param):
   - NONE:     skip grounding entirely, all concepts → novel
@@ -132,7 +132,6 @@ class GroundingResult:
     match_type: str  # exact | high_confidence | ambiguous | novel
     relationship: str | None  # SKOS relationship from reranker
     confidence: float | None  # reranker confidence or cosine sim
-    margin: float  # gap between #1 and #2
     reason: str | None  # reranker's justification
     mode: str  # which mode produced this result
 
@@ -151,12 +150,15 @@ def _local_name(uri: str) -> str:
     return uri.rsplit("/", 1)[-1]
 
 
-def _classify_with_margin(
-    score: float | None,
-    margin: float,
-    confidence_threshold: float,
-    has_rerank: bool,
-) -> str:
+def classify_score_tier(score: float | None, *, has_rerank: bool = True, confidence_threshold: float = 0.80) -> str:
+    """Classify a single match score into a grounding tier.
+
+    Tiering is purely score-thresholded: the reranked ladder
+    (``has_rerank=True``, the default, matching how production induction scores
+    LLM-reranked candidates) and the STANDARD embedding ladder each map an
+    absolute score to ``exact``/``high_confidence``/``ambiguous``/``novel``.
+    ``None`` (no candidate) is ``novel``.
+    """
     if score is None:
         return "novel"
     if has_rerank:
@@ -175,20 +177,6 @@ def _classify_with_margin(
     if score >= 0.50:
         return "ambiguous"
     return "novel"
-
-
-def classify_score_tier(score: float | None, *, has_rerank: bool = True, confidence_threshold: float = 0.80) -> str:
-    """Classify a single match score into a tier, with no margin context.
-
-    Public entry point for callers that have only a score and not a #1-vs-#2
-    margin — e.g. re-classifying a manually-overridden grounding choice from its
-    stored candidate score. The rerank ladder (``has_rerank=True``, the default,
-    matching how production induction scores reranked candidates) is purely
-    score-thresholded, so ``margin`` is irrelevant there; this wrapper makes that
-    explicit instead of forcing callers to pass a fabricated ``margin=0.0`` into
-    the internal :func:`_classify_with_margin`.
-    """
-    return _classify_with_margin(score, margin=0.0, confidence_threshold=confidence_threshold, has_rerank=has_rerank)
 
 
 class GroundingService:
@@ -347,7 +335,6 @@ class GroundingService:
                 match_type="novel",
                 relationship=None,
                 confidence=None,
-                margin=0.0,
                 reason="Grounding disabled (mode=NONE)",
                 mode="NONE",
             )
@@ -372,7 +359,6 @@ class GroundingService:
                 match_type="novel",
                 relationship=None,
                 confidence=None,
-                margin=0.0,
                 reason="No candidates returned from embedding search",
                 mode=grounding_mode,
             )
@@ -385,7 +371,6 @@ class GroundingService:
         if exact_matches and grounding_mode == "STANDARD":
             if len(exact_matches) == 1:
                 exact = exact_matches[0]
-                margin = exact.lexical_sim - (raw_candidates[1].lexical_sim if len(raw_candidates) > 1 else 0.0)
                 return GroundingResult(
                     source_table=table_name,
                     source_column="",
@@ -394,13 +379,11 @@ class GroundingService:
                     match_type="exact",
                     relationship="exactMatch",
                     confidence=1.0,
-                    margin=margin,
                     reason=f"Exact name match: {table_name} == {exact.label}",
                     mode="STANDARD",
                 )
             else:
                 best = max(exact_matches, key=lambda c: c.lexical_sim)
-                margin = best.lexical_sim - (exact_matches[1].lexical_sim if len(exact_matches) > 1 else 0.0)
                 return GroundingResult(
                     source_table=table_name,
                     source_column="",
@@ -409,7 +392,6 @@ class GroundingService:
                     match_type="high_confidence",
                     relationship="closeMatch",
                     confidence=best.lexical_sim,
-                    margin=margin,
                     reason=(
                         f"Multiple exact-name matches ({len(exact_matches)}); "
                         "picked by embedding score (no LLM in STANDARD mode)"
@@ -427,8 +409,9 @@ class GroundingService:
         if grounding_mode == "STANDARD":
             # No LLM — classify purely on embedding score
             best = raw_candidates[0]
-            margin = best.lexical_sim - (raw_candidates[1].lexical_sim if len(raw_candidates) > 1 else 0.0)
-            match_type = _classify_with_margin(best.lexical_sim, margin, confidence_threshold, has_rerank=False)
+            match_type = classify_score_tier(
+                best.lexical_sim, has_rerank=False, confidence_threshold=confidence_threshold
+            )
             return GroundingResult(
                 source_table=table_name,
                 source_column="",
@@ -439,7 +422,6 @@ class GroundingService:
                 if match_type in ("exact", "high_confidence")
                 else ("relatedMatch" if match_type == "ambiguous" else None),
                 confidence=best.lexical_sim,
-                margin=margin,
                 reason=None,
                 mode="STANDARD",
             )
@@ -456,7 +438,6 @@ class GroundingService:
 
         if rerank_result is None or rerank_result.get("choice") == "NONE":
             # LLM abstained — novel
-            margin = raw_candidates[0].lexical_sim - (raw_candidates[1].lexical_sim if len(raw_candidates) > 1 else 0.0)
             return GroundingResult(
                 source_table=table_name,
                 source_column="",
@@ -465,7 +446,6 @@ class GroundingService:
                 match_type="novel",
                 relationship=None,
                 confidence=None,
-                margin=margin,
                 reason=rerank_result.get("reason", "LLM abstained") if rerank_result else "LLM call failed",
                 mode="ENHANCED",
             )
@@ -487,7 +467,6 @@ class GroundingService:
                 match_type="novel",
                 relationship=None,
                 confidence=None,
-                margin=0.0,
                 reason=f"LLM chose '{choice_name}' not in candidates",
                 mode="ENHANCED",
             )
@@ -497,8 +476,7 @@ class GroundingService:
         except (TypeError, ValueError):
             llm_confidence = 0.5
         relationship = rerank_result.get("relationship", "relatedMatch")
-        margin = llm_confidence - (raw_candidates[1].lexical_sim if len(raw_candidates) > 1 else 0.0)
-        match_type = _classify_with_margin(llm_confidence, margin, confidence_threshold, has_rerank=True)
+        match_type = classify_score_tier(llm_confidence, has_rerank=True, confidence_threshold=confidence_threshold)
 
         chosen.rerank_score = llm_confidence
         chosen.rerank_relationship = relationship
@@ -512,7 +490,6 @@ class GroundingService:
             match_type=match_type,
             relationship=relationship,
             confidence=llm_confidence,
-            margin=margin,
             reason=rerank_result.get("reason"),
             mode="ENHANCED",
         )

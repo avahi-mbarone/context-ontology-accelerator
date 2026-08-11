@@ -345,6 +345,8 @@ How to establish network connectivity between the Context Ontology Accelerator p
 
 ## Same-VPC (No Cross-Network)
 
+> **Note:** The `tests/cdk` directory referenced below is an internal integration-test stack and is not included in the public mirror. The CDK patterns shown here illustrate how to deploy companion test databases; adapt them to your own infrastructure stack.
+
 Simplest path. Deploy the test databases into Context Ontology Accelerator's VPC:
 
 ```bash

@@ -40,9 +40,6 @@ describe("McpStack", () => {
     const stack = new McpStack(app, "TestMcp", {
       env: { account: "123456789012", region: "us-east-1" },
       vpc,
-      issuerUrl: "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_test",
-      clientId: "test-client-id",
-      mcpClientId: "test-mcp-client-id",
       rolesTable: mkTable("Roles"),
       resourceRoleMappingsTable: mkTable("RRM"),
     });
@@ -116,6 +113,41 @@ describe("McpStack", () => {
     );
   });
 
+  it("sets JWT issuer/client env vars for independent signature verification", () => {
+    // Defense-in-depth: claims.py verifies signatures itself using the same
+    // issuer/audience the AuthorizerConfiguration below trusts, rather than
+    // assuming AgentCore's platform-level check is the only line of defense.
+    // Values are SSM dynamic references (resolved from the auth stack's
+    // /issuer and /mcp-client-id parameters at deploy time), not literals.
+    template.hasResourceProperties(
+      "AWS::BedrockAgentCore::Runtime",
+      Match.objectLike({
+        EnvironmentVariables: Match.objectLike({
+          JWT_ISSUER_URL: Match.anyValue(),
+          JWT_CLIENT_ID: Match.anyValue(),
+        }),
+      }),
+    );
+  });
+
+  it("resolves GROUP_CLAIM_NAME from SSM (not a hardcoded Cognito default)", () => {
+    // Regression: this used to be a hardcoded DEFAULT_GROUP_CLAIM
+    // ("cognito:groups") passed from app.ts regardless of idpType, which
+    // silently broke group-based role resolution on the direct-OIDC path
+    // (external IdPs configure their own claim name, e.g. plain "groups").
+    // Must be an SSM dynamic reference resolved from
+    // /authentication-group-token-name (written by idp-authentication-stack.ts
+    // on both the Cognito/SAML and OIDC paths), not a literal string.
+    template.hasResourceProperties(
+      "AWS::BedrockAgentCore::Runtime",
+      Match.objectLike({
+        EnvironmentVariables: Match.objectLike({
+          GROUP_CLAIM_NAME: Match.anyValue(),
+        }),
+      }),
+    );
+  });
+
   it("does NOT set data-plane env vars (delegated to CM)", () => {
     template.hasResourceProperties(
       "AWS::BedrockAgentCore::Runtime",
@@ -183,9 +215,7 @@ describe("McpStack", () => {
         Statement: Match.arrayWith([
           Match.objectLike({
             Effect: "Allow",
-            Action: Match.arrayWith([
-              "bedrock-agentcore:InvokeAgentRuntime",
-            ]),
+            Action: Match.arrayWith(["bedrock-agentcore:InvokeAgentRuntime"]),
           }),
         ]),
       },

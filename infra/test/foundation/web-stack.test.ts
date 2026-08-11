@@ -7,9 +7,7 @@ import { WebStack } from "../../lib/stacks/foundation";
 import { DEFAULT_RESOURCE_PREFIX } from "../../lib/constants";
 
 const BASE_PROPS = {
-  authority: "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_test",
-  clientId: "test-client-id",
-  userPoolId: "us-east-1_test",
+  isCognitoMode: true,
 };
 
 /**
@@ -127,8 +125,7 @@ describe("WebStack CloudFront WAF WebACL", () => {
     const app = new cdk.App({
       context: { resource_prefix: DEFAULT_RESOURCE_PREFIX, env: "dev" },
     });
-    const arn =
-      "arn:aws:wafv2:us-east-1:123456789012:global/webacl/byo-cf/def";
+    const arn = "arn:aws:wafv2:us-east-1:123456789012:global/webacl/byo-cf/def";
     const template = Template.fromStack(
       new WebStack(app, "TestWebByoWaf", { ...BASE_PROPS, webAclId: arn }),
     );
@@ -137,9 +134,9 @@ describe("WebStack CloudFront WAF WebACL", () => {
       DistributionConfig: Match.objectLike({ WebACLId: arn }),
     });
     // No custom resource performs an SSM getParameter on the BYO path.
-    const readers = Object.values(
-      template.findResources("Custom::AWS"),
-    ).filter((cr) => crCall(cr).includes("getParameter"));
+    const readers = Object.values(template.findResources("Custom::AWS")).filter(
+      (cr) => crCall(cr).includes("getParameter"),
+    );
     expect(readers).toHaveLength(0);
   });
 
@@ -157,16 +154,16 @@ describe("WebStack CloudFront WAF WebACL", () => {
       }),
     );
 
-    const readers = Object.values(
-      template.findResources("Custom::AWS"),
-    ).filter((cr) => {
-      const call = crCall(cr);
-      return (
-        call.includes("getParameter") &&
-        call.includes("/coa/edge/cloudfront-web-acl-arn") &&
-        call.includes("us-east-1")
-      );
-    });
+    const readers = Object.values(template.findResources("Custom::AWS")).filter(
+      (cr) => {
+        const call = crCall(cr);
+        return (
+          call.includes("getParameter") &&
+          call.includes("/coa/edge/cloudfront-web-acl-arn") &&
+          call.includes("us-east-1")
+        );
+      },
+    );
     expect(readers).toHaveLength(1);
   });
 });

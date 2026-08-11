@@ -31,6 +31,19 @@ DEFAULT_TIMEOUT = 30.0
 
 
 @dataclass(frozen=True)
+class SparqlProjection:
+    """SPARQL projection metadata from Ontop reformulation.
+
+    Maps SPARQL SELECT variables to SQL output column aliases, enabling
+    correct projection of raw SQL results to the SPARQL solution.
+    """
+
+    select_vars: list[str]
+    var_to_column: dict[str, str]
+    distinct: bool = False
+
+
+@dataclass(frozen=True)
 class VKGResult:
     """Result of SPARQL-to-SQL translation from VKG Service."""
 
@@ -39,6 +52,7 @@ class VKGResult:
     ontology_version: str
     source_table_refs: list[str] = field(default_factory=list)
     datasource_routing: dict[str, dict[str, str]] = field(default_factory=dict)
+    projection: SparqlProjection | None = None
 
 
 class VKGTranslationError(Exception):
@@ -138,12 +152,21 @@ class VKGClient:
 
         try:
             data = resp.json()
+            projection = None
+            if "projection" in data:
+                proj_data = data["projection"]
+                projection = SparqlProjection(
+                    select_vars=proj_data.get("selectVars", []),
+                    var_to_column=proj_data.get("varToColumn", {}),
+                    distinct=proj_data.get("distinct", False),
+                )
             return VKGResult(
                 sql=data["sql"],
                 dialect=data.get("dialect", "postgresql"),
                 ontology_version=data.get("ontologyVersion", "unknown"),
                 source_table_refs=data.get("sourceTableRefs", []),
                 datasource_routing=data.get("datasourceRouting", {}),
+                projection=projection,
             )
         except (KeyError, ValueError) as e:
             raise VKGTranslationError(f"VKG response parse error: {e}") from e

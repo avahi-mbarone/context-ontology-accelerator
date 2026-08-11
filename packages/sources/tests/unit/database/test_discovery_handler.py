@@ -157,9 +157,8 @@ class TestDiscoveryHandler:
         )
 
         # The handler is engine-agnostic: it routes every JDBC sub-type to the same
-        # connector. (SNOWFLAKE is currently withheld by PREVIEW_DATABASE_ENGINES, so
-        # the real connector would reject it — the connector is mocked here, which is
-        # what keeps this covering the handler's warehouse/role pass-through.)
+        # connector. The connector is mocked here, which is what keeps this covering
+        # the handler's warehouse/role pass-through regardless of the engine.
         mock_get_connector.assert_called_once_with("JDBC_DATABASE")
         # warehouse/role are passed through to the connector for the Snowflake dialect.
         cfg = connector.discover_metadata.call_args[0][0]

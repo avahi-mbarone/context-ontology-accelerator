@@ -193,17 +193,27 @@ export function OntologyPage() {
       .then(([catalogResp, allLoaded]) => {
         if (cancelled) return;
         setFoundationalCatalog(catalogResp.items ?? []);
-        const withEmbeddings = (allLoaded ?? []).filter(
-          (r) => (r.embedding_count ?? 0) > 0,
-        );
-        setLoadedOntologyRecords(withEmbeddings);
+        // Show ALL loaded ontologies — including ones that have not finished
+        // embedding (embedding_count == 0/null) or failed to ingest. Hiding
+        // them here made a still-embedding or failed-ingest ontology silently
+        // vanish from Start Induction with no signal (issue #540). Readiness
+        // (and thus selectability) is decided per row in the multiselect
+        // options below via ontologyIngestState().
+        const loaded = allLoaded ?? [];
+        setLoadedOntologyRecords(loaded);
         // Pre-check the namespace's accepted induced ontologies by default so
-        // new runs converge with prior ones (incremental induction). The user
-        // can deselect them — the backend grounds against exactly the selected
-        // pool, with no server-side auto-include.
+        // new runs converge with prior ones (incremental induction). Only
+        // READY induced ontologies are pre-selected — an un-embedded one is
+        // shown disabled and cannot be grounded against. The user can deselect
+        // them — the backend grounds against exactly the selected pool, with
+        // no server-side auto-include.
         setSelectedFoundationalKeys(
-          withEmbeddings
-            .filter((r) => r.ontology_type === "induced")
+          loaded
+            .filter(
+              (r) =>
+                r.ontology_type === "induced" &&
+                ontologyIngestState(r) === "ready",
+            )
             .map((r) => r.uri),
         );
       })
@@ -619,7 +629,7 @@ export function OntologyPage() {
                 </Popover>
               }
               description="Pick the ontologies to ground against for this run. Accepted induced ontologies are pre-selected (deselect to skip). Load foundational/uploaded ontologies from the Ontologies tab first."
-              constraintText="Only ontologies that have finished embedding appear here."
+              constraintText="Ontologies still embedding or failed to ingest are shown but not selectable."
             >
               {foundationalError && (
                 <Alert
@@ -650,22 +660,40 @@ export function OntologyPage() {
                       .filter((v): v is string => Boolean(v)),
                   )
                 }
-                // All loaded ontologies are SELECTABLE — induced, foundational,
-                // and uploaded. The backend grounds against EXACTLY the selected
-                // pool (no server-side auto-include). Induced ontologies are
+                // All loaded ontologies are SHOWN — induced, foundational, and
+                // uploaded. Ready ones (finished embedding) are SELECTABLE; the
+                // backend grounds against EXACTLY the selected pool (no
+                // server-side auto-include), and ready induced ontologies are
                 // pre-checked by default (see the load effect) so new runs
-                // converge with prior ones; the user can deselect them.
-                options={loadedOntologyRecords.map((rec) => ({
-                  value: rec.uri,
-                  label: rec.title || rec.ontology_id,
-                  labelTag:
-                    rec.ontology_type === "induced"
-                      ? "Induced"
-                      : rec.ontology_type === "foundational"
-                        ? "Foundational"
-                        : "Uploaded",
-                  description: rec.uri,
-                }))}
+                // converge with prior ones. Ontologies that have not finished
+                // embedding or failed to ingest are shown DISABLED with a
+                // per-row status label so they are not silently hidden from
+                // Start Induction (issue #540). Readiness is derived from
+                // ontologyIngestState() — the single source of truth also used
+                // by the Ontologies-list StatusIndicator — so the two views can
+                // never disagree about whether a row is ready.
+                options={loadedOntologyRecords.map((rec) => {
+                  const ingestState = ontologyIngestState(rec);
+                  const isReady = ingestState === "ready";
+                  const statusLabel =
+                    ingestState === "failed"
+                      ? "⚠️ Ingest failed"
+                      : ingestState === "ingesting"
+                        ? "⏳ Embedding…"
+                        : undefined;
+                  return {
+                    value: rec.uri,
+                    label: rec.title || rec.ontology_id,
+                    labelTag:
+                      rec.ontology_type === "induced"
+                        ? "Induced"
+                        : rec.ontology_type === "foundational"
+                          ? "Foundational"
+                          : "Uploaded",
+                    description: statusLabel ?? rec.uri,
+                    disabled: !isReady,
+                  };
+                })}
                 disabled={foundationalCatalog === null}
                 filteringType="auto"
               />
