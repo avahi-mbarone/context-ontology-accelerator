@@ -100,6 +100,18 @@ describe("IdpAuthenticationStack (OIDC)", () => {
     });
   });
 
+  test("stores external clientId as the MCP client ID in SSM", () => {
+    // External OIDC reuses one client ID for both web and MCP flows (see
+    // idp-authentication-stack.ts). serve-stack.ts and mcp-stack.ts both
+    // read /mcp-client-id unconditionally, regardless of idpType — this
+    // parameter must exist on every path or their SSM lookup 404s at
+    // deploy time (`Unable to fetch parameters [/mcp-client-id] ...`).
+    template.hasResourceProperties("AWS::SSM::Parameter", {
+      Name: `/${DEFAULT_RESOURCE_PREFIX}/mcp-client-id`,
+      Value: "0oa1bcdef",
+    });
+  });
+
   test("stores group claim in SSM", () => {
     template.hasResourceProperties("AWS::SSM::Parameter", {
       Name: `/${DEFAULT_RESOURCE_PREFIX}/authentication-group-token-name`,
@@ -143,8 +155,9 @@ describe("IdpAuthenticationStack (OIDC with jwksUri)", () => {
       }),
     );
 
-    // Should have 3 SSM params (client-id, issuer, group-token-name) but NOT jwks-uri
-    template.resourceCountIs("AWS::SSM::Parameter", 3);
+    // Should have 4 SSM params (client-id, mcp-client-id, issuer,
+    // group-token-name) but NOT jwks-uri
+    template.resourceCountIs("AWS::SSM::Parameter", 4);
   });
 });
 

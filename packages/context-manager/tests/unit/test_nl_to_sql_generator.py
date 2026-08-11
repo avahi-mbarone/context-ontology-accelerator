@@ -622,3 +622,55 @@ class TestSQLGeneratorCorrect:
             model_id="us.anthropic.claude-opus-4-8",
         )
         assert mock_llm.converse.call_args.kwargs["model_id"] == "us.anthropic.claude-opus-4-8"
+
+
+@pytest.mark.unit
+class TestSQLGeneratorDialect:
+    """Tests for per-request dialect override."""
+
+    @pytest.mark.asyncio
+    async def test_generate_uses_postgresql_dialect(self, mock_llm, mock_vector):
+        """When dialect=postgresql, the LLM system prompt should use PostgreSQL rules."""
+        generator = SQLGenerator(
+            llm_client=mock_llm,
+            vector_client=mock_vector,
+            dialect="athena",  # instance default
+        )
+        await generator.generate("count customers", namespace="ns", dialect="postgresql")
+
+        # System prompt should contain PostgreSQL-specific guidance
+        system_prompt = mock_llm.converse.call_args.kwargs["system"]
+        assert "PostgreSQL" in system_prompt
+        assert "||" in system_prompt  # PostgreSQL concat operator
+        assert "NUMERIC" in system_prompt or "TEXT" in system_prompt
+        # Should NOT contain Athena/Trino guidance
+        assert "Athena" not in system_prompt
+        assert "Trino" not in system_prompt
+
+    @pytest.mark.asyncio
+    async def test_generate_defaults_to_instance_dialect(self, mock_llm, mock_vector):
+        """Without a per-request dialect, the instance default is used."""
+        generator = SQLGenerator(
+            llm_client=mock_llm,
+            vector_client=mock_vector,
+            dialect="postgresql",  # instance default
+        )
+        await generator.generate("count customers", namespace="ns")
+
+        system_prompt = mock_llm.converse.call_args.kwargs["system"]
+        assert "PostgreSQL" in system_prompt
+
+    @pytest.mark.asyncio
+    async def test_generate_per_request_overrides_instance(self, mock_llm, mock_vector):
+        """Per-request dialect overrides the instance default."""
+        generator = SQLGenerator(
+            llm_client=mock_llm,
+            vector_client=mock_vector,
+            dialect="postgresql",  # instance default
+        )
+        await generator.generate("count customers", namespace="ns", dialect="athena")
+
+        system_prompt = mock_llm.converse.call_args.kwargs["system"]
+        assert "Athena" in system_prompt
+        assert "Trino" in system_prompt
+        assert "PostgreSQL" not in system_prompt

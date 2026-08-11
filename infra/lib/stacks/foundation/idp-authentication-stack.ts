@@ -163,6 +163,10 @@ export class IdpAuthenticationStack extends SCLStack {
         parameterName: `${ssmPrefix}/userpool-client-id`,
         stringValue: oidc.clientId,
       });
+      new ssm.StringParameter(this, "SsmMcpClientId", {
+        parameterName: `${ssmPrefix}/mcp-client-id`,
+        stringValue: this.mcpClientId,
+      });
       new ssm.StringParameter(this, "SsmAuthIssuer", {
         parameterName: `${ssmPrefix}/issuer`,
         stringValue: oidc.issuerUrl,

@@ -156,11 +156,32 @@ async def _ensure_initialized():
                 logger.info("jdbc_dispatch_enabled")
             except Exception as exc:
                 logger.warning("source_db_executor_unavailable", error=type(exc).__name__)
+
+        # Redshift Serverless executor for Glue/Iceberg sources that opt
+        # into Redshift execution (queryEngine=REDSHIFT). Built by default when a
+        # data-sources table is configured; set SCL_DISABLE_REDSHIFT_DISPATCH=true
+        # as an operational off-switch (composite then routes those sources to
+        # Athena — the prior behaviour). Never regresses non-Redshift sources.
+        redshift_executor = None
+        redshift_disabled = os.environ.get("SCL_DISABLE_REDSHIFT_DISPATCH", "").lower() == "true"
+        if not redshift_disabled and config.data_sources_table:
+            try:
+                from .clients.redshift_data import RedshiftDataAPIExecutor
+
+                redshift_executor = RedshiftDataAPIExecutor(
+                    sources_registry=sources_registry,
+                    region=config.bedrock_region,
+                )
+                logger.info("redshift_dispatch_enabled")
+            except Exception as exc:
+                logger.warning("redshift_executor_unavailable", error=type(exc).__name__)
+
         query_executor = CompositeQueryExecutor(
             athena_executor=athena_executor,
             source_db_executor=source_db_executor,
             firewall=SQLFirewall(),
             sources_registry=sources_registry,
+            redshift_executor=redshift_executor,
         )
 
         # Build tier resolvers
@@ -198,12 +219,17 @@ async def _ensure_initialized():
         # if retrieval guardrail not configured, screening is skipped.
         chunk_screener = None
         if config.retrieval_guardrail_id:
+            from coa_common.guardrail_metrics import COMPONENT_SERVE_RETRIEVAL
             from coa_common.guardrail_screener import GuardrailScreener
 
             chunk_screener = GuardrailScreener(
                 guardrail_id=config.retrieval_guardrail_id,
                 guardrail_version=config.retrieval_guardrail_version,
                 region=config.bedrock_region,
+                # Serve emits guardrail decision metrics as stdout EMF — no
+                # PutMetricData grant needed on the serve runtime role.
+                component=COMPONENT_SERVE_RETRIEVAL,
+                metrics_transport="emf",
             )
             logger.info("chunk_screener_enabled", guardrail_id=config.retrieval_guardrail_id)
 

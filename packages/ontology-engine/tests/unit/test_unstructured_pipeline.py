@@ -689,7 +689,6 @@ def _grounding_result_for(label: str):
             match_type="exact",
             relationship="exactMatch",
             confidence=0.96,
-            margin=0.1,
             reason="exact",
             mode="ENHANCED",
         )
@@ -701,7 +700,6 @@ def _grounding_result_for(label: str):
         match_type="novel",
         relationship=None,
         confidence=None,
-        margin=0.0,
         reason="novel",
         mode="ENHANCED",
     )

@@ -359,12 +359,22 @@ describe("GraphSearchPage — List view paging across chunks", () => {
     // kick off the offset-100 fetch while page-5 rows stay on screen.
     await userEvent.click(page5);
 
-    await waitFor(() =>
-      expect(
-        searchEntitiesPaged.mock.calls.some(
-          (c) => offsetOf(c[3]) === CLASS_FETCH_CHUNK_SIZE,
-        ),
-      ).toBe(true),
+    // Explicit timeout: this assertion polls for a state transition driven by
+    // React effect scheduling (click -> setState -> effect -> fetchNextPage),
+    // which the default 1000ms waitFor budget sometimes misses under full-suite
+    // parallel load (many vitest workers contending for CPU) even though the
+    // prefetch always fires — confirmed by running this test in isolation vs.
+    // under the full suite, and flaking only under the latter. Longer timeout,
+    // not a mock/logic change: the fix is tolerance for CI scheduling jitter,
+    // not the assertion's correctness.
+    await waitFor(
+      () =>
+        expect(
+          searchEntitiesPaged.mock.calls.some(
+            (c) => offsetOf(c[3]) === CLASS_FETCH_CHUNK_SIZE,
+          ),
+        ).toBe(true),
+      { timeout: 5000 },
     );
     // Rows are NOT replaced by a spinner: a page-5 row is visible, no loading text.
     expect(view.getByText("C099")).toBeInTheDocument();

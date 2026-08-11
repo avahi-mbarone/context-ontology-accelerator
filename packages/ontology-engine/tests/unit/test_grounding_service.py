@@ -232,7 +232,6 @@ class TestToConceptMatch:
             match_type="exact",
             relationship="exactMatch",
             confidence=0.92,
-            margin=0.41,
             reason="direct match",
             mode="ENHANCED",
         )

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -232,6 +232,117 @@ class TestBedrockLLMClient:
 
 
 @pytest.mark.unit
+class TestGuardrailDecisionMetrics:
+    """#111 AC10/AC11 — every guarded Converse emits metrics plus one log line.
+
+    Serve emits stdout EMF (no PutMetricData grant on the runtime role), so these
+    assert on the shared emitter's arguments rather than on a boto call.
+    """
+
+    _BLOCK_TRACE = {
+        "guardrail": {
+            "outputAssessment": {"0": {"contentPolicy": {"filters": [{"type": "VIOLENCE", "action": "BLOCKED"}]}}}
+        }
+    }
+
+    def _client(self, response: dict):
+        from coa_serve.clients.bedrock import BedrockLLMClient
+
+        mock_client = MagicMock()
+        mock_client.converse.return_value = response
+        client = BedrockLLMClient(model_id="test-model", region="us-east-1")
+        client._client = mock_client
+        return client
+
+    async def test_block_emits_block_decision_via_emf(self):
+        client = self._client(
+            {
+                "output": {"message": {"content": [{"text": "no"}]}},
+                "stopReason": "guardrail_intervened",
+                "trace": self._BLOCK_TRACE,
+            }
+        )
+
+        with patch("coa_serve.clients.bedrock.emit_guardrail_decision") as emit:
+            await client.converse("test", guardrail_id="gr-1")
+
+        kwargs = emit.call_args.kwargs
+        assert kwargs["blocked"] is True
+        assert kwargs["component"] == "nl-to-sparql"
+        assert kwargs["filter_type"] == "CONTENT"
+        assert kwargs["transport"] == "emf"
+        assert kwargs["latency_ms"] >= 0
+
+    async def test_allow_also_emits(self):
+        # A guardrail that stopped being called looks identical to one that
+        # never blocks unless the allow path is counted too.
+        client = self._client({"output": {"message": {"content": [{"text": "ok"}]}}})
+
+        with patch("coa_serve.clients.bedrock.emit_guardrail_decision") as emit:
+            await client.converse("test", guardrail_id="gr-1")
+
+        kwargs = emit.call_args.kwargs
+        assert kwargs["blocked"] is False
+        assert kwargs["filter_type"] == "NONE"
+
+    async def test_unguarded_call_emits_nothing(self):
+        # Counting unguarded calls as ALLOW would dilute the block rate.
+        client = self._client({"output": {"message": {"content": [{"text": "ok"}]}}})
+
+        with patch("coa_serve.clients.bedrock.emit_guardrail_decision") as emit:
+            await client.converse("test")
+
+        emit.assert_not_called()
+
+    async def test_block_with_no_text_still_emits_before_raising(self):
+        # A hard block is both the decision most worth counting and the case
+        # most likely to come back with no text blocks at all.
+        client = self._client({"output": {"message": {"content": []}}, "stopReason": "guardrail_intervened"})
+
+        with (
+            patch("coa_serve.clients.bedrock.emit_guardrail_decision") as emit,
+            pytest.raises(ValueError, match="No text content"),
+        ):
+            await client.converse("test", guardrail_id="gr-1")
+
+        assert emit.call_args.kwargs["blocked"] is True
+
+    async def test_decision_log_line_carries_required_keys(self):
+        from coa_common import guardrail_metrics
+
+        client = self._client(
+            {
+                "output": {"message": {"content": [{"text": "no"}]}},
+                "stopReason": "guardrail_intervened",
+                "trace": self._BLOCK_TRACE,
+            }
+        )
+
+        with patch.object(guardrail_metrics, "logger") as mock_logger:
+            await client.converse("test", guardrail_id="gr-1")
+
+        decision_calls = [c for c in mock_logger.info.call_args_list if c[0][0] == "guardrail_decision"]
+        assert len(decision_calls) == 1
+        assert set(decision_calls[0].kwargs) == {"component", "decision", "filter_type", "latency_ms"}
+        assert decision_calls[0].kwargs["decision"] == "BLOCK"
+
+    async def test_metric_failure_does_not_break_converse(self):
+        # Telemetry must never cost us the guardrail verdict.
+        client = self._client(
+            {
+                "output": {"message": {"content": [{"text": "no"}]}},
+                "stopReason": "guardrail_intervened",
+                "trace": self._BLOCK_TRACE,
+            }
+        )
+
+        with patch("coa_common.guardrail_metrics.emit_metric", side_effect=RuntimeError("boom")):
+            result = await client.converse("test", guardrail_id="gr-1")
+
+        assert result.guardrail_blocked is True
+
+
+@pytest.mark.unit
 class TestBedrockConverseStream:
     """Tests for converse_stream() method."""
 
@@ -425,8 +536,10 @@ class TestBedrockConverseStream:
     async def test_converse_temperature_fallback_retries_without_temperature(self):
         """Verify temperature fallback retries on ValidationException mentioning temperature."""
         from botocore.exceptions import ClientError
+        from coa_serve.clients import bedrock as bedrock_mod
         from coa_serve.clients.bedrock import BedrockLLMClient
 
+        bedrock_mod._MODELS_REJECTING_TEMPERATURE.discard("new-model")
         mock_client = MagicMock()
         error_response = {"Error": {"Code": "ValidationException", "Message": "temperature is not supported"}}
         mock_client.converse.side_effect = [
@@ -458,6 +571,52 @@ class TestBedrockConverseStream:
         with pytest.raises(ClientError):
             await client.converse("test")
         assert mock_client.converse.call_count == 1
+
+    async def test_temperature_rejection_is_remembered_per_model(self):
+        """The doomed first call is paid ONCE per model, not on every call.
+
+        Without memoization every Converse to a temperature-rejecting model
+        burned a failed request plus a retry (68% of calls in a measured integ
+        run), doubling LLM latency for the whole suite.
+        """
+        from botocore.exceptions import ClientError
+        from coa_serve.clients import bedrock as bedrock_mod
+        from coa_serve.clients.bedrock import BedrockLLMClient
+
+        bedrock_mod._MODELS_REJECTING_TEMPERATURE.discard("memo-model")
+        ok = {"output": {"message": {"content": [{"text": "ok"}]}}}
+        err = ClientError({"Error": {"Code": "ValidationException", "Message": "temperature is not supported"}}, "C")
+
+        mock_client = MagicMock()
+        mock_client.converse.side_effect = [err, ok, ok]
+
+        client = BedrockLLMClient(model_id="memo-model", region="us-east-1")
+        client._client = mock_client
+
+        first = await client.converse("test", temperature=0.5)
+        second = await client.converse("test", temperature=0.5)
+
+        assert (first.text, second.text) == ("ok", "ok")
+        # 2 for the first converse (rejected + retry), 1 for the second — not 4.
+        assert mock_client.converse.call_count == 3
+        assert "temperature" not in mock_client.converse.call_args_list[2][1].get("inferenceConfig", {})
+
+    async def test_temperature_memo_does_not_leak_across_models(self):
+        """One model rejecting temperature must not disable it for others."""
+        from coa_serve.clients import bedrock as bedrock_mod
+        from coa_serve.clients.bedrock import BedrockLLMClient
+
+        bedrock_mod._MODELS_REJECTING_TEMPERATURE.add("rejecting-model")
+        bedrock_mod._MODELS_REJECTING_TEMPERATURE.discard("accepting-model")
+
+        mock_client = MagicMock()
+        mock_client.converse.return_value = {"output": {"message": {"content": [{"text": "ok"}]}}}
+
+        client = BedrockLLMClient(model_id="accepting-model", region="us-east-1")
+        client._client = mock_client
+
+        await client.converse("test", temperature=0.5)
+        assert mock_client.converse.call_args[1]["inferenceConfig"]["temperature"] == 0.5
 
 
 @pytest.mark.unit

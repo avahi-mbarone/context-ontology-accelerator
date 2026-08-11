@@ -57,7 +57,6 @@ def _result(match_type: str, *, relationship: str | None, confidence: float | No
         match_type=match_type,
         relationship=relationship,
         confidence=confidence,
-        margin=0.0,
         reason=None,
         mode="ENHANCED",
     )
@@ -82,7 +81,6 @@ def _novel_with_candidates() -> GroundingResult:
         match_type="novel",
         relationship=None,
         confidence=None,
-        margin=0.0,
         reason="LLM abstained",
         mode="ENHANCED",
     )
@@ -524,7 +522,6 @@ class TestSelfGroundingGuard:
             match_type="exact",
             relationship="exactMatch",
             confidence=1.0,
-            margin=0.0,
             reason=None,
             mode="ENHANCED",
         )

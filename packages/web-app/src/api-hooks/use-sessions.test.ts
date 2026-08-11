@@ -10,7 +10,7 @@ vi.mock("@auth", () => ({
     build: () => ({
       getIdToken: vi.fn().mockResolvedValue("mock-token"),
       getUser: vi.fn().mockResolvedValue({
-        profile: { sub: "user-sub-uuid-1234567890123456" },
+        profile: { sub: "12345678-abcd-1234-abcd-1234567890ab" },
       }),
     }),
   },
@@ -186,8 +186,10 @@ describe("useSessions", () => {
     });
 
     const headers = mockFetch.mock.calls[0][1].headers;
+    // Length-prefixed (see deriveRuntimeSessionId): the prefix is what keeps
+    // two distinct subs from deriving the same session id.
     expect(headers["X-Amzn-Bedrock-AgentCore-Runtime-Session-Id"]).toBe(
-      "user-sub-uuid-1234567890123456",
+      "036-12345678-abcd-1234-abcd-1234567890ab",
     );
     expect(headers["Authorization"]).toBe("Bearer mock-token");
   });

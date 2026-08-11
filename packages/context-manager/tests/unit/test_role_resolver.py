@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from coa_serve import role_resolver
-from coa_serve.role_resolver import ResolvedProfile, resolve_profile
+from coa_serve.role_resolver import ResolvedProfile, build_principal_keys, resolve_profile
 
 _NS = "ns-123"
 
@@ -254,6 +254,58 @@ class TestResolveProfileEmailFallback:
         # Cedar will deny for _NS. Nothing for _NS should appear.
         assert {"role": "namespace-owner", "resourceUID": "other-ns"} in resolved.resource_roles
         assert all(rr["resourceUID"] != _NS for rr in resolved.resource_roles)
+
+
+@pytest.mark.unit
+class TestBuildPrincipalKeys:
+    """Isolated tests for the key-building helper.
+
+    resolve_profile exercises this via the DAO in TestResolveProfileEmailFallback;
+    these tests pin the pure key-shape contract without any DAO plumbing so a
+    regression in the shape itself is easy to spot.
+    """
+
+    def test_sub_only_yields_single_user_key(self):
+        keys = build_principal_keys(user_id="uuid-1234", email="", groups=[])
+        assert keys == ["User::uuid-1234"]
+
+    def test_email_only_yields_single_user_key(self):
+        # Fallback path: JWT had no sub, upstream promoted email to user_id.
+        # The email key is still queried (previously the guard skipped it).
+        keys = build_principal_keys(user_id="", email="alice@x.com", groups=[])
+        assert keys == ["User::alice@x.com"]
+
+    def test_sub_and_email_are_both_queried(self):
+        # The regression the fix targets: grant is stored under email, JWT
+        # presents sub. Both keys must be present in the lookup list.
+        keys = build_principal_keys(user_id="uuid-1234", email="alice@x.com", groups=[])
+        assert keys == ["User::uuid-1234", "User::alice@x.com"]
+
+    def test_sub_equals_email_is_deduplicated(self):
+        # When upstream falls back so user_id IS the email, the two identifiers
+        # produce the same encoded key. Deduping keeps the DDB query count at 1.
+        keys = build_principal_keys(user_id="alice@x.com", email="alice@x.com", groups=[])
+        assert keys == ["User::alice@x.com"]
+
+    def test_empty_inputs_yield_empty_list(self):
+        keys = build_principal_keys(user_id="", email="", groups=[])
+        assert keys == []
+
+    def test_groups_follow_user_keys(self):
+        keys = build_principal_keys(user_id="uuid-1234", email="", groups=["eng", "ops"])
+        assert keys == ["User::uuid-1234", "Group::eng", "Group::ops"]
+
+    def test_special_chars_encoded_in_all_keys(self):
+        # Every writer + reader must agree on encoding; the ``+``, ``/``, and
+        # other reserved characters must be URL-encoded consistently. Uses the
+        # shared sanitize_principal_key helper so grants for foo+123@x.com
+        # remain resolvable.
+        keys = build_principal_keys(user_id="uuid+1", email="foo+123@x.com", groups=["team/eng"])
+        assert keys == [
+            "User::uuid%2B1",
+            "User::foo%2B123@x.com",
+            "Group::team%2Feng",
+        ]
 
 
 @pytest.mark.unit

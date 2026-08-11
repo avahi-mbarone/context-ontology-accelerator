@@ -19,19 +19,26 @@ References:
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 import random
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import boto3
+import structlog
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import ClientError
 
-logger = logging.getLogger(__name__)
+from coa_common.config import resolve_region
+from coa_common.guardrail_metrics import (
+    COMPONENT_KG_BUILD,
+    emit_guardrail_decision,
+    filter_type_from_assessments,
+)
+
+logger = structlog.get_logger(__name__)
 
 # Guardrail policy paths covering all assessment types.
 # Consolidated from libs/common/bedrock.py and clients/bedrock.py (DRY).
@@ -100,6 +107,10 @@ class GuardrailScreener:
         guardrail_id: Bedrock guardrail identifier (retrieval guardrail).
         guardrail_version: Guardrail version string.
         region: AWS region. Defaults to AWS_REGION env var.
+        component: ``Component`` dimension for the decision metrics (#111 AC10).
+        metrics_transport: ``"put"`` (PutMetricData) or ``"emf"`` (stdout EMF).
+            Defaults to ``"put"`` because the primary caller is the kg-build ECS
+            Fargate task, which publishes its other custom metrics the same way.
     """
 
     def __init__(
@@ -107,11 +118,19 @@ class GuardrailScreener:
         guardrail_id: str,
         guardrail_version: str | None = None,
         region: str | None = None,
+        component: str = COMPONENT_KG_BUILD,
+        metrics_transport: Literal["put", "emf"] = "put",
     ) -> None:
         """Store guardrail coordinates and defer client creation until first use (see class Args)."""
         self._guardrail_id = guardrail_id
         self._guardrail_version = guardrail_version or os.environ.get("BEDROCK_GUARDRAIL_VERSION", "DRAFT")
-        self._region = region or os.environ.get("AWS_REGION", "us-east-1")
+        # resolve_region (AWS_REGION → AWS_DEFAULT_REGION → us-east-1) rather than a
+        # bespoke getenv: this region reaches both ApplyGuardrail and the guardrail
+        # decision metrics, so a wrong value screens against — and files metrics in —
+        # a region nobody watches. See config.resolve_region.
+        self._region = region or resolve_region()
+        self._component = component
+        self._metrics_transport = metrics_transport
         self._client: Any = None
 
     def _get_client(self):
@@ -150,8 +169,12 @@ class GuardrailScreener:
             return []
 
         content = [{"text": {"text": t}} for t in texts]
+        # Spans _call_with_retry, so GuardrailLatency includes retry backoff —
+        # deliberately, it is what the caller waited, not the server's own time.
+        start = time.monotonic()
         response = self._call_with_retry(content, source)
-        return self._parse_response(response, len(texts))
+        latency_ms = (time.monotonic() - start) * 1000
+        return self._parse_response(response, len(texts), latency_ms=latency_ms)
 
     async def ascreen_texts(self, texts: list[str], *, source: str = "INPUT") -> list[ScreeningResult]:
         """Evaluate texts against the guardrail (async, for serve layer).
@@ -193,11 +216,9 @@ class GuardrailScreener:
                 if not is_transient or attempt >= _MAX_RETRIES:
                     logger.error(
                         "guardrail_screener_failed",
-                        extra={
-                            "error_code": error_code,
-                            "status_code": status_code,
-                            "attempts": attempt + 1,
-                        },
+                        error_code=error_code,
+                        status_code=status_code,
+                        attempts=attempt + 1,
                     )
                     raise GuardrailScreenerError(
                         f"ApplyGuardrail failed after {attempt + 1} attempts: {error_code}"
@@ -206,31 +227,44 @@ class GuardrailScreener:
                 backoff = min(_MAX_BACKOFF_S, _INITIAL_BACKOFF_S * (2**attempt)) + random.uniform(0, 0.1)
                 logger.warning(
                     "guardrail_screener_retry",
-                    extra={
-                        "error_code": error_code,
-                        "attempt": attempt + 1,
-                        "backoff_s": round(backoff, 3),
-                    },
+                    error_code=error_code,
+                    attempt=attempt + 1,
+                    backoff_s=round(backoff, 3),
                 )
                 time.sleep(backoff)
                 attempt += 1
             except Exception as e:
-                logger.error("guardrail_screener_unexpected_error", extra={"error": str(e)})
+                logger.error("guardrail_screener_unexpected_error", error=str(e))
                 raise GuardrailScreenerError(f"Unexpected error calling ApplyGuardrail: {e}") from e
 
-    def _parse_response(self, response: dict, expected_count: int) -> list[ScreeningResult]:
+    def _emit_decision(self, *, blocked: bool, latency_ms: float, assessments: list[dict]) -> None:
+        """Emit the allow/block decision metrics + structured log line (#111 AC10/AC11)."""
+        emit_guardrail_decision(
+            component=self._component,
+            blocked=blocked,
+            latency_ms=latency_ms,
+            filter_type=filter_type_from_assessments(assessments),
+            transport=self._metrics_transport,
+            region=self._region,
+        )
+
+    def _parse_response(self, response: dict, expected_count: int, *, latency_ms: float = 0.0) -> list[ScreeningResult]:
         """Parse ApplyGuardrail response into ScreeningResult list.
 
         ApplyGuardrail evaluates all content blocks as one input and returns
         a single overall action + assessment. We apply the overall result to
         all texts uniformly. For per-text granularity, callers should invoke
         screen_texts() with one text at a time.
+
+        Emits one guardrail decision (metrics + log) per parsed response,
+        covering BOTH the allow and block outcomes.
         """
         action = response.get("action", "NONE")
         assessments = response.get("assessments", [])
 
         # Single overall action applies to all texts in the batch.
         if action == "NONE":
+            self._emit_decision(blocked=False, latency_ms=latency_ms, assessments=assessments)
             return [ScreeningResult(text_index=i, passed=True, action="NONE") for i in range(expected_count)]
 
         # GUARDRAIL_INTERVENED covers two very different outcomes:
@@ -247,6 +281,7 @@ class GuardrailScreener:
         # to inspect (anomalous with outputScope=FULL): we cannot prove the
         # intervention was benign anonymization, so treat it as a block.
         blocked = (not assessments) or any(assessment_has_block(a) for a in assessments)
+        self._emit_decision(blocked=blocked, latency_ms=latency_ms, assessments=assessments)
 
         if not blocked:
             # Anonymize-only (or no blocking policy fired): safe to use. The

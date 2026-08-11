@@ -3,11 +3,10 @@
 
 """JDBC connector — schema discovery + connectivity verification for relational databases.
 
-Schema discovery (``discover_metadata``) supports every engine with an ENABLED
-dialect (see ``dialects.py``): PostgreSQL, Redshift, MySQL, and SQL Server. The
-Snowflake and Oracle dialects are implemented but withheld — see
-``coa_common.constants.PREVIEW_DATABASE_ENGINES``. The connector owns the
-discovery flow; the dialect supplies the driver connection and the catalog SQL.
+Schema discovery (``discover_metadata``) supports every engine with a dialect
+(see ``dialects.py``): PostgreSQL, Redshift, MySQL, SQL Server, Snowflake, and
+Oracle. The connector owns the discovery flow; the dialect supplies the driver
+connection and the catalog SQL.
 
 Discovery flow:
   1. Resolve the engine's dialect and open one connection (creds from Secrets Manager).
@@ -76,8 +75,7 @@ class JdbcConnector:
             return ConnectionTestResult(success=False, message="Invalid host", checks=checks)
         engine = config.get("engine", "POSTGRESQL").upper()
         dialect = get_dialect(engine)
-        # No enabled dialect: an unknown engine token, or one withheld by
-        # dialects.PREVIEW_DATABASE_ENGINES. Fail fast with a clear message —
+        # No dialect for this engine token. Fail fast with a clear message —
         # otherwise the connect below dereferences None and reports the far less
         # useful "Database connection failed".
         if dialect is None:

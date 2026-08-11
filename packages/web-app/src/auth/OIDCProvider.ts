@@ -178,7 +178,25 @@ export class OIDCProvider {
     }
   }
 
-  /** Signs the user out and redirects to the post-logout URI. */
+  /**
+   * Signs the user out and redirects to the post-logout URI.
+   *
+   * Not every OIDC-compliant IdP advertises an `end_session_endpoint` in its
+   * discovery document — some enterprise SSO providers do not expose one:
+   * there is no IdP-hosted logout page to redirect through when session state
+   * lives at the browser/network layer, not as a per-relying-app IdP session to
+   * explicitly end). `signoutRedirect()` needs that endpoint to build its
+   * redirect URL and throws `Error("No end session endpoint")` when it's
+   * absent — uncaught, that leaves local state cleared (tokens removed) but
+   * the browser never navigates anywhere, so sign-out silently appears to do
+   * nothing instead of returning the user to the app.
+   *
+   * Checking `getEndSessionEndpoint()` first (the same optional-metadata
+   * helper `revokeRefreshToken()` already uses for the revocation endpoint)
+   * lets this fall back to a plain local redirect when the IdP has no
+   * end-session endpoint, while still using the standard IdP-redirect flow
+   * for any IdP that does advertise one (e.g. Cognito's hosted-UI logout).
+   */
   async signOut(): Promise<void> {
     // Revoke the refresh token at the IdP BEFORE clearing local state so a
     // stolen token cannot mint new tokens after logout. Best-effort — never
@@ -190,6 +208,18 @@ export class OIDCProvider {
     }
     await this.userManager.clearStaleState();
     await this.userManager.removeUser();
+
+    const endSessionEndpoint = await this.userManager.metadataService
+      .getEndSessionEndpoint()
+      .catch(() => undefined);
+
+    if (!endSessionEndpoint) {
+      // No IdP-hosted logout page to redirect through (e.g. Federate) — local
+      // state is already cleared above, so go straight to the post-logout URI.
+      window.location.href = this.logoutRedirectUri;
+      return;
+    }
+
     await this.userManager.signoutRedirect({
       post_logout_redirect_uri: this.logoutRedirectUri,
       extraQueryParams: {

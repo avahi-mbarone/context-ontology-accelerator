@@ -14,6 +14,8 @@ import re
 
 import boto3
 from coa_common.bedrock import DEFAULT_MODEL_ID, BedrockClient
+from coa_common.config import resolve_region
+from coa_common.guardrail_metrics import COMPONENT_ONTOLOGY_SHAPES
 
 from coa_ontology.validation.shapes.config import (
     ClassConstraints,
@@ -25,7 +27,18 @@ from coa_ontology.validation.shapes.config import (
 log = logging.getLogger(__name__)
 
 _GUARDRAIL_SSM_PARAM = os.getenv("GUARDRAIL_SSM_PARAM", "")
-_AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
+_AWS_REGION = resolve_region()
+
+
+def _default_bedrock_region() -> str:
+    """Region for the Bedrock client and its guardrail decision metrics.
+
+    The ontology ECS task sets BEDROCK_REGION/LLM_REGION but NOT AWS_REGION, so
+    defaulting to ``resolve_region()`` alone would publish guardrail metrics to
+    us-east-1 while the LLM call ran in the deployed region. Mirrors the
+    precedence in ``main.py``'s ``bedrock_region`` config entry.
+    """
+    return os.getenv("BEDROCK_REGION") or os.getenv("LLM_REGION") or resolve_region()
 
 
 def _resolve_guardrail_id() -> str | None:
@@ -114,7 +127,7 @@ Rules:
 def infer_constraints_from_ontology(
     ontology_turtle: str,
     existing_config: ConstraintConfig | None = None,
-    region: str = "us-east-1",
+    region: str | None = None,
     model_id: str = DEFAULT_MODEL_ID,
     client: BedrockClient | None = None,
 ) -> ConstraintConfig:
@@ -123,6 +136,11 @@ def infer_constraints_from_ontology(
     Uses the shared ``BedrockClient`` (lib/common) for the LLM call — it parses
     the JSON response and strips markdown fences. ``client`` is injectable for
     testing.
+
+    ``region`` defaults to the task's real Bedrock region (see
+    :func:`_default_bedrock_region`) rather than a hardcoded us-east-1 — the sole
+    production caller passes none, and the region also routes this call's
+    guardrail decision metrics.
     """
     if len(ontology_turtle) > 8000:
         truncated = ontology_turtle[:8000]
@@ -155,7 +173,12 @@ def infer_constraints_from_ontology(
         "Propose semantic constraints (JSON):"
     )
 
-    bedrock = client or BedrockClient(region=region, model_id=model_id, guardrail_id=_resolve_guardrail_id())
+    bedrock = client or BedrockClient(
+        region=region or _default_bedrock_region(),
+        model_id=model_id,
+        guardrail_id=_resolve_guardrail_id(),
+        component=COMPONENT_ONTOLOGY_SHAPES,
+    )
     try:
         data = bedrock.invoke(_INFER_SYSTEM, prompt, max_tokens=4096)
         classes = []
