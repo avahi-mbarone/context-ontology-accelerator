@@ -300,7 +300,25 @@ The handler loads Cedar policy text from the Roles table for each resolved role 
 
 ### Cache Invalidation
 
-The authorizer caches resolved roles in-memory across Lambda warm invocations. A DynamoDB Streams handler ([`authorization/stream_handler.py`](src/coa_control_plane/authorization/stream_handler.py)) watches the Roles and ResourceRoleMappings tables and bumps a version counter in a `CACHE_INVALIDATION_TABLE`. On each invocation, the authorizer checks this counter and clears its local cache on mismatch.
+The authorizer caches resolved roles in-memory across Lambda warm invocations
+(the API Gateway authorizer result cache is disabled — `authorizerResultTtl` is
+0 — so every request otherwise re-queries the `PrincipalIndex` GSI). Two
+independent bounds keep that cache from serving revoked authorization:
+
+1. **Version counter (primary).** A DynamoDB Streams handler
+   ([`authorization/stream_handler.py`](src/coa_control_plane/authorization/stream_handler.py))
+   watches the Roles and ResourceRoleMappings tables and bumps a version
+   counter in `CACHE_INVALIDATION_TABLE`. On each invocation the authorizer
+   reads the counter and clears its local cache on mismatch, so a grant change
+   takes effect within seconds. The stream event sources retry until a record
+   ages out of the 24h stream retention and park anything still failing in the
+   `cache-invalidation-dlq` SQS queue — a dropped record would otherwise leave
+   the counter permanently behind the tables.
+2. **Per-entry max age (backstop).** Entries expire after
+   `ROLES_CACHE_TTL_SECONDS` (default 60s) regardless of the counter, so a
+   broken stream or an unreadable counter bounds staleness to that window
+   instead of the container's lifetime. The cache is also capped at 1000
+   entries.
 
 ### API Gateway Caching Strategy
 
@@ -316,7 +334,8 @@ When Cedar allows a request, the returned IAM policy uses a wildcard resource AR
 | `GROUP_CLAIM_NAME` | No | JWT claim containing groups (default: `"groups"`) |
 | `RESOURCE_ROLE_MAPPINGS_TABLE_NAME` | Yes | Table for role resolution queries |
 | `ROLES_TABLE_NAME` | Yes | Table for loading Cedar policies |
-| `CACHE_INVALIDATION_TABLE_NAME` | No | Version counter table (cache disabled if absent) |
+| `CACHE_INVALIDATION_TABLE_NAME` | No | Version counter table (stream-driven invalidation disabled if absent — the per-entry max age still applies) |
+| `ROLES_CACHE_TTL_SECONDS` | No | Max age of an in-memory role cache entry (default `60`) |
 | `ALLOW_WITHOUT_ROLES` | No | Set `"true"` in dev to bypass Cedar evaluation |
 
 ## `coa_authorization` Module

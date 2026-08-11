@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import React, { useState } from "react";
+import Alert from "@cloudscape-design/components/alert";
 import Box from "@cloudscape-design/components/box";
 import Badge from "@cloudscape-design/components/badge";
 import Button from "@cloudscape-design/components/button";
@@ -49,6 +50,7 @@ export const ProfilePage: React.FC = () => {
   const {
     data: grantsData,
     isLoading: grantsLoading,
+    error: grantsError,
     refetch: refetchGrants,
     isFetching: isFetchingGrants,
   } = useListPrincipalGrants();
@@ -150,36 +152,49 @@ export const ProfilePage: React.FC = () => {
             id: "roles",
             label: `Roles (${grants.length})`,
             content: (
-              <Table<GrantSummary>
-                variant="container"
-                items={grants}
-                columnDefinitions={grantColumns}
-                trackBy="grantId"
-                loading={grantsLoading}
-                loadingText="Loading roles..."
-                header={
-                  <Header
-                    variant="h2"
-                    counter={`(${grants.length})`}
-                    actions={
-                      <Button
-                        iconName="refresh"
-                        loading={isFetchingGrants}
-                        onClick={() => refetchGrants()}
-                      >
-                        Refresh
-                      </Button>
-                    }
-                  >
-                    Your roles
-                  </Header>
-                }
-                empty={
-                  <Box textAlign="center" color="text-body-secondary">
-                    No roles assigned.
-                  </Box>
-                }
-              />
+              <SpaceBetween size="s">
+                {/* A failed grants query must not read as "you have no roles":
+                    an empty table is indistinguishable from a genuinely
+                    unprivileged account, which is the same silent-wrong-view
+                    failure the handler's fan-out fix removes server-side. */}
+                {grantsError && (
+                  <Alert type="error" header="Failed to load your roles">
+                    {grantsError.message}
+                  </Alert>
+                )}
+                <Table<GrantSummary>
+                  variant="container"
+                  items={grants}
+                  columnDefinitions={grantColumns}
+                  trackBy="grantId"
+                  loading={grantsLoading}
+                  loadingText="Loading roles..."
+                  header={
+                    <Header
+                      variant="h2"
+                      counter={`(${grants.length})`}
+                      actions={
+                        <Button
+                          iconName="refresh"
+                          loading={isFetchingGrants}
+                          onClick={() => refetchGrants()}
+                        >
+                          Refresh
+                        </Button>
+                      }
+                    >
+                      Your roles
+                    </Header>
+                  }
+                  empty={
+                    <Box textAlign="center" color="text-body-secondary">
+                      {grantsError
+                        ? "Roles could not be loaded."
+                        : "No roles assigned."}
+                    </Box>
+                  }
+                />
+              </SpaceBetween>
             ),
           },
           {

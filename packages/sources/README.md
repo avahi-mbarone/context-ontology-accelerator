@@ -78,7 +78,8 @@ Requires a deployed stack. Test files:
 | `test_sources_documents_integ.py` | Upload URL generation, LOCAL_UPLOAD + S3 doc source creation |
 | `test_sources_tables_integ.py` | List/get tables, edit table metadata, edit column metadata |
 | `test_sources_review_integ.py` | Per-table/column approve/reject, bulk approve→APPROVED, bulk reject→REJECTED |
-| `test_sources_database_subtypes_integ.py` | Per sub-type onboarding: GLUE + JDBC (POSTGRESQL/MYSQL/SQLSERVER/REDSHIFT) |
+| `test_sources_database_subtypes_integ.py` | Per sub-type onboarding: GLUE + JDBC (POSTGRESQL/MYSQL/SQLSERVER/REDSHIFT/ORACLE), plus the federated catalog being non-empty |
+| `test_sources_snowflake_integ.py` | SNOWFLAKE onboarding: warehouse round-trip, scan to `PENDING_REVIEW`, non-empty catalog, and no-warehouse → `SCAN_FAILED` |
 | `test_sources_isolation_integ.py` | Cross-namespace isolation (sources invisible across NS boundaries) |
 | `test_sources_authentication_integ.py` | Token validation (missing/invalid/valid) |
 
@@ -91,6 +92,18 @@ Environment variables:
 | `INTEG_TEST_DATABASES_STACK` | Override the test-databases stack name (default `coa-integ-test-databases`). |
 | `INTEG_ENRICHED_SOURCE_ID` / `INTEG_ENRICHED_NAMESPACE_ID` | Reuse a pre-existing reviewable source instead of creating one. |
 | `INTEG_JDBC_CONNECTIVITY=0` | Opt out of the Tier-B JDBC onboarding tests (scan to terminal). They run by default; set to `0` when cross-VPC connectivity to the test-databases VPC (`tests/cdk/scripts/connect-cross-network.sh`) or the discovery role's access to the credential secrets is not in place, so the scan isn't expected to fail. |
+| `SNOWFLAKE_HOST`, `SNOWFLAKE_SECRET_ARN`, `SNOWFLAKE_WAREHOUSE` | Required to run `test_sources_snowflake_integ.py` — Snowflake is an external SaaS account, so it cannot be stack-provisioned. All three unset ⇒ the suite skips with the missing names listed (never a silent pass). |
+| `SNOWFLAKE_DATABASE`, `SNOWFLAKE_SCHEMA` | Optional Snowflake overrides (default `SNOWFLAKE_SAMPLE_DATA` / `TPCH_SF1`). |
+
+The Snowflake account is a 30-day trial, so `test_sources_snowflake_integ.py`
+**skips instead of failing** when a scan fails with an account-level error
+(trial ended, account suspended/locked, credentials rejected) — that is an
+environment problem no code change can fix. The tolerated signatures are listed
+in `_ACCOUNT_UNAVAILABLE_SIGNATURES` and deliberately exclude anything a bad
+request of ours could also produce (e.g. `does not exist or not authorized`,
+which is what a wrong warehouse value looks like). The classifier has unit
+coverage in `tests/unit/database/test_snowflake_integ_gating.py`, since getting
+it wrong either swallows real defects or reports unfixable failures.
 
 ## Package Structure
 

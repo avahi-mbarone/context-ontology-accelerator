@@ -116,10 +116,21 @@ export const ChatBubble: React.FC<ChatBubbleProps> = ({
   if (!response) return null;
 
   if (response.guardrailBlocked) {
+    // Render the blocked answer through Markdown (same pipeline as the normal
+    // path) so headings / bold / code / tables are formatted rather than shown
+    // as raw Markdown syntax. Wrap in a warning Alert to keep the "blocked"
+    // affordance. StatusIndicator (previously used here) renders plain text and
+    // does not parse Markdown.
     return (
-      <StatusIndicator type="warning">
-        {response.synthesizedAnswer || content}
-      </StatusIndicator>
+      <Alert type="warning" statusIconAriaLabel="Warning">
+        <div style={{ fontSize: "14px", lineHeight: "20px" }}>
+          <TextContent>
+            <Markdown remarkPlugins={[remarkGfm]}>
+              {response.synthesizedAnswer || content}
+            </Markdown>
+          </TextContent>
+        </div>
+      </Alert>
     );
   }
 
@@ -128,6 +139,33 @@ export const ChatBubble: React.FC<ChatBubbleProps> = ({
     : "";
 
   const displayAnswer = response.synthesizedAnswer || content;
+
+  // Which engine actually executed the SQL, read from the execute trace step's
+  // engine tag (athena | redshift | jdbc). Falls back to a neutral label when the
+  // tag is absent (older responses / non-SQL paths).
+  const executionEngineLabel = ((): string => {
+    const engineTag = (response.trace ?? [])
+      .map((s) =>
+        s && typeof s.detail === "object" && s.detail
+          ? (s.detail as Record<string, unknown>).engine
+          : undefined,
+      )
+      .find((e): e is string => typeof e === "string" && e.length > 0);
+    switch ((engineTag ?? "").toLowerCase()) {
+      case "athena":
+        return "Athena";
+      case "redshift":
+        return "Redshift";
+      case "jdbc":
+        return "the JDBC engine";
+      default:
+        return "the query engine";
+    }
+  })();
+
+  const sqlArtifactCaption = response.sparqlGenerated
+    ? `The SPARQL the LLM emitted (Tier 2) and the SQL ${executionEngineLabel} executed.`
+    : `The SQL ${executionEngineLabel} executed.`;
 
   return (
     <SpaceBetween size="s">
@@ -154,11 +192,7 @@ export const ChatBubble: React.FC<ChatBubbleProps> = ({
       {(response.sparqlGenerated || response.queryUsed) && (
         <ExpandableSection
           headerText="Compiled artifacts"
-          headerDescription={
-            response.sparqlGenerated
-              ? "The SPARQL the LLM emitted (Tier 2) and the SQL Athena executed."
-              : "The SQL Athena executed."
-          }
+          headerDescription={sqlArtifactCaption}
           variant="footer"
         >
           <SpaceBetween size="s">

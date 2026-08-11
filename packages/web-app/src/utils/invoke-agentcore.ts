@@ -9,6 +9,7 @@
  * use-session-history.ts, and use-playground-stream.ts.
  */
 import { OIDCProvider } from "@auth";
+import { deriveRuntimeSessionId } from "./runtime-session-id";
 
 export interface AgentCoreRequestOptions {
   /** AgentCore Runtime endpoint URL. */
@@ -74,7 +75,7 @@ export async function invokeAgentCore(
     const token = await provider.getIdToken();
     if (!token) return null;
     const user = await provider.getUser();
-    const runtimeSessionId = user?.profile?.sub;
+    const runtimeSessionId = deriveRuntimeSessionId(user?.profile?.sub);
 
     let response: Response;
     try {

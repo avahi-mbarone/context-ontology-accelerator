@@ -39,10 +39,18 @@ class ResolvedProfile:
     table_allowlist: list[str] | None = None
     column_denylist: dict[str, list[str]] | None = None
     allowed_metrics: list[str] | None = None
+    # JWT ``email`` claim, empty when the token has none. Carried for DISPLAY
+    # only (the rationale panel's Principal row) — ``user_id`` stays the key for
+    # grant lookup, Cedar, and session tracking, since it is the one claim every
+    # IdP guarantees. Injected from the validated token, which also overwrites
+    # any client-supplied ``profile["email"]``.
+    email: str = ""
 
     def inject_into(self, profile: dict[str, Any]) -> None:
         """Inject resolved fields into a mutable profile dict."""
         profile["userId"] = self.user_id
+        if self.email:
+            profile["email"] = self.email
         if self.groups:
             profile["groups"] = self.groups
         if self.global_roles:
@@ -55,6 +63,43 @@ class ResolvedProfile:
             profile["columnDenylist"] = self.column_denylist
         if self.allowed_metrics is not None:
             profile["allowedMetrics"] = self.allowed_metrics
+
+
+def build_principal_keys(
+    *,
+    user_id: str,
+    email: str,
+    groups: list[str],
+) -> list[str]:
+    """Build the PrincipalIndex GSI lookup keys for a caller.
+
+    Grants can be written under any identifier the caller presents at query
+    time (sub, email, group membership). Every known identifier is included
+    so a grant written under one form resolves regardless of which identifier
+    the JWT primarily surfaces. Duplicates (e.g. sub == email post-encoding)
+    are collapsed to keep the DDB query count at the minimum.
+
+    Args:
+        user_id: The JWT sub (or upstream fallback identifier).
+        email: The JWT email claim; empty when the token has none.
+        groups: The caller's group memberships from the JWT.
+
+    Returns:
+        Ordered list of ``User::…`` and ``Group::…`` keys, deduplicated.
+        Order matters only for readability of downstream logs — grants under
+        every key are merged equally.
+    """
+    seen: set[str] = set()
+    keys: list[str] = []
+    for identifier in (user_id, email):
+        if not identifier:
+            continue
+        key = f"User::{sanitize_principal_key(identifier)}"
+        if key not in seen:
+            seen.add(key)
+            keys.append(key)
+    keys.extend(f"Group::{sanitize_principal_key(g)}" for g in groups)
+    return keys
 
 
 def resolve_profile(
@@ -82,22 +127,14 @@ def resolve_profile(
             grants are more permissive than the truth, so a transient DynamoDB
             error would widen data access.
     """
-    result = ResolvedProfile(user_id=user_id, groups=groups)
+    result = ResolvedProfile(user_id=user_id, groups=groups, email=email)
 
     if not _RRM_TABLE:
         return result
 
     dao = DynamoDBDAO(_RRM_TABLE, region=_AWS_REGION)
 
-    principal_keys = [f"User::{sanitize_principal_key(user_id)}"]
-    # Also look up by email when the JWT sub (UUID) differs from the email.
-    # Grants created via the control-plane API are keyed by email, while the
-    # Context Manager uses the JWT sub as user_id. Without this second lookup,
-    # namespace-owner / data-analyst grants written against email are invisible
-    # to the role resolver and Cedar denies the query.
-    if email and email != user_id:
-        principal_keys.append(f"User::{sanitize_principal_key(email)}")
-    principal_keys.extend(f"Group::{sanitize_principal_key(g)}" for g in groups)
+    principal_keys = build_principal_keys(user_id=user_id, email=email, groups=groups)
 
     # Collect all grant items for this principal.
     #

@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from coa_common.constants import RESOURCE_PREFIX
 from coa_serve.clients.base import QueryResult as ExecQueryResult
-from coa_serve.clients.vkg import VKGClient, VKGResult, VKGTranslationError
+from coa_serve.clients.vkg import SparqlProjection, VKGClient, VKGResult, VKGTranslationError
 from coa_serve.tier2.ontop.vkg_translator import (
     Tier2Status,
     Tier2Step,
@@ -21,7 +21,7 @@ from coa_serve.tier2.sql_firewall import FirewallResult, SQLFirewall
 _TEST_VKG_ENDPOINT = "http://vkg.test-services.local:8080"
 
 
-def _make_vkg_client(sql="SELECT 1", tables=None, error=None):
+def _make_vkg_client(sql="SELECT 1", tables=None, error=None, projection=None):
     client = AsyncMock(spec=VKGClient)
     if error:
         client.translate.side_effect = error
@@ -31,6 +31,7 @@ def _make_vkg_client(sql="SELECT 1", tables=None, error=None):
             dialect="postgresql",
             ontology_version="v2.1",
             source_table_refs=tables or ["catalog.schema.orders"],
+            projection=projection,
         )
     return client
 
@@ -63,10 +64,14 @@ def _make_executor(rows=None, error=None):
     if error:
         executor.execute.side_effect = error
     else:
+        effective_rows = rows or [{"id": 1, "amount": 100}]
+        # Derive columns from the rows, as the real executors do — hardcoding
+        # them lets a test assert a projection over columns that the result
+        # set does not actually contain.
         executor.execute.return_value = ExecQueryResult(
-            rows=rows or [{"id": 1, "amount": 100}],
-            columns=["id", "amount"],
-            row_count=len(rows) if rows else 1,
+            rows=effective_rows,
+            columns=list(effective_rows[0].keys()) if effective_rows else [],
+            row_count=len(effective_rows),
             truncated=False,
             duration_ms=30,
         )
@@ -390,3 +395,197 @@ class TestVKGTranslatorDynamicRouting:
         )
         mock_client.translate.assert_called_once()
         assert result.vkg_result.sql == "SELECT ns_specific"
+
+
+@pytest.mark.unit
+class TestSparqlProjection:
+    """Tests for _project_to_sparql — mapping SQL columns to SPARQL variables."""
+
+    async def test_project_to_sparql_renames_columns(self):
+        """Projection renames SQL aliases to SPARQL variable names."""
+        projection = SparqlProjection(
+            select_vars=["employeeName"],
+            var_to_column={"employeeName": "full_name1m54"},
+            distinct=False,
+        )
+        raw_result = ExecQueryResult(
+            rows=[
+                {"full_name1m54": "Mel Brooks", "id1m52": "nm0000316", "title1m52": "Spaceballs"},
+                {"full_name1m54": "Bill Pullman", "id1m52": "nm0000597", "title1m52": "Spaceballs"},
+            ],
+            columns=["full_name1m54", "id1m52", "title1m52"],
+            row_count=2,
+            truncated=False,
+        )
+        translator = _make_translator()
+        projected = translator._project_to_sparql(raw_result, projection)
+        assert projected.columns == ["employeeName"]
+        assert projected.rows == [{"employeeName": "Mel Brooks"}, {"employeeName": "Bill Pullman"}]
+        assert projected.row_count == 2
+
+    async def test_project_to_sparql_preserves_duplicates_when_not_distinct(self):
+        """Plain SELECT keeps duplicate rows (bag semantics)."""
+        projection = SparqlProjection(
+            select_vars=["name"],
+            var_to_column={"name": "name_col"},
+            distinct=False,
+        )
+        raw_result = ExecQueryResult(
+            rows=[{"name_col": "Mel Brooks"}, {"name_col": "Mel Brooks"}, {"name_col": "Bill Pullman"}],
+            columns=["name_col"],
+            row_count=3,
+            truncated=False,
+        )
+        translator = _make_translator()
+        projected = translator._project_to_sparql(raw_result, projection)
+        assert len(projected.rows) == 3
+        assert projected.rows[0] == {"name": "Mel Brooks"}
+        assert projected.rows[1] == {"name": "Mel Brooks"}
+
+    async def test_project_to_sparql_deduplicates_when_distinct(self):
+        """SELECT DISTINCT collapses duplicate rows."""
+        projection = SparqlProjection(
+            select_vars=["name"],
+            var_to_column={"name": "name_col"},
+            distinct=True,
+        )
+        raw_result = ExecQueryResult(
+            rows=[{"name_col": "Mel Brooks"}, {"name_col": "Mel Brooks"}, {"name_col": "Bill Pullman"}],
+            columns=["name_col"],
+            row_count=3,
+            truncated=False,
+        )
+        translator = _make_translator()
+        projected = translator._project_to_sparql(raw_result, projection)
+        assert len(projected.rows) == 2
+        assert {"name": "Mel Brooks"} in projected.rows
+        assert {"name": "Bill Pullman"} in projected.rows
+
+    async def test_project_to_sparql_multi_var(self):
+        """Multiple SELECT variables are projected in order."""
+        projection = SparqlProjection(
+            select_vars=["name", "age"],
+            var_to_column={"name": "n_alias", "age": "a_alias"},
+            distinct=False,
+        )
+        raw_result = ExecQueryResult(
+            rows=[{"n_alias": "Alice", "a_alias": 30, "extra_col": "ignored"}],
+            columns=["n_alias", "a_alias", "extra_col"],
+            row_count=1,
+            truncated=False,
+        )
+        translator = _make_translator()
+        projected = translator._project_to_sparql(raw_result, projection)
+        assert projected.columns == ["name", "age"]
+        assert projected.rows == [{"name": "Alice", "age": 30}]
+
+    async def test_resolve_applies_projection_when_present(self):
+        """End-to-end: resolve() projects results if VKG returns projection metadata."""
+        projection = SparqlProjection(
+            select_vars=["employeeName"],
+            var_to_column={"employeeName": "full_name1m54"},
+            distinct=False,
+        )
+        vkg = _make_vkg_client(sql="SELECT ...", projection=projection)
+        # Executor returns raw SQL columns
+        executor = _make_executor(
+            rows=[
+                {"full_name1m54": "Mel Brooks", "id1m52": "nm0000316"},
+            ]
+        )
+        translator = _make_translator(vkg_client=vkg, executor=executor)
+        result = await translator.resolve("SELECT ?employeeName WHERE {...}", namespace="demo")
+        assert result.error is None
+        assert result.query_result.columns == ["employeeName"]
+        assert result.query_result.rows == [{"employeeName": "Mel Brooks"}]
+
+    async def test_resolve_skips_projection_when_absent(self):
+        """Fallback: if VKG returns no projection, raw SQL columns are kept."""
+        vkg = _make_vkg_client(sql="SELECT id FROM orders", projection=None)
+        executor = _make_executor(rows=[{"id": 123, "amount": 999}])
+        translator = _make_translator(vkg_client=vkg, executor=executor)
+        result = await translator.resolve("SELECT ?o WHERE {...}", namespace="demo")
+        assert result.error is None
+        # No projection → raw SQL columns
+        assert result.query_result.columns == ["id", "amount"]
+        assert result.query_result.rows == [{"id": 123, "amount": 999}]
+
+    async def test_project_to_sparql_returns_raw_when_alias_missing(self):
+        """An alias absent from the result degrades to the raw result.
+
+        Reading a missing key would yield an all-None column under a
+        correct-looking header, which is worse than showing SQL aliases.
+        """
+        projection = SparqlProjection(
+            select_vars=["employeeName"],
+            var_to_column={"employeeName": "not_in_result"},
+            distinct=False,
+        )
+        raw_result = ExecQueryResult(
+            rows=[{"full_name1m3": "Mel Brooks"}],
+            columns=["full_name1m3"],
+            row_count=1,
+            truncated=False,
+        )
+        translator = _make_translator()
+        projected = translator._project_to_sparql(raw_result, projection)
+        assert projected is raw_result
+
+    async def test_project_to_sparql_matches_alias_case_insensitively(self):
+        """Drivers that upper/lower-case column labels still project correctly."""
+        projection = SparqlProjection(
+            select_vars=["employeeName"],
+            var_to_column={"employeeName": "FULL_NAME1m3"},
+            distinct=False,
+        )
+        raw_result = ExecQueryResult(
+            rows=[{"full_name1m3": "Mel Brooks"}],
+            columns=["full_name1m3"],
+            row_count=1,
+            truncated=False,
+        )
+        translator = _make_translator()
+        projected = translator._project_to_sparql(raw_result, projection)
+        assert projected.columns == ["employeeName"]
+        assert projected.rows == [{"employeeName": "Mel Brooks"}]
+
+    async def test_project_to_sparql_reversed_case_mismatch_also_matches(self):
+        """The fallback works in both directions: lower alias, upper columns."""
+        projection = SparqlProjection(
+            select_vars=["employeeName"],
+            var_to_column={"employeeName": "full_name1m3"},
+            distinct=False,
+        )
+        raw_result = ExecQueryResult(
+            rows=[{"FULL_NAME1M3": "Mel Brooks"}],
+            columns=["FULL_NAME1M3"],
+            row_count=1,
+            truncated=False,
+        )
+        translator = _make_translator()
+        projected = translator._project_to_sparql(raw_result, projection)
+        assert projected.columns == ["employeeName"]
+        assert projected.rows == [{"employeeName": "Mel Brooks"}]
+
+    async def test_project_to_sparql_prefers_exact_alias_over_case_folded(self):
+        """Exact match wins when columns differ only by case.
+
+        ``by_lower`` keeps one entry per lower-cased label, so a case-folded
+        lookup alone could resolve "NAME" to "name" and read the wrong value —
+        a correct-looking header over wrong data, which is the failure class
+        this projection exists to prevent. Pins the branch ordering.
+        """
+        projection = SparqlProjection(
+            select_vars=["v"],
+            var_to_column={"v": "NAME"},
+            distinct=False,
+        )
+        raw_result = ExecQueryResult(
+            rows=[{"NAME": "right-one", "name": "wrong-one"}],
+            columns=["NAME", "name"],
+            row_count=1,
+            truncated=False,
+        )
+        translator = _make_translator()
+        projected = translator._project_to_sparql(raw_result, projection)
+        assert projected.rows == [{"v": "right-one"}]

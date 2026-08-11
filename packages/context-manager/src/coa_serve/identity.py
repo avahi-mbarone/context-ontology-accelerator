@@ -72,3 +72,28 @@ def resolve_user_id(payload: dict, jwt_user_id: str, jwt_email: str) -> str:
         return jwt_email
     profile = payload.get("profile") or {}
     return profile.get("userId", "") if isinstance(profile, dict) else ""
+
+
+def display_principal(profile: dict | None) -> str | None:
+    """Human-readable caller identity for response metadata and trace details.
+
+    ``profile["userId"]`` is the JWT ``sub`` — a Cognito UUID or equivalent, and
+    the right key for grant lookup, Cedar, and session tracking, since it is the
+    one claim every IdP guarantees. It means nothing to the person reading it, so
+    prefer the ``email`` claim when the role resolver injected one: the Playground
+    renders these values verbatim, and "alice@example.com" tells the reader whose
+    grants produced the answer where a UUID does not.
+
+    A display label only — it never feeds authorization, which reads ``userId``.
+    The substitution is honest rather than cosmetic: email IS a principal identity
+    in the grant model (:func:`role_resolver.build_principal_keys` resolves grants
+    under both ``User::<sub>`` and ``User::<email>``), so the two name the same
+    principal. Only the JWT-derived email reaches the profile — ``main.py`` strips
+    a client-supplied ``email`` before ``ResolvedProfile.inject_into`` writes the
+    validated one — so this cannot be spoofed by the request body.
+
+    Accepts ``None`` so no call site needs its own ``profile or {}`` guard;
+    forgetting that guard is what kept the Tier-3 paths on the raw sub.
+    """
+    p = profile or {}
+    return p.get("email") or p.get("userId")

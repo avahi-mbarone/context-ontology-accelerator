@@ -138,16 +138,36 @@ class TestListPrincipalGrants:
         assert key == "User::alice@company.com"
 
     @patch("coa_control_plane.grants.list_principal_grants_handler.DynamoDBDAO")
-    def test_limits_groups_to_max(self, mock_dao_cls):
+    def test_does_not_truncate_realistic_amazon_internal_group_counts(self, mock_dao_cls):
+        # Regression: the old _MAX_GROUPS = 10 silently dropped any group past
+        # the 10th, which is well within normal range for an enterprise SSO
+        # user (real observed tokens carry 100+
+        # groups). A caller's own platform-admin grant could vanish from this
+        # listing while still being correctly enforced by the (uncapped)
+        # authorization handler — a confusing, hard-to-diagnose split between
+        # what a user can do and what they're shown they can do.
         mock_dao = MagicMock()
         mock_dao_cls.return_value = mock_dao
         mock_dao.query_all.return_value = []
 
-        many_groups = ",".join(f"group{i}" for i in range(20))
+        many_groups = ",".join(f"group{i}" for i in range(140))
         resp = handler(_event_me("a@b.com", many_groups), None)
         assert resp["statusCode"] == 200
-        # 1 user + max 10 groups = 11 queries
-        assert mock_dao.query_all.call_count == 11
+        # 1 user + all 140 groups queried — nothing truncated below _MAX_GROUPS
+        assert mock_dao.query_all.call_count == 141
+
+    @patch("coa_control_plane.grants.list_principal_grants_handler.DynamoDBDAO")
+    def test_limits_groups_to_max_as_a_circuit_breaker(self, mock_dao_cls):
+        mock_dao = MagicMock()
+        mock_dao_cls.return_value = mock_dao
+        mock_dao.query_all.return_value = []
+
+        many_groups = ",".join(f"group{i}" for i in range(300))
+        resp = handler(_event_me("a@b.com", many_groups), None)
+        assert resp["statusCode"] == 200
+        # 1 user + max 250 groups = 251 queries; the circuit breaker still
+        # exists, just sized well above any observed real-world group count.
+        assert mock_dao.query_all.call_count == 251
 
     @patch("coa_control_plane.grants.list_principal_grants_handler.DynamoDBDAO")
     def test_skips_invalid_group_names(self, mock_dao_cls):

@@ -7,26 +7,28 @@ Validates bearer tokens (JWT for humans, Agent Access Tokens for agents),
 resolves roles from DynamoDB, evaluates Cedar policies, and returns an
 IAM policy document with forwarded authorization context.
 
-API Gateway's built-in authorizer result cache handles caching of
-authorization decisions — this handler does not maintain its own cache.
-The version-based cache invalidation is used to detect stale
-role data in DynamoDB between Lambda warm invocations.
+The API Gateway authorizer result cache is disabled (``authorizerResultTtl``
+is 0), so every request reaches this handler. To keep that off the
+ResourceRoleMappings GSI, resolved roles are cached in-process, guarded by
+two independent bounds: the version counter in the CacheInvalidation table
+(bumped by ``stream_handler`` on any grant change, so a revocation takes
+effect within seconds) and a per-entry max age, so staleness stays bounded
+even if the stream or the counter read is broken.
 """
 
 from __future__ import annotations
 
 import os
+import time
 from typing import Any
-from urllib.parse import urlparse
 
 import structlog
 from coa_authorization.policy_evaluator import evaluate
 from coa_common import sanitize_principal_key
 from coa_common.auth import (
-    CognitoTokenAuthorizer,
-    OIDCTokenAuthorizer,
     TokenAuthorizer,
     TokenValidationResult,
+    build_token_authorizer,
 )
 from coa_common.dao import DynamoDBDAO
 from coa_common.dao.base import QueryParams
@@ -69,55 +71,18 @@ _ARCHIVED_STATUS = "ARCHIVED"
 _token_authorizer: TokenAuthorizer | None = None
 
 
-def _is_cognito_issuer(issuer: str) -> bool:
-    """True when *issuer* is an Amazon Cognito user-pool issuer URL.
-
-    Parses the URL and matches on the host label rather than searching the raw
-    string. A substring test such as ``"cognito-idp" in issuer`` would also
-    match an attacker-controlled host that merely embeds the token — e.g.
-    ``https://cognito-idp.amazonaws.com.evil.test/pool`` or a URL carrying it
-    in the path or query — and would pick the Cognito authorizer for a
-    non-Cognito identity provider.
-    """
-    parsed = urlparse(issuer)
-    if parsed.scheme != "https":
-        return False
-    host = (parsed.hostname or "").lower()
-    # Canonical form: cognito-idp.<region>.amazonaws.com (or .amazonaws.com.cn
-    # in the China partition).
-    labels = host.split(".")
-    return (
-        len(labels) >= 4
-        and labels[0] == "cognito-idp"
-        and (host.endswith(".amazonaws.com") or host.endswith(".amazonaws.com.cn"))
-    )
-
-
 def _get_token_authorizer() -> TokenAuthorizer:
     global _token_authorizer  # noqa: PLW0603
     if _token_authorizer is not None:
         return _token_authorizer
 
-    issuer = os.environ["JWKS_ISSUER"]
-    jwks_uri = os.environ.get("JWKS_URI") or None
-    client_id = os.environ.get("CLIENT_ID")
-    region = os.environ["AWS_REGION"]
-
-    if _is_cognito_issuer(issuer):
-        user_pool_id = issuer.rstrip("/").rsplit("/", maxsplit=1)[-1]
-        _token_authorizer = CognitoTokenAuthorizer(
-            user_pool_id=user_pool_id,
-            region=region,
-            client_id=client_id,
-        )
-    else:
-        group_claim_name = os.environ.get("GROUP_CLAIM_NAME", "groups")
-        _token_authorizer = OIDCTokenAuthorizer(
-            issuer=issuer,
-            audience=client_id,
-            jwks_uri=jwks_uri,
-            group_claim_name=group_claim_name,
-        )
+    _token_authorizer = build_token_authorizer(
+        issuer=os.environ["JWKS_ISSUER"],
+        region=os.environ["AWS_REGION"],
+        client_id=os.environ.get("CLIENT_ID"),
+        jwks_uri=os.environ.get("JWKS_URI") or None,
+        group_claim_name=os.environ.get("GROUP_CLAIM_NAME", "groups"),
+    )
     return _token_authorizer
 
 
@@ -127,7 +92,41 @@ def _get_token_authorizer() -> TokenAuthorizer:
 
 _cache_invalidation_dao: DynamoDBDAO | None = None
 _local_cache_version: int = 0
-_roles_cache: dict[str, tuple[list[str], list[dict[str, str]]]] = {}
+# principal cache key -> (expires_at_monotonic, global_roles, resource_roles).
+# The expiry is carried in the entry itself so there is one structure to clear
+# and no second dict to keep in sync.
+_roles_cache: dict[str, tuple[float, list[str], list[dict[str, str]]]] = {}
+
+# Backstop bounds on the in-process role cache. The stream-driven version
+# counter is the primary invalidation path; these cap the damage when it is
+# unavailable (stream throttled, DLQ'd record, CacheInvalidation read failing)
+# instead of letting a warm container serve revoked roles indefinitely.
+_ROLES_CACHE_TTL_DEFAULT_SECONDS = 60.0
+
+
+def _parse_ttl_seconds() -> float:
+    """Parse the cache TTL from the environment, failing soft to the default.
+
+    A malformed value (e.g. ``"60s"``) must not raise at import time — that
+    crashes the authorizer Lambda on cold start and denies every request. Fall
+    back to the default and log instead.
+    """
+    raw = os.environ.get("ROLES_CACHE_TTL_SECONDS")
+    if raw is None:
+        return _ROLES_CACHE_TTL_DEFAULT_SECONDS
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning(
+            "Invalid ROLES_CACHE_TTL_SECONDS, using default",
+            value=raw,
+            default=_ROLES_CACHE_TTL_DEFAULT_SECONDS,
+        )
+        return _ROLES_CACHE_TTL_DEFAULT_SECONDS
+
+
+_ROLES_CACHE_TTL_SECONDS = _parse_ttl_seconds()
+_ROLES_CACHE_MAX_ENTRIES = 1000
 
 
 def _get_cache_invalidation_dao() -> DynamoDBDAO | None:
@@ -276,12 +275,17 @@ def _resolve_roles(
     cache_key = f"{principal_id}:{','.join(sorted(groups))}"
     cached = _roles_cache.get(cache_key)
     if cached is not None:
-        # Defensive: validate tuple structure before returning. If corrupt
-        # (e.g. from a prior code version), evict and fall through to query.
-        if isinstance(cached, tuple) and len(cached) == 2:
-            return cached
-        del _roles_cache[cache_key]
-        logger.warning("Evicted corrupt cache entry", cache_key=cache_key)
+        # Defensive: validate the entry shape before trusting it. Anything else
+        # (e.g. a 2-tuple written by a prior code version) is evicted and
+        # re-queried rather than unpacked blindly.
+        if isinstance(cached, tuple) and len(cached) == 3:
+            expires_at, cached_global, cached_resource = cached
+            if time.monotonic() < expires_at:
+                return cached_global, cached_resource
+            del _roles_cache[cache_key]
+        else:
+            del _roles_cache[cache_key]
+            logger.warning("Evicted corrupt cache entry", cache_key=cache_key)
 
     global_roles: list[str] = []
     resource_roles: list[dict[str, str]] = []
@@ -317,8 +321,28 @@ def _resolve_roles(
             elif resource_id and role:
                 resource_roles.append({"role": role, "resourceUID": resource_id})
 
-    # NOTE: role cache disabled pending security review — re-enable with MR !620
-    # _roles_cache[cache_key] = (global_roles, resource_roles)
+    # At the cap, evict the oldest entries (insertion order — dicts preserve it)
+    # rather than clearing the whole cache. A full flush would send the next
+    # burst of authorization requests to the PrincipalIndex GSI all at once
+    # (the API Gateway authorizer result cache is disabled), risking a DynamoDB
+    # throttle spike on the auth hot path. Bounded eviction keeps the
+    # runaway-memory guard without that thundering herd. Not true LRU (no
+    # access-order tracking); upgrade to OrderedDict.move_to_end if hit rate
+    # ever matters.
+    if len(_roles_cache) >= _ROLES_CACHE_MAX_ENTRIES:
+        evict_count = max(1, _ROLES_CACHE_MAX_ENTRIES // 10)
+        for stale_key in list(_roles_cache)[:evict_count]:
+            del _roles_cache[stale_key]
+        logger.info(
+            "Role cache size cap reached, evicted oldest entries",
+            cap=_ROLES_CACHE_MAX_ENTRIES,
+            evicted=evict_count,
+        )
+    _roles_cache[cache_key] = (
+        time.monotonic() + _ROLES_CACHE_TTL_SECONDS,
+        global_roles,
+        resource_roles,
+    )
     return global_roles, resource_roles
 
 
@@ -595,6 +619,48 @@ _PATH_MAPPING: dict[str, dict[str, tuple[str, str]]] = {
         "GET": ("viewNamespace", "Ontology"),
         "DELETE": ("manageOntology", "Ontology"),
     },
+    "/namespaces/{namespaceId}/ontologies/{ontologyId}": {
+        "GET": ("viewNamespace", "Ontology"),
+    },
+    "/namespaces/{namespaceId}/ontologies/{ontologyId}/download": {
+        "GET": ("viewNamespace", "Ontology"),
+    },
+    # Minting a presigned PUT is a write: it hands out the ability to place an
+    # artifact, so it is gated like the upload itself. Matches the sibling
+    # precedents at ``/proposals/{proposalId}/upload-url`` and
+    # ``/sources/upload-urls``, both of which gate the URL, not just its use.
+    "/namespaces/{namespaceId}/ontologies/upload-url": {
+        "POST": ("manageOntology", "Ontology"),
+    },
+    "/namespaces/{namespaceId}/ontologies/{ontologyId}/upload": {
+        "POST": ("manageOntology", "Ontology"),
+    },
+    # "fetch" reads from a remote source but writes the result into this
+    # namespace's store, so it is a write despite the name.
+    "/namespaces/{namespaceId}/ontologies/{ontologyId}/fetch": {
+        "POST": ("manageOntology", "Ontology"),
+    },
+    "/namespaces/{namespaceId}/ontologies/{ontologyId}/ingest-from-s3": {
+        "POST": ("manageOntology", "Ontology"),
+    },
+    # Polling a job only reveals progress, so it stays a read even though the job
+    # it reports on was a write — same split as
+    # ``/proposals/{proposalId}/validate/jobs/{jobId}``.
+    "/namespaces/{namespaceId}/ontologies/{ontologyId}/ingest-status/{jobId}": {
+        "GET": ("viewNamespace", "Ontology"),
+    },
+    "/namespaces/{namespaceId}/ontology/foundational": {
+        "GET": ("viewNamespace", "Ontology"),
+    },
+    "/namespaces/{namespaceId}/ontology/foundational/{key}/load": {
+        "POST": ("manageOntology", "Ontology"),
+    },
+    "/namespaces/{namespaceId}/proposals/{proposalId}/repair-datatypes": {
+        "POST": ("manageOntology", "OntologyProposal"),
+    },
+    "/namespaces/{namespaceId}/graph/ontology-overview": {
+        "GET": ("viewNamespace", "Ontology"),
+    },
     "/namespaces/{namespaceId}/graph/search": {
         "GET": ("viewNamespace", "Ontology"),
     },
@@ -606,6 +672,17 @@ _PATH_MAPPING: dict[str, dict[str, tuple[str, str]]] = {
     },
     "/namespaces/{namespaceId}/graph/datatype-property": {
         "GET": ("viewNamespace", "Ontology"),
+    },
+    # ── Platform-scoped ─────────────────────────────────────────────────
+    # No {namespaceId}, so the resource id resolves to "*" (see
+    # _map_request_to_cedar) and no namespace-scoped grant can ever match it.
+    # ``list`` is the action that works at that scope: default.cedar permits it on
+    # Namespace for every authenticated principal, the same basis
+    # ``GET /namespaces`` and ``GET /roles`` already stand on. Gating this on
+    # viewNamespace instead would deny every role except platform-admin, which is
+    # what the unmapped default was already doing.
+    "/system-health": {
+        "GET": ("list", "Namespace"),
     },
 }
 

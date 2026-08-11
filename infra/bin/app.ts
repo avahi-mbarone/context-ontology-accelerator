@@ -11,10 +11,9 @@ import {
   CTX_ENV,
   DEFAULT_RESOURCE_PREFIX,
   DEFAULT_ENV,
-  DEFAULT_GROUP_CLAIM,
 } from "../lib/constants";
 import { Paths } from "../lib/paths";
-import { SsmConfig, CustomDomainConfig } from "../lib/types";
+import { SsmConfig, CustomDomainConfig, IdpType } from "../lib/types";
 import {
   resolveAgentCoreAzNames,
   resolveEndpointServiceAzNames,
@@ -247,9 +246,6 @@ async function deploy(): Promise<void> {
     ...(apiWebAclId && { webAclId: apiWebAclId }),
     alarmAction,
     vpc: network.vpc,
-    issuerUrl: auth.issuerUrl,
-    clientId: auth.clientId,
-    groupClaimName: DEFAULT_GROUP_CLAIM,
     rolesTable: authnz.rolesTable,
     resourceRoleMappingsTable: authnz.resourceRoleMappingsTable,
     cacheInvalidationTable: authnz.cacheInvalidationTable,
@@ -355,10 +351,6 @@ async function deploy(): Promise<void> {
     aossSecurityGroup: network.aossSecurityGroup,
     neptuneSecurityGroup: network.neptuneSecurityGroup,
     lambdaSecurityGroup: network.lambdaSecurityGroup,
-    issuerUrl: auth.issuerUrl,
-    clientId: auth.clientId,
-    additionalAudience: [auth.mcpClientId],
-    groupClaimName: DEFAULT_GROUP_CLAIM,
     neptuneClusterArn: storage.neptuneClusterArn,
     neptuneEndpoint: storage.neptuneClusterEndpoint,
     ontologyBucketArn: storage.ontologyArtifactsBucket.bucketArn,
@@ -370,6 +362,7 @@ async function deploy(): Promise<void> {
     alarmAction,
   });
   serve.addDependency(smusDomain); // needs /namespace/namespaces-table-name SSM param
+  serve.addDependency(auth); // needs /issuer, /userpool-client-id, /mcp-client-id SSM params
 
   const sources = new SourcesStack(app, `${stackPrefix}-sources`, {
     network,
@@ -383,6 +376,7 @@ async function deploy(): Promise<void> {
 
   api.addDependency(sources);
   api.addDependency(metricService);
+  api.addDependency(auth); // needs /issuer, /userpool-client-id SSM params
   api.addDependency(smusDomain); // needs /namespace/namespaces-table-name SSM param (authorizer)
 
   metricService.addDependency(sources); // /sources/sources-table-name SSM param
@@ -408,9 +402,12 @@ async function deploy(): Promise<void> {
   }
 
   const web = new WebStack(app, `${stackPrefix}-web`, {
-    authority: auth.issuerUrl,
-    clientId: auth.clientId,
-    userPoolId: auth.userPool?.userPoolId ?? "",
+    // Cognito User Pool (and its callback-URL patch) only exists on the
+    // COGNITO/SAML idpType path — see idp-authentication-stack.ts. Derived
+    // from the same SSM config `auth` was built from, not from `auth`'s
+    // construct properties, so this stack has no direct reference into the
+    // auth stack's resource tree (see PR for the export-lock this avoids).
+    isCognitoMode: config.idpType !== IdpType.OIDC,
     apiEndpoint: api.api.url,
     apiRestApiId: api.api.restApiId,
     apiStageName: api.api.deploymentStage.stageName,
@@ -456,17 +453,14 @@ async function deploy(): Promise<void> {
 
   const mcp = new McpStack(app, `${stackPrefix}-mcp`, {
     vpc: network.vpc,
-    issuerUrl: auth.issuerUrl,
-    clientId: auth.clientId,
-    mcpClientId: auth.mcpClientId,
     rolesTable: authnz.rolesTable,
     resourceRoleMappingsTable: authnz.resourceRoleMappingsTable,
-    groupClaimName: DEFAULT_GROUP_CLAIM,
     agentCoreAzNames,
   });
   mcp.addDependency(serve); // needs CM runtime-arn SSM param
   mcp.addDependency(metricService); // needs /metric/api-fn-arn SSM param (discovery tools)
   mcp.addDependency(ontology); // needs /ontology-engine/api-fn-arn SSM param (discovery tools)
+  mcp.addDependency(auth); // needs /issuer, /userpool-client-id, /mcp-client-id SSM params
 
   // Inject the resolved brand tokens (BRAND_PREFIX / GRAPH_BASE_URI /
   // EVENT_SOURCE_PREFIX) into every Lambda and ECS container. Applied as an

@@ -432,27 +432,6 @@ class SqlDialect(StrEnum):
 
 
 # ---------------------------------------------------------------------------
-# Database engine launch gate
-# ---------------------------------------------------------------------------
-
-# Engines whose implementation exists end-to-end but is WITHHELD from the
-# product: they need more validation before we support them. Nothing is deleted —
-# the discovery dialects (coa_sources.database.connectors.dialects) and the
-# Snowflake-specific UI fields all remain in the tree — they are simply filtered
-# out of the enabled registries that the Connect-source UI, schema discovery, and
-# serve execution read.
-#
-# TO RE-ENABLE AN ENGINE: delete its token from this set (and from
-# PREVIEW_DATABASE_ENGINES in libs/ts-shared/src/constants.ts, which mirrors it
-# for the web app). No other change is required.
-#
-# Tokens are the Smithy DatabaseEngine enum values (models/src/main/smithy/
-# unified-sources.smithy). Raw strings rather than the generated enum because
-# libs/common is upstream of the generated client packages — matching the
-# existing engine-token sets in coa_sources (DIRECT_QUERY_ENGINES, Dialect.engines).
-PREVIEW_DATABASE_ENGINES: frozenset[str] = frozenset({"ORACLE", "SNOWFLAKE"})
-
-
 # ---------------------------------------------------------------------------
 # Governed Metrics — ontology integration constants
 # ---------------------------------------------------------------------------

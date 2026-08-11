@@ -314,3 +314,84 @@ class TestGuardrailScreenerCoverage:
             content=[{"text": {"text": "hello"}}, {"text": {"text": "world"}}],
             outputScope="FULL",
         )
+
+
+class TestGuardrailScreenerDecisionMetrics:
+    """#111 AC10/AC11 — every screening decision is counted and logged."""
+
+    @staticmethod
+    def _screen(response: dict, **kwargs):
+        """Run screen_texts against a canned ApplyGuardrail response."""
+        mock_client = MagicMock()
+        mock_client.apply_guardrail.return_value = response
+        screener = GuardrailScreener(guardrail_id="gr-1", guardrail_version="1", region="us-east-1", **kwargs)
+        screener._client = mock_client
+        return screener
+
+    def test_block_emits_invocations_blocked_and_latency(self):
+        response = {
+            "action": "GUARDRAIL_INTERVENED",
+            "assessments": [{"contentPolicy": {"filters": [{"type": "PROMPT_ATTACK", "action": "BLOCKED"}]}}],
+        }
+        cw = MagicMock()
+        with patch("coa_common.guardrail_metrics._cloudwatch_client", return_value=cw):
+            self._screen(response).screen_texts(["poison"])
+
+        metrics = {m["MetricName"]: m for m in cw.put_metric_data.call_args.kwargs["MetricData"]}
+        assert set(metrics) == {"GuardrailInvocations", "GuardrailBlocked", "GuardrailLatency"}
+        assert metrics["GuardrailLatency"]["Value"] >= 0
+        assert {"Name": "Component", "Value": "kg-build"} in metrics["GuardrailInvocations"]["Dimensions"]
+
+    def test_allow_emits_invocations_without_blocked(self):
+        cw = MagicMock()
+        with patch("coa_common.guardrail_metrics._cloudwatch_client", return_value=cw):
+            self._screen({"action": "NONE", "assessments": []}).screen_texts(["clean"])
+
+        metrics = {m["MetricName"]: m for m in cw.put_metric_data.call_args.kwargs["MetricData"]}
+        assert "GuardrailBlocked" not in metrics
+        assert "GuardrailInvocations" in metrics
+
+    def test_anonymize_only_counts_as_allow(self):
+        """PII masking is not a block (#795) — it must not inflate GuardrailBlocked."""
+        anonymized = {"sensitiveInformationPolicy": {"piiEntities": [{"type": "NAME", "action": "ANONYMIZED"}]}}
+        response = {"action": "GUARDRAIL_INTERVENED", "assessments": [anonymized]}
+        cw = MagicMock()
+        with patch("coa_common.guardrail_metrics._cloudwatch_client", return_value=cw):
+            self._screen(response).screen_texts(["Mark deployed agents"])
+
+        metrics = {m["MetricName"]: m for m in cw.put_metric_data.call_args.kwargs["MetricData"]}
+        assert "GuardrailBlocked" not in metrics
+
+    def test_decision_log_line_has_required_keys(self):
+        response = {
+            "action": "GUARDRAIL_INTERVENED",
+            "assessments": [{"topicPolicy": {"topics": [{"name": "medical", "action": "BLOCKED"}]}}],
+        }
+        with patch("coa_common.guardrail_metrics.logger") as mock_logger:
+            self._screen(response).screen_texts(["ask a doctor"])
+
+        assert mock_logger.info.call_args[0][0] == "guardrail_decision"
+        kwargs = mock_logger.info.call_args.kwargs
+        assert kwargs["component"] == "kg-build"
+        assert kwargs["decision"] == "BLOCK"
+        assert kwargs["filter_type"] == "TOPIC"
+        assert kwargs["latency_ms"] >= 0
+
+    def test_emf_transport_makes_no_cloudwatch_call(self):
+        """Serve opts into stdout EMF — it holds no PutMetricData grant."""
+        with patch("coa_common.guardrail_metrics._cloudwatch_client") as mock_boto:
+            self._screen({"action": "NONE", "assessments": []}, metrics_transport="emf").screen_texts(["clean"])
+        mock_boto.assert_not_called()
+
+    def test_metric_failure_does_not_break_screening(self):
+        """A broken emitter must not turn a BLOCK into a pass."""
+        response = {
+            "action": "GUARDRAIL_INTERVENED",
+            "assessments": [{"contentPolicy": {"filters": [{"type": "PROMPT_ATTACK", "action": "BLOCKED"}]}}],
+        }
+        cw = MagicMock()
+        cw.put_metric_data.side_effect = RuntimeError("cloudwatch down")
+        with patch("coa_common.guardrail_metrics._cloudwatch_client", return_value=cw):
+            results = self._screen(response).screen_texts(["poison"])
+
+        assert not results[0].passed

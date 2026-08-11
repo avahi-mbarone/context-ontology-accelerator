@@ -60,8 +60,7 @@ semantic-context/
 ├── libs/common/         # Shared Python config, logging, exceptions
 ├── libs/ts-shared/      # Shared TypeScript interfaces and constants
 ├── scripts/             # CI-agnostic build/test/deploy scripts
-├── ci/                  # GitLab CI pipelines (split by trigger type)
-└── docs/                # MkDocs site, ADRs, guides
+└── external-docs/       # Published documentation (getting-started, deployment guides)
 ```
 
 ## Tech Stack
