@@ -22,9 +22,18 @@ from rdflib import OWL, RDF, RDFS, XSD, BNode, Graph, Literal, Namespace, URIRef
 from rdflib.namespace import SKOS
 
 from coa_ontology.inducer.schemas import ConceptMatch
-from coa_ontology.inducer.services.data_catalog import CatalogTable
+from coa_ontology.inducer.services.data_catalog import CatalogTable, parse_referred_column
 from coa_ontology.inducer.services.subtype_detection import detect_pk_sharing_subtypes
-from coa_ontology.inducer.strategies.base import SCL, InductionStrategy
+from coa_ontology.inducer.strategies.base import (
+    SCL,
+    InductionStrategy,
+    ambiguous_target_names,
+    composite_fk_anchors,
+    composite_fk_columns,
+    pascal_names_for,
+    reference_index,
+    table_identity,
+)
 
 log = logging.getLogger(__name__)
 
@@ -270,6 +279,43 @@ class TableToOntologyStrategy(InductionStrategy):
         pk_sharing_confirmed, pk_sharing_suggested = detect_pk_sharing_subtypes(tables)
         novel_tables = set()
 
+        # Collision-free class local names, shared with build_r2rml (base.py) and
+        # the SHACL config generator so all three artifacts name the same class
+        # identically. Bare _to_pascal would fuse tables differing only in
+        # separators/case (order_item vs order-item), or two same-named tables from
+        # different databases, onto one class IRI. Keyed by table IDENTITY.
+        pascal_by_id = pascal_names_for(tables)
+        # Property local names are derived from the class local name (not from
+        # _to_camel(table.name)) so a discriminated class carries discriminated
+        # property IRIs too — otherwise the two fused tables' properties would
+        # still collide even though their classes no longer do.
+        camel_by_id = {i: p[0].lower() + p[1:] if p else p for i, p in pascal_by_id.items()}
+        ref_index = reference_index(tables)
+        ambiguous_names = ambiguous_target_names(tables)
+
+        def table_prop(table: CatalogTable, column_name: str) -> URIRef:
+            """Mint the property IRI for ``table.column_name``."""
+            local = camel_by_id.get(table_identity(table), _to_camel(table.name))
+            return ns[f"{local}_{_to_camel(column_name)}"]
+
+        def parent_class(target_name: str, referrer: CatalogTable) -> URIRef | None:
+            """Resolve an FK target table name to its class IRI.
+
+            Returns ``None`` when the bare name is ambiguous across the run, so the
+            caller declares a datatype property instead of an object property —
+            the same degradation build_r2rml applies to its parentTriplesMap.
+            """
+            qualified = f"{referrer.sourceSchema}.{target_name}" if referrer.sourceSchema else None
+            target_id = (qualified and ref_index.get(qualified)) or ref_index.get(target_name)
+            if target_id is not None and target_id in pascal_by_id:
+                return ns[pascal_by_id[target_id]]
+            if target_name in ambiguous_names:
+                # The bare form below is the min()-keeper's class IRI, so returning
+                # it would point rdfs:range at one arbitrary same-named table.
+                return None
+            # Genuinely outside this run: the bare form collides with nothing.
+            return ns[_to_pascal(target_name)]
+
         for table in tables:
             tm = match_map.get((table.name, ""))
             is_grounded = tm and tm.match_type in ("exact", "high_confidence")
@@ -277,7 +323,12 @@ class TableToOntologyStrategy(InductionStrategy):
             if not is_grounded:
                 novel_tables.add(table.name)
 
-            table_cls = ns[_to_pascal(table.name)]
+            # Direct subscript, not .get(): pascal_names_for built this dict from the
+            # same ``tables`` being iterated here, so a miss means the two have
+            # diverged and the class IRI would be silently wrong — a KeyError is the
+            # better outcome. parent_class above does use .get(), because its lookup
+            # is an FK target that legitimately may sit outside this run.
+            table_cls = ns[pascal_by_id[table_identity(table)]]
             g.add((table_cls, RDF.type, OWL.Class))
             g.add((table_cls, RDFS.label, Literal(table.name)))
             if table.description:
@@ -312,30 +363,55 @@ class TableToOntologyStrategy(InductionStrategy):
                     if tc.constraintType == "PRIMARY_KEY" and tc.columns:
                         from rdflib.collection import Collection
 
-                        key_props: list = [ns[f"{_to_camel(table.name)}_{_to_camel(c)}"] for c in tc.columns]
+                        key_props: list = [table_prop(table, c) for c in tc.columns]
                         key_bnode = BNode()
                         Collection(g, key_bnode, key_props)
                         g.add((table_cls, OWL.hasKey, key_bnode))
                         break
 
+            # Columns absorbed into a sibling's composite-FK POM. build_r2rml emits
+            # ONE Referencing Object Map per composite FK (R2RML §7.5), anchored on
+            # the constraint's first column, so declaring an ObjectProperty for the
+            # others would mint properties with no mapping behind them — present in
+            # the TBox and in the NL→SPARQL context, but unresolvable by Ontop, so
+            # queries using them silently return nothing. Declare them as plain
+            # datatype properties instead: the columns do exist, they simply are not
+            # the relationship's anchor.
+            absorbed_fk_columns = composite_fk_columns(table)
+            # Which column anchors which composite FK — the SAME helper build_r2rml
+            # consults. Resolving the target by "first FOREIGN_KEY constraint that
+            # lists this column" instead let the two artifacts disagree whenever a
+            # column belongs to more than one constraint: the ontology took whichever
+            # came first in ``tableConstraints`` while the mapping used the anchor, so
+            # ``rdfs:range`` and ``rr:parentTriplesMap`` named different parents.
+            composite_anchors = composite_fk_anchors(table)
+
             for col in table.columns:
-                prop_uri = ns[f"{_to_camel(table.name)}_{_to_camel(col.name)}"]
+                prop_uri = table_prop(table, col.name)
                 is_fk = False
                 fk_target = None
                 fk_target_col = None
                 fk_provenance: str | None = None
-                if table.tableConstraints:
-                    for tc in table.tableConstraints:
-                        if tc.constraintType == "FOREIGN_KEY" and col.name in tc.columns and tc.referredColumns:
-                            is_fk = True
-                            parts = tc.referredColumns[0].split(".")
-                            fk_target = parts[-2] if len(parts) >= 2 else parts[0]
-                            fk_target_col = parts[-1] if len(parts) >= 2 else None
-                            fk_provenance = tc.relationshipType
-                            break
+                if table.tableConstraints and col.name not in absorbed_fk_columns:
+                    anchored = composite_anchors.get(col.name)
+                    if anchored is not None and anchored.referredColumns:
+                        is_fk = True
+                        fk_target, fk_target_col = parse_referred_column(anchored.referredColumns[0])
+                        fk_provenance = anchored.relationshipType
+                    else:
+                        for tc in table.tableConstraints:
+                            if tc.constraintType == "FOREIGN_KEY" and col.name in tc.columns and tc.referredColumns:
+                                is_fk = True
+                                fk_target, fk_target_col = parse_referred_column(tc.referredColumns[0])
+                                fk_provenance = tc.relationshipType
+                                break
 
-                if is_fk and fk_target:
-                    parent_cls = ns[_to_pascal(fk_target)]
+                # In-run tables use the shared (collision-resolved) name; a target
+                # outside this run falls back to the bare form. An ambiguous bare
+                # name resolves to None and the column becomes a datatype property,
+                # matching build_r2rml's rr:datatype for the same column.
+                parent_cls = parent_class(fk_target, table) if is_fk and fk_target else None
+                if parent_cls is not None:
                     if (table.name, fk_target) in pk_sharing_confirmed:
                         g.add((table_cls, RDFS.subClassOf, parent_cls))
                         g.add((table_cls, SCL.subClassProvenance, Literal("PK_SHARING")))
@@ -361,6 +437,21 @@ class TableToOntologyStrategy(InductionStrategy):
                     g.add((prop_uri, RDF.type, OWL.DatatypeProperty))
                     g.add((prop_uri, RDFS.domain, table_cls))
                     g.add((prop_uri, RDFS.range, _xsd_for(col.dataType, col.name)))
+                    if col.name in absorbed_fk_columns:
+                        # Record why an FK column is a datatype property, so the
+                        # relationship stays discoverable from the ontology alone.
+                        owner = absorbed_fk_columns[col.name]
+                        note = (
+                            f"Part of a composite foreign key on {table.name}; the relationship is carried by "
+                            f"{camel_by_id[table_identity(table)]}_{_to_camel(owner)}"
+                            if owner
+                            else (
+                                f"Part of a malformed composite foreign key on {table.name} "
+                                "(column/target counts differ, or targets span several tables); "
+                                "mapped as a literal because no join can be derived"
+                            )
+                        )
+                        g.add((prop_uri, RDFS.comment, Literal(note)))
 
                 g.add((prop_uri, RDFS.label, Literal(col.name)))
                 if col.description and not (is_fk and fk_target):

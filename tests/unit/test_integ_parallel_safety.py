@@ -1,0 +1,103 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Guard the two-phase split that makes the context-manager integ suite `-n`-safe.
+
+`pytest -n 8 --dist loadfile` keeps one file's tests on one worker but still runs
+DIFFERENT files concurrently. A test that mutates state ambient to the whole suite
+— the integ user's grants — therefore sits inside other files' query windows:
+`test_email_keyed_grant_enforcement_integ.py` holds a deny-all grant on the shared
+knowledge namespace, and in job 9539493 it passed on gw5 while
+`test_tier2_strategies.py` failed on gw4 with `AccessDeniedError` two seconds later.
+
+The fix is a marker plus a serial second phase in CI. Both halves are load-bearing
+and neither is self-evident from reading either file alone, so they are pinned here.
+The failure this most guards against is not a red pipeline but a GREEN one: get the
+two `-m` expressions wrong and the excluded tests simply never run.
+"""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+import pytest
+
+pytestmark = pytest.mark.unit
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_CI_FILE = _REPO_ROOT / "ci" / "mainline.yml"
+_INTEG_DIR = _REPO_ROOT / "packages" / "context-manager" / "tests" / "integ"
+_MARKER = "mutates_ambient_authz"
+
+# `ci/` is not published to the public mirror (see the allowlist in .npmignore).
+if not _CI_FILE.exists():
+    pytest.skip("ci/ is absent from this checkout (public mirror)", allow_module_level=True)
+
+
+def _job_script(job: str) -> str:
+    """The `script:` body of a GitLab job, up to the next top-level key."""
+    match = re.search(rf"^{re.escape(job)}:$.*?(?=^\S)", _CI_FILE.read_text(), re.MULTILINE | re.DOTALL)
+    assert match, f"job '{job}' not found in {_CI_FILE.name}"
+    return match.group(0)
+
+
+def _phases() -> list[str]:
+    """The `-m "..."` selection expression of each pytest phase, in order."""
+    return re.findall(r'-m "([^"]+)"', _job_script("integ-test-context-manager"))
+
+
+def test_every_excluded_marker_has_a_phase_that_runs_it() -> None:
+    """A `-m "... and not X"` phase must be matched by a phase that selects X.
+
+    Otherwise the deselected tests are silently dropped and the job goes green
+    having never run them.
+    """
+    phases = _phases()
+    assert phases, "no -m selection found — integ-test-context-manager was restructured"
+
+    excluded = {m for phase in phases for m in re.findall(r"not\s+(\w+)", phase)}
+    assert excluded, f"expected the parallel phase to exclude a serial marker, got {phases}"
+
+    for marker in sorted(excluded):
+        assert any(re.search(rf"\band {marker}\b", p) for p in phases), (
+            f"'{marker}' is excluded from a phase but no phase selects it, so those tests never run. Phases: {phases}"
+        )
+
+
+def test_only_the_marker_excluding_phase_runs_in_parallel() -> None:
+    """The serial phase must not carry `-n`, or the split achieves nothing."""
+    script = _job_script("integ-test-context-manager")
+    # Split into per-invocation chunks so each `-m` is paired with its own flags.
+    invocations = [c for c in re.split(r"uv run pytest", script)[1:]]
+    assert len(invocations) >= 2, "expected a parallel phase and a serial phase"
+
+    for chunk in invocations:
+        selection = re.search(r'-m "([^"]+)"', chunk)
+        assert selection, f"pytest invocation without a -m selection: {chunk[:120]}"
+        parallel = re.search(r"-n\s+\d+", chunk) is not None
+        serial_phase = "not " not in selection.group(1)
+        assert not (serial_phase and parallel), (
+            f"the phase selecting '{selection.group(1)}' runs with -n; it exists "
+            "precisely because those tests cannot run concurrently"
+        )
+
+
+def test_grant_mutating_integ_tests_are_marked_serial() -> None:
+    """A test that writes grants must carry the marker that keeps it out of the fan-out.
+
+    Grants are ambient to the integ user, not scoped to the test, so an unmarked
+    one reintroduces the race for every file querying the same namespace.
+    """
+    unmarked = []
+    for path in sorted(_INTEG_DIR.glob("test_*.py")):
+        source = path.read_text()
+        writes_grants = "/grants" in source and ("requests.post" in source or "tableAllowlist" in source)
+        if writes_grants and _MARKER not in source:
+            unmarked.append(path.name)
+
+    assert not unmarked, (
+        f"{unmarked} write grants for the integ user but are not marked "
+        f"`pytest.mark.{_MARKER}`, so they run inside the parallel fan-out and will "
+        "deny other workers' queries at random."
+    )

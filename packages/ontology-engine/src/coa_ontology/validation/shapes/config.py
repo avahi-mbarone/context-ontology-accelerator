@@ -18,6 +18,13 @@ from rdflib.namespace import RDF
 
 # Reuse the canonical SQL→XSD map + naming helpers rather than redefining them
 # (they lived in 3+ places). ``base.py`` owns the authoritative copies.
+from coa_ontology.inducer.services.data_catalog import parse_referred_column
+from coa_ontology.inducer.strategies.base import ambiguous_target_names as _ambiguous_target_names
+from coa_ontology.inducer.strategies.base import composite_fk_anchors as _composite_fk_anchors
+from coa_ontology.inducer.strategies.base import composite_fk_columns as _composite_fk_columns
+from coa_ontology.inducer.strategies.base import pascal_names_for as _pascal_names_for
+from coa_ontology.inducer.strategies.base import reference_index as _reference_index
+from coa_ontology.inducer.strategies.base import table_identity as _table_identity
 from coa_ontology.inducer.strategies.base import to_camel as _to_camel
 from coa_ontology.inducer.strategies.base import to_pascal as _to_pascal
 from coa_ontology.inducer.strategies.base import xsd_for as _xsd_for
@@ -96,8 +103,16 @@ def generate_config_from_db(tables, uri_prefix: str) -> ConstraintConfig:
     ns_str = uri_prefix
     classes: list[ClassConstraints] = []
 
+    # Same collision-resolved local names the ontology and R2RML builders mint,
+    # so the shapes target the classes/properties that actually exist.
+    pascal_by_id = _pascal_names_for(tables)
+    camel_by_id = {i: p[0].lower() + p[1:] if p else p for i, p in pascal_by_id.items()}
+    ref_index = _reference_index(tables)
+    ambiguous_names = _ambiguous_target_names(tables)
+
     for table in tables:
-        class_uri = f"{ns_str}{_to_pascal(table.name)}"
+        identity = _table_identity(table)
+        class_uri = f"{ns_str}{pascal_by_id[identity]}"
         constraints: list[PropertyConstraint] = []
 
         pk_cols: set[str] = set()
@@ -111,14 +126,37 @@ def generate_config_from_db(tables, uri_prefix: str) -> ConstraintConfig:
                 elif tc.constraintType == "UNIQUE" and tc.columns and len(tc.columns) == 1:
                     unique_cols.update(tc.columns)
                 elif tc.constraintType == "FOREIGN_KEY" and tc.columns and tc.referredColumns:
-                    ref = tc.referredColumns[0]
-                    parts = ref.split(".")
-                    fk_target = parts[-2] if len(parts) >= 2 else ref
-                    for col_name in tc.columns:
-                        fk_map[col_name] = fk_target
+                    fk_target, _ = parse_referred_column(tc.referredColumns[0])
+                    # Single-column FKs only. A composite FK is handled below, via
+                    # the same anchor/absorbed split the mapping and ontology use:
+                    # putting every one of its columns here gave the absorbed ones a
+                    # REFERENCE constraint, which compiles to sh:nodeKind sh:IRI +
+                    # sh:class — while the mapping emits an rr:datatype literal for
+                    # the same column and the ontology declares it an
+                    # owl:DatatypeProperty. The shape would then assert a class-typed
+                    # reference against data that is literal by design: a violation
+                    # on every row of every composite-FK child table.
+                    if len(tc.columns) == 1:
+                        fk_map[tc.columns[0]] = fk_target
+
+            # Composite FKs: only the anchor column carries the relationship (the
+            # mapping emits one Referencing Object Map per anchor, R2RML §7.5).
+            # Absorbed and malformed-FK columns are literals, so they must NOT get a
+            # target_class. composite_fk_columns marks a malformed FK's columns with
+            # "" — those are relationship-free too, and must not be resurrected here.
+            absorbed = _composite_fk_columns(table)
+            for anchor_col, tc in _composite_fk_anchors(table).items():
+                # composite_fk_anchors only yields usable FKs, which by definition
+                # have referredColumns; the guard is for the type checker.
+                if not tc.referredColumns:
+                    continue
+                fk_target, _ = parse_referred_column(tc.referredColumns[0])
+                fk_map[anchor_col] = fk_target
+            for absorbed_col in absorbed:
+                fk_map.pop(absorbed_col, None)
 
         for col in table.columns:
-            prop_path = f"{ns_str}{_to_camel(table.name)}_{_to_camel(col.name)}"
+            prop_path = f"{ns_str}{camel_by_id[identity]}_{_to_camel(col.name)}"
             is_pk = col.name in pk_cols
             is_not_null = col.constraint in ("NOT_NULL", "PRIMARY_KEY") or is_pk
             is_unique = col.constraint in ("UNIQUE", "PRIMARY_KEY") or col.name in unique_cols or is_pk
@@ -146,8 +184,22 @@ def generate_config_from_db(tables, uri_prefix: str) -> ConstraintConfig:
                     )
                 )
 
+            # Resolve the FK target through the shared index so the shape targets
+            # the same class the ontology declared and the mapping joins to. An
+            # ambiguous bare name resolves to nothing: the ontology declares a
+            # datatype property and the mapping emits rr:datatype for that column,
+            # so a REFERENCE shape (sh:nodeKind sh:IRI + sh:class) would violate on
+            # every row. Such a column falls through to the datatype constraint.
+            target_class: str | None = None
             if is_fk:
-                target_class = f"{ns_str}{_to_pascal(fk_map[col.name])}"
+                fk_target_name = fk_map[col.name]
+                qualified = f"{table.sourceSchema}.{fk_target_name}" if table.sourceSchema else None
+                target_id = (qualified and ref_index.get(qualified)) or ref_index.get(fk_target_name)
+                if target_id in pascal_by_id:
+                    target_class = f"{ns_str}{pascal_by_id[target_id]}"
+                elif fk_target_name not in ambiguous_names:
+                    target_class = f"{ns_str}{_to_pascal(fk_target_name)}"
+            if target_class is not None:
                 constraints.append(
                     PropertyConstraint(
                         property_path=prop_path,
@@ -158,7 +210,7 @@ def generate_config_from_db(tables, uri_prefix: str) -> ConstraintConfig:
                         description=f"{col.name} must reference a valid {fk_map[col.name]}",
                     )
                 )
-            elif not is_fk:
+            else:
                 xsd_type = str(_xsd_for(col.dataType))
                 constraints.append(
                     PropertyConstraint(

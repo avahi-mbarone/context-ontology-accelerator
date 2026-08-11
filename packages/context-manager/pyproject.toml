@@ -63,6 +63,12 @@ asyncio_mode = "auto"
 markers = [
     "unit: Unit tests",
     "integ: Integration tests",
+    # Mutates authorization state that is AMBIENT to the whole suite — the integ
+    # user's grants — rather than state scoped to the test. Such a test cannot
+    # run concurrently with any test that queries the same namespace, so the CI
+    # job runs these serially in a second phase. See ci/mainline.yml
+    # (integ-test-context-manager) and tests/unit/test_integ_parallel_safety.py.
+    "mutates_ambient_authz: Serialize — mutates the integ user's grants",
 ]
 
 [tool.uv.sources]
