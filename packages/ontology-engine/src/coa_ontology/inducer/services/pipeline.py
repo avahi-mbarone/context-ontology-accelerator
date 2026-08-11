@@ -497,6 +497,7 @@ class InductionPipeline:
         grounding_mode: str = "ENHANCED",
         tables: list[CatalogTable] | None = None,
         cost_tracker: CostTracker | None = None,
+        rerank_max_tokens: int = 1000,
     ) -> list[ConceptMatch]:
         """Ground each source concept against the ontology catalog.
 
@@ -514,6 +515,7 @@ class InductionPipeline:
             grounding_mode: Grounding intensity ("NONE", "STANDARD", or "ENHANCED").
             tables: Source tables, used to supply per-table grounding metadata.
             cost_tracker: Optional tracker for Bedrock usage and stage timings.
+            rerank_max_tokens: Output-token cap for the ENHANCED-mode LLM rerank.
 
         Returns:
             One :class:`ConceptMatch` per successfully processed concept.
@@ -551,6 +553,7 @@ class InductionPipeline:
                 confidence_threshold=confidence_threshold,
                 grounding_mode=grounding_mode,
                 ontology_ids=grounding_ontology_ids,
+                rerank_max_tokens=rerank_max_tokens,
             )
             return grounding_svc.to_concept_match(result)
 

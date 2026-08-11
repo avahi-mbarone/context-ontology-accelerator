@@ -216,6 +216,16 @@ SCL_PREFIX=myproject make deploy-dev
 # Use an existing VPC
 SCL_VPC_ID=vpc-abc123 make deploy-dev
 
+# SMUS admin principal(s) — override the account's `Admin` role fallback.
+# Comma-separated IAM role/user ARN(s) that human admins federate into to
+# access the SageMaker Unified Studio console. Required on any account that
+# doesn't have a role literally named `Admin` (e.g. IAM Identity Center
+# accounts) — `make deploy-dev` checks for that role first and fails fast
+# with a clear message if it's missing and this isn't set. For an IAM
+# Identity Center account, use your permission set's federated role:
+SCL_SMUS_ADMIN_ARNS=arn:aws:iam::123456789012:role/aws-reserved/sso.amazonaws.com/us-east-1/AWSReservedSSO_AdministratorAccess_abc123 \
+make deploy-dev
+
 # Custom domain for the web app and API — all five are required together
 # (all-or-nothing; CDK fails synth if only some are set)
 SCL_UI_DOMAIN=ontology.example.com \
@@ -231,6 +241,19 @@ make deploy-dev
 
 !!! warning "Multi-region deployments"
     S3 buckets and IAM roles are globally scoped, not region-isolated. Deploying the same `SCL_PREFIX` + `env` to a second region **will collide** with an existing deployment. Use a distinct `SCL_PREFIX` per region (e.g., `coa-w2` for `us-west-2`) — do not rely on region alone to disambiguate.
+
+#### Database scan enrichment timeout
+
+A database source scan runs an enrichment step (an ECS Fargate task that calls Bedrock once per discovered table). It is bounded by a deadline; when the deadline is hit the scan fails cleanly to `SCAN_FAILED` so the source can be deleted or re-scanned, rather than being stranded mid-scan. The default deadline is **120 minutes**, sized to comfortably cover a large source (roughly 2,000 tables at ~30–35 s per table with ten tables enriched in parallel).
+
+Raise it only if you are onboarding a source large enough to exceed that — a scan that fails on the deadline reports `SCAN_FAILED`, and this is the knob to give it more time:
+
+```bash
+# Allow up to 180 minutes for enrichment (default is 120)
+SCL_DB_SCAN_ENRICHMENT_TIMEOUT_MINUTES=180 make deploy-dev
+```
+
+The value is minutes and must be a positive number; CDK fails synth otherwise. On a direct `cdk deploy` (rather than the `make`/`deploy.sh` path) pass it as CDK context instead — `--context dbScanEnrichmentTimeoutMinutes=180`, or set it in the `context` block of `infra/cdk.json`. The Step Functions state-machine ceiling is derived automatically as this value plus two minutes, so the per-task deadline always trips first and routes the source to `SCAN_FAILED`.
 
 ### Internal Environment Variables
 
@@ -528,6 +551,27 @@ AWS_DEFAULT_REGION=<REGION> npx cdk destroy --all \
 ```
 
 ## Troubleshooting
+
+### `make deploy-dev` fails preflight with "no IAM role named 'Admin'"
+
+**Symptom:** deploy stops immediately with `ERROR: No SMUS admin principal configured, and this account has no IAM role named 'Admin' to fall back to.`
+
+**Cause:** the `*-namespace` stack's `DomainLoginRole` needs at least one IAM role/user ARN to trust — the specific principal(s) human admins federate into to access the SMUS console. It defaults to the account's `Admin` role, which is an Amazon-internal account convention, not something AWS or this project creates. `make deploy-dev` checks whether that role actually exists before running CDK, so accounts without it fail here instead of several stacks deep into a CloudFormation rollback.
+
+**Fix:** set `SCL_SMUS_ADMIN_ARNS` to the ARN(s) of the role(s) your admins assume — comma-separated for more than one. For an IAM Identity Center account, this is your permission set's federated role:
+
+```bash
+SCL_SMUS_ADMIN_ARNS=arn:aws:iam::<account>:role/aws-reserved/sso.amazonaws.com/<region>/AWSReservedSSO_AdministratorAccess_<suffix> \
+make deploy-dev
+```
+
+**If you hit the underlying CloudFormation failure directly** (e.g. running `cdk deploy` by hand, bypassing the preflight): `coa-dev-namespace` reaches `CREATE_FAILED` → `ROLLBACK_COMPLETE` on `DomainLoginRole` with `Invalid principal in policy`. If you retry with `SCL_SMUS_ADMIN_ARNS` now set and the stack fails again — this time on `SMUSDomain` with `Domain name already exists under this account (Service: DataZone, Status Code: 409)` — the first rollback left an orphaned DataZone domain behind (CloudFormation's stack rollback deletes the stack's other resources, but not this one). Force-delete the leftover domain, then retry:
+
+```bash
+DOMAIN_ID=$(aws datazone list-domains --query "items[?name=='<PREFIX>-<ENV>-smus-catalog'].id" --output text)
+aws datazone delete-domain --identifier "$DOMAIN_ID" --skip-deletion-check
+# wait for status DELETED, then delete the ROLLBACK_COMPLETE stack and redeploy
+```
 
 ### AgentCore ENI wait can take hours
 

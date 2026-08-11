@@ -420,6 +420,7 @@ def _run_unstructured_induction(
             # unscoped/global recall. Mirrors the structured worker.
             grounding_ontology_ids=resolved_grounding_ids,
             grounding_mode=body.grounding_mode,
+            rerank_max_tokens=body.rerank_max_tokens,
             lexical_store=lexical_store,
             embedding_client=embedding_client,
             description_llm=description_llm,

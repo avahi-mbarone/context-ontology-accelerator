@@ -30,9 +30,13 @@ Design notes:
   into the main graph. The within-run ``skos:closeMatch`` links emitted by
   Rule 1 (``induce_classes``) are untouched — those are class↔class dedupe
   links; these are class↔foundational grounding links.
-- **Fail-open.** Any per-class grounding error is caught and logged; that
-  class is simply left un-grounded (novel), never failing the whole run —
-  matching the structured path's fail-loud-log / all-novel fallback.
+- **Fail-open for per-class faults, fail-loud for rerank infra failures.** A
+  genuine per-class error (bad vector, programming bug) is caught and logged and
+  that class is left un-grounded (novel), never failing the whole run. But a
+  ``GroundingRerankError`` (LLM rerank infrastructure failure — Bedrock error
+  after retries, truncated/blocked stopReason, unparseable output) is re-raised
+  so the job fails loud instead of silently grounding every class novel — the
+  documented fail-loud guarantee (issue #59), matching the structured path.
 - **No-op when disabled.** Empty/None ``ontology_ids`` or a ``None`` service
   → returns an empty graph and the pipeline behaves exactly as pre-grounding.
 """
@@ -47,7 +51,7 @@ from rdflib import OWL, RDF, RDFS, XSD, Graph, Literal, Namespace, URIRef
 from rdflib.namespace import SKOS
 
 from coa_ontology.inducer.schemas import ConceptMatch
-from coa_ontology.inducer.services.grounding import GroundingService
+from coa_ontology.inducer.services.grounding import GroundingRerankError, GroundingService
 
 log = logging.getLogger(__name__)
 
@@ -95,6 +99,7 @@ def ground_classes(
     model_id: str,
     grounding_mode: str = "ENHANCED",
     confidence_threshold: float = 0.80,
+    rerank_max_tokens: int = 1000,
     uri_prefix: str = "",
 ) -> tuple[Graph, int, list[ConceptMatch]]:
     """Ground each induced class against the loaded foundational ontologies.
@@ -110,6 +115,8 @@ def ground_classes(
         grounding_mode: ``ENHANCED`` (embedding recall + LLM rerank) or
             ``STANDARD`` (embedding-only). ``NONE`` also disables.
         confidence_threshold: Passed through to the grounding service.
+        rerank_max_tokens: Output-token cap for the ENHANCED-mode LLM rerank,
+            passed through to ``ground_class``. Default 1000.
         uri_prefix: The proposal namespace prefix, used to mint the
             ``matchConfidence`` annotation-property IRI (mirrors the
             structured builder). When empty, ``matchConfidence`` is omitted.
@@ -167,6 +174,7 @@ def ground_classes(
                 concept_vector=item.vector,
                 model_id=model_id,
                 confidence_threshold=confidence_threshold,
+                rerank_max_tokens=rerank_max_tokens,
                 grounding_mode=grounding_mode,
                 ontology_ids=ontology_ids,
                 # Don't let a class ground to ITSELF: incremental induction grounds
@@ -174,8 +182,19 @@ def ground_classes(
                 # this very class (same IRI). Exclude it from recall.
                 exclude_entity_uri=item.class_iri,
             )
+        except GroundingRerankError:
+            # NOT an abstention: an LLM rerank infrastructure failure (Bedrock
+            # error after retries, truncated/blocked stopReason, or unparseable
+            # output). Re-raise so the induction job fails loud instead of
+            # silently leaving every class novel — the enhanced-grounding defect
+            # (issue #59). The broad handler below would otherwise swallow it,
+            # which is exactly the silent all-novel degradation the documented
+            # fail-loud guarantee forbids. Must precede the broad except.
+            raise
         except Exception:
-            # Fail-open: one class failing to ground must not abort the run.
+            # Fail-open for a genuine per-class fault (e.g. a bad vector or a
+            # programming bug): one class failing to ground must not abort the
+            # run. A rerank INFRASTRUCTURE failure is handled above, not here.
             log.exception("class grounding failed for %r — leaving novel", item.label)
             continue
 

@@ -76,21 +76,35 @@ def test_guarded_makefile_targets_do_not_fail_on_missing_dirs(target: str) -> No
 _UNMIRRORED_TESTS_REF = re.compile(r'"tests"\s*/\s*"(?!unit)')
 
 
+def _mirrored_unit_test_files() -> list[Path]:
+    """Every `tests/unit/*.py` that ships to the public mirror.
+
+    Not just the repo-root suite: `.npmignore` re-includes `/packages/` wholesale,
+    so each package's own `tests/unit/` ships too, and each is just as capable of
+    reaching into that package's stripped `tests/integ/` at import time.
+    """
+    files = list((_REPO_ROOT / "tests" / "unit").glob("*.py"))
+    for package_dir in sorted((_REPO_ROOT / "packages").glob("*/tests/unit")):
+        files.extend(package_dir.glob("*.py"))
+    return files
+
+
 def test_unit_tests_reaching_outside_tests_unit_skip_when_the_path_is_absent() -> None:
     """A mirrored unit test must not hard-require an unmirrored fixture.
 
-    The public mirror ships `tests/unit/` without `tests/cdk/`. A test that reads
-    from `tests/cdk/` at import time turns into a pytest *collection* error there,
-    which aborts the entire suite (exit 2, zero tests run) rather than failing just
-    itself. The fix is always a module-level skip, so require one.
+    The public mirror ships `tests/unit/` without `tests/cdk/` (or, per-package,
+    without that package's `tests/integ/`). A test that reads from an unmirrored
+    path at import time turns into a pytest *collection* error there, which aborts
+    the entire suite (exit 2, zero tests run) rather than failing just itself. The
+    fix is always a module-level skip, so require one.
     """
     offenders = []
-    for path in sorted((_REPO_ROOT / "tests" / "unit").glob("*.py")):
+    for path in sorted(_mirrored_unit_test_files()):
         if path.name == Path(__file__).name:
             continue  # this file only names the idiom in a comment
         source = path.read_text()
         if _UNMIRRORED_TESTS_REF.search(source) and "allow_module_level=True" not in source:
-            offenders.append(path.name)
+            offenders.append(str(path.relative_to(_REPO_ROOT)))
 
     assert not offenders, (
         f"{offenders} reference a tests/ subdirectory that is stripped from the public "

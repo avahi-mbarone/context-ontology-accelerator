@@ -379,74 +379,8 @@ structure QueryResult {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// Shared Shapes — Schema / Metrics (for DescribeSchema & ListMetrics)
+// Shared Shapes — Metrics (for ListMetrics)
 // ══════════════════════════════════════════════════════════════════════════════
-/// A class in the namespace's queryable schema, with its IRI, label, optional
-/// description, properties, and parent class.
-structure SchemaClass {
-    /// IRI identifying the class.
-    @required
-    uri: String
-
-    /// Human-readable label for the class.
-    @required
-    label: String
-
-    /// Description of the class.
-    description: String
-
-    /// Properties defined on the class.
-    properties: SchemaPropertyList
-
-    /// IRI of the parent class, if any.
-    parentClass: String
-}
-
-/// A property of a schema class, with its IRI, label, value range (datatype or
-/// target class), and optional description.
-structure SchemaProperty {
-    /// IRI identifying the property.
-    @required
-    uri: String
-
-    /// Human-readable label for the property.
-    @required
-    label: String
-
-    /// Value range of the property (datatype or target class).
-    range: String
-
-    /// Description of the property.
-    description: String
-}
-
-/// A summary of a data source backing the schema, identifying it and its type
-/// (e.g. jdbc, glue).
-structure DataSourceSummary {
-    /// Identifier of the data source.
-    @required
-    dataSourceId: String
-
-    /// Human-readable name of the data source.
-    @required
-    name: String
-
-    /// Type of the data source (e.g. jdbc, glue).
-    sourceType: String
-}
-
-list SchemaClassList {
-    member: SchemaClass
-}
-
-list SchemaPropertyList {
-    member: SchemaProperty
-}
-
-list DataSourceSummaryList {
-    member: DataSourceSummary
-}
-
 /// A queryable metric with its identifier, name, description, dimensions,
 /// synonyms, and backing data source.
 structure MetricSummary {
@@ -726,49 +660,5 @@ operation ServeListMetrics {
     errors: [
         ValidationError
         NamespaceNotFoundError
-    ]
-}
-
-// ── DescribeSchema ───────────────────────────────────────────────────────────
-/// Describe the namespace's queryable schema: classes, their properties, and
-/// the mapped data sources backing them.
-@readonly
-@http(method: "GET", uri: "/namespaces/{namespaceId}/schema")
-operation DescribeSchema {
-    input := {
-        @required
-        @httpLabel
-        namespaceId: Uuid
-
-        /// Restrict the response to these class IRIs.
-        @httpQuery("classFilter")
-        classFilter: StringList
-
-        /// Whether to include class properties in the response.
-        @httpQuery("includeProperties")
-        includeProperties: Boolean
-
-        /// Maximum number of classes to return.
-        @httpQuery("maxResults")
-        maxResults: Integer
-    }
-
-    output := {
-        /// The classes in the namespace's schema.
-        @required
-        classes: SchemaClassList
-
-        /// The data sources backing the schema.
-        @required
-        dataSources: DataSourceSummaryList
-
-        /// Version of the ontology described.
-        ontologyVersion: String
-    }
-
-    errors: [
-        ValidationError
-        NamespaceNotFoundError
-        OntologyNotPublishedError
     ]
 }

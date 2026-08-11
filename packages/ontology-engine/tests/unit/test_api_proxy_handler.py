@@ -37,6 +37,68 @@ class TestPathMapping:
         assert mod._PATH_MAP["/namespaces/{namespaceId}/graph/search"] == "/graph/search"
 
 
+class TestSchemaQueryTranslation:
+    """MCP's describe_schema spells its query params in camelCase; FastAPI binds
+    snake_case. Unrenamed they are forwarded, ignored, and replaced by the route
+    defaults — a silent wrong answer rather than an error.
+    """
+
+    @pytest.fixture()
+    def forward(self, mod):
+        """Run the handler against a stubbed ECS call and return the forwarded URL."""
+
+        def _run(event: dict) -> str:
+            mock_resp = MagicMock()
+            mock_resp.status = 200
+            mock_resp.read.return_value = b"{}"
+            mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+            mock_resp.__exit__ = MagicMock(return_value=False)
+            with patch("urllib.request.urlopen", return_value=mock_resp) as mock_urlopen:
+                assert mod.handler(event, None)["statusCode"] == 200
+                return mock_urlopen.call_args[0][0].full_url
+
+        return _run
+
+    def _event(self, **query) -> dict:
+        return {
+            "httpMethod": "GET",
+            "resource": "/namespaces/{namespaceId}/graph/schema",
+            "pathParameters": {"namespaceId": "ns-1"},
+            "queryStringParameters": query or None,
+            "body": "",
+        }
+
+    def test_max_results_renamed(self, forward):
+        url = forward(self._event(maxResults="500"))
+        assert "max_results=500" in url
+        assert "maxResults" not in url
+
+    def test_include_properties_renamed(self, forward):
+        url = forward(self._event(includeProperties="false"))
+        assert "include_properties=false" in url
+
+    def test_namespace_still_threaded(self, forward):
+        assert "namespace=ns-1" in forward(self._event(maxResults="10"))
+
+    def test_empty_value_dropped(self, forward):
+        """API Gateway supplies "" for a valueless param; forwarding it would
+        override the route default with a blank and 422."""
+        url = forward(self._event(maxResults=""))
+        assert "max_results" not in url
+
+    def test_aliases_do_not_leak_to_other_routes(self, forward):
+        """The rename is scoped per backend path — a route that genuinely takes a
+        camelCase param must keep receiving it verbatim."""
+        event = {
+            "httpMethod": "GET",
+            "resource": "/namespaces/{namespaceId}/graph/search",
+            "pathParameters": {"namespaceId": "ns-1"},
+            "queryStringParameters": {"maxResults": "5"},
+            "body": "",
+        }
+        assert "maxResults=5" in forward(event)
+
+
 class TestHandler:
     @patch("urllib.request.urlopen")
     def test_successful_forward(self, mock_urlopen, mod):

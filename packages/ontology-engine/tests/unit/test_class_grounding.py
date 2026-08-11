@@ -20,6 +20,7 @@ import pytest
 from coa_common.constants import GRAPH_BASE_URI
 from coa_ontology.inducer.services.grounding import (
     GroundingCandidate,
+    GroundingRerankError,
     GroundingResult,
 )
 from coa_ontology.inducer.unstructured.services.class_grounding import (
@@ -250,6 +251,25 @@ class TestRobustness:
         assert n == 0
         assert len(g) <= 1  # at most the matchConfidence AnnotationProperty decl
 
+    def test_rerank_infra_failure_fails_loud_not_novel(self):
+        # A GroundingRerankError (LLM rerank INFRASTRUCTURE failure) must
+        # propagate so the induction job fails loud — NOT be swallowed by the
+        # fail-open handler into a silent all-novel result. This is the
+        # enhanced-grounding defect (issue #59) on the unstructured path:
+        # class_grounding's broad `except Exception` used to catch it.
+        svc = MagicMock()
+        svc.ground_class.side_effect = GroundingRerankError(
+            "rerank response truncated (stopReason=max_tokens) — raise rerank_max_tokens (currently 1000)"
+        )
+        with pytest.raises(GroundingRerankError, match="rerank_max_tokens"):
+            ground_classes(
+                _one_input(),
+                grounding_service=svc,
+                ontology_ids=["fibo"],
+                model_id="m",
+                uri_prefix=_PREFIX,
+            )
+
     def test_passes_through_mode_and_ids(self):
         svc = _svc(_result("exact", relationship="exactMatch", confidence=0.95))
         ground_classes(
@@ -259,6 +279,7 @@ class TestRobustness:
             model_id="titan-v2",
             grounding_mode="STANDARD",
             confidence_threshold=0.7,
+            rerank_max_tokens=1500,
             uri_prefix=_PREFIX,
         )
         _, kwargs = svc.ground_class.call_args
@@ -266,6 +287,7 @@ class TestRobustness:
         assert kwargs["grounding_mode"] == "STANDARD"
         assert kwargs["model_id"] == "titan-v2"
         assert kwargs["confidence_threshold"] == 0.7
+        assert kwargs["rerank_max_tokens"] == 1500
 
 
 class TestMatches:

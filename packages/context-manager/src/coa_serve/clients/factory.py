@@ -13,6 +13,7 @@ in run_in_executor if calling from async context.
 
 from __future__ import annotations
 
+import os
 import re
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
@@ -141,14 +142,41 @@ def build_lexical_retriever(
     made every ``strategy:*`` tool time out at 15s even though the agentic budget
     allowed 45s — the tool reported "degraded ... TimeoutError after 15.0s", the
     loop scored it as no-progress, and it burned a step escalating (observed live
-    on ``strategy:entity_based`` / ``strategy:chunk_based_semantic``). ``None``
-    keeps the retriever's own default so the non-agentic path is unchanged.
+    on ``strategy:entity_based`` / ``strategy:chunk_based_semantic``).
+
+    When ``timeout_s`` is None (the STANDARD-mode request path, which does NOT
+    pass a per-tool budget), the timeout falls back to the ``LEXICAL_RETRIEVER_TIMEOUT_S``
+    env var (default 45s). The 15s retriever default is likewise too low for the
+    slower single-shot traversal strategies here: ``topic_beam``'s graph
+    beam-traversal exceeds 15s and would time out to an empty result in standard
+    mode (observed live on the NTSB corpus), even though the AgentCore request
+    ceiling (~180s) leaves ample room. The env var lets a deployment tune this
+    without a code change; the per-deployment production default (15s) stays the
+    code default on the retriever itself.
 
     Returns None only when the required store endpoints are unset (nothing for
     graphrag to address).
     """
     if not config.neptune_endpoint or not config.opensearch_endpoint:
         return None
+
+    # Standard-mode path (timeout_s is None): honor LEXICAL_RETRIEVER_TIMEOUT_S so
+    # slow traversal strategies (e.g. topic_beam) are not truncated by the 15s
+    # retriever default. The agentic path always passes an explicit budget, which
+    # takes precedence over this fallback.
+    if timeout_s is None:
+        timeout_s = 45.0  # standard-mode default (see docstring); env var overrides below
+        if env_timeout := os.environ.get("LEXICAL_RETRIEVER_TIMEOUT_S", "").strip():
+            try:
+                timeout_s = float(env_timeout)
+            except ValueError:
+                # Keep the 45s default rather than falling through to the
+                # retriever's own 15s (the value this fallback exists to avoid).
+                logger.warning(
+                    "invalid_lexical_retriever_timeout",
+                    value=env_timeout,
+                    fallback_timeout_s=timeout_s,
+                )
 
     from ..lexical import BaselineLexicalRetriever
     from ..lexical.strategies import DEFAULT_SPEC

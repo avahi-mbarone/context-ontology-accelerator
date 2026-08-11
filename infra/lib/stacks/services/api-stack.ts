@@ -377,6 +377,57 @@ export class ApiStack extends SCLStack {
       pathLambdaMap,
       region: this.region,
     });
+
+    // ── GET /health ────────────────────────────────────────────────
+    // Answered by API Gateway itself, not a Lambda. HealthCheck is
+    // @optionalAuth in the Smithy model and the sole entry in
+    // ``unsecuredPaths`` below, i.e. an unauthenticated probe for a
+    // load balancer or an uptime check. A mock integration is the right
+    // shape for that: no cold start, no VPC hop, and nothing that can
+    // fail independently of the gateway being up.
+    //
+    // Deliberately not ``/system-health``'s per-backend detail — the
+    // Smithy output is a bare ``status``, and an unauthenticated caller
+    // should not learn which of Neptune/AOSS/DynamoDB is degraded.
+    // Callers wanting that use the authenticated ``GET /system-health``.
+    //
+    // This runs after injectLambdaProxyIntegrations so it replaces the
+    // aws_proxy integration that loop installed (the 501 stub, absent a
+    // handler entry). It must also run before fillAuthorizerParameters,
+    // which is what strips ``security`` from the operation.
+    const healthGet = spec.paths?.["/health"]?.get;
+    if (!healthGet) {
+      throw new Error(
+        "GET /health is missing from the merged API spec, so the health mock " +
+          "cannot be attached. The Smithy HealthCheck operation was probably " +
+          "renamed or removed — update this block or drop it.",
+      );
+    }
+    healthGet["x-amazon-apigateway-integration"] = {
+      type: "mock",
+      passthroughBehavior: "when_no_match",
+      requestTemplates: { "application/json": '{"statusCode": 200}' },
+      responses: {
+        default: {
+          statusCode: "200",
+          // injectLambdaProxyIntegrations declared the security headers on
+          // the method response, and Smithy's @cors declared
+          // Access-Control-Allow-Origin; a mock has no Lambda to populate
+          // them, so they are supplied statically. Cache-Control is the one
+          // that matters functionally: an intermediary caching "ok" would
+          // keep reporting a healthy API after it stopped being one.
+          responseParameters: {
+            "method.response.header.Access-Control-Allow-Origin": `'${props.allowedOrigin}'`,
+            "method.response.header.Cache-Control": "'no-store'",
+            "method.response.header.Strict-Transport-Security":
+              "'max-age=63072000; includeSubDomains; preload'",
+            "method.response.header.X-Content-Type-Options": "'nosniff'",
+          },
+          responseTemplates: { "application/json": '{"status":"ok"}' },
+        },
+      },
+    };
+
     fillAuthorizerParameters(spec, {
       authorizerLambdaArn: authorizerFn.functionArn,
       authorizerRoleArn: authorizerRole.roleArn,

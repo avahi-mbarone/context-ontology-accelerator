@@ -8,6 +8,7 @@ from __future__ import annotations
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 from coa_common import async_boto_config
+from coa_common.bedrock import extract_text_blocks
 from coa_common.bedrock_metrics import CostTracker
 
 from coa_ontology.inducer.services.grounding import _BEDROCK_MAX_POOL_CONNECTIONS
@@ -78,11 +79,14 @@ class LLMClient:
         messages = [{"role": "user", "content": [{"text": prompt}]}]
         sys_list = [{"text": system}] if system else []
         try:
+            # No temperature: deprecated on newer models (e.g. Claude Opus 5),
+            # which reject the request rather than ignore it; we only ever set 0
+            # (the model default), so omit it.
             resp = self.client.converse(
                 modelId=self.model_id,
                 messages=messages,
                 system=sys_list,
-                inferenceConfig={"maxTokens": max_tokens, "temperature": 0.0},
+                inferenceConfig={"maxTokens": max_tokens},
             )
         except (ClientError, BotoCoreError) as e:
             raise RuntimeError(f"Bedrock converse() failed for model {self.model_id!r}: {e}") from e
@@ -91,6 +95,8 @@ class LLMClient:
         if self._cost_tracker is not None:
             self._cost_tracker.record_from_converse("generate", self.model_id, resp)
         try:
-            return resp["output"]["message"]["content"][0]["text"]
-        except (KeyError, IndexError, TypeError) as e:
+            # Select the text block by type, not position: a reasoning model puts
+            # a reasoningContent block (no "text" key) at index 0.
+            return extract_text_blocks(resp["output"]["message"]["content"])
+        except (KeyError, IndexError, TypeError, ValueError) as e:
             raise RuntimeError(f"Unexpected Bedrock response shape: {resp!r}") from e

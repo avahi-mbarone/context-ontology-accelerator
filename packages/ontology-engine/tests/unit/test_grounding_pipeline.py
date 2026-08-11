@@ -17,7 +17,9 @@ import json
 from unittest.mock import MagicMock
 
 import pytest
+from botocore.exceptions import ClientError
 from coa_ontology.inducer.services.grounding import (
+    GroundingRerankError,
     GroundingService,
     classify_score_tier,
 )
@@ -342,33 +344,146 @@ class TestEnhancedRerank:
         assert result.chosen.entity_uri == "http://fibo/Agreement"
         assert result.confidence == pytest.approx(0.95)
 
-    def test_rerank_non_json_response_returns_novel(self):
+    def test_rerank_non_json_response_fails_loud(self):
+        # The call succeeded but the model returned prose instead of JSON — a
+        # model-contract failure, not an abstention (a real abstention is the
+        # parseable {"choice": "NONE"}). It must fail loud, never silently
+        # ground novel — the enhanced-grounding defect (#59).
         hits = [
             {"entity_uri": "http://fibo/Agreement", "ontology_id": "fibo", "score": 0.6, "text": "Agreement"},
         ]
         svc = _make_service(hits)
         svc._bedrock = _bedrock_returning("this is not json at all")
-        result = svc.ground_table(
-            table_name="agr_x",
-            table_description="",
-            columns=[],
-            concept_vector=[0.5] * 8,
-            model_id="titan",
-            grounding_mode="ENHANCED",
-            ontology_ids=["fibo"],
-        )
-        assert result.match_type == "novel"
-        assert result.reason == "LLM call failed"
+        with pytest.raises(GroundingRerankError, match="non-JSON"):
+            svc.ground_table(
+                table_name="agr_x",
+                table_description="",
+                columns=[],
+                concept_vector=[0.5] * 8,
+                model_id="titan",
+                grounding_mode="ENHANCED",
+                ontology_ids=["fibo"],
+            )
 
-    def test_rerank_converse_exception_returns_novel(self):
+    def test_rerank_converse_error_fails_loud_not_novel(self):
+        # A Bedrock error surfacing past botocore's retries is an INFRASTRUCTURE
+        # failure, not an abstention. It must raise (so the job fails loud),
+        # never silently ground novel — the enhanced-grounding defect (#59).
         hits = [
             {"entity_uri": "http://fibo/Agreement", "ontology_id": "fibo", "score": 0.6, "text": "Agreement"},
         ]
         svc = _make_service(hits)
         broken = MagicMock()
-        broken.converse.side_effect = RuntimeError("bedrock throttled")
+        broken.converse.side_effect = ClientError(
+            {"Error": {"Code": "ValidationException", "Message": "temperature is deprecated"}}, "Converse"
+        )
         svc._bedrock = broken
+        with pytest.raises(GroundingRerankError):
+            svc.ground_table(
+                table_name="agr_x",
+                table_description="",
+                columns=[],
+                concept_vector=[0.5] * 8,
+                model_id="titan",
+                grounding_mode="ENHANCED",
+                ontology_ids=["fibo"],
+            )
+
+    def test_rerank_reasoning_model_response_parses(self):
+        # A reasoning model returns a reasoningContent block (no "text" key) at
+        # index 0 and the JSON answer at index 1. Grounding must read the answer,
+        # not KeyError on content[0] and degrade to novel.
+        hits = [
+            {"entity_uri": "http://fibo/Agreement", "ontology_id": "fibo", "score": 0.9, "text": "Agreement"},
+        ]
+        svc = _make_service(hits)
+        reasoning_resp = MagicMock()
+        reasoning_resp.converse.return_value = {
+            "output": {
+                "message": {
+                    "content": [
+                        {"reasoningContent": {"reasoningText": {"text": "thinking", "signature": "s"}}},
+                        {
+                            "text": json.dumps(
+                                {"choice": "Agreement", "relationship": "exactMatch", "confidence": 0.95, "reason": "x"}
+                            )
+                        },
+                    ]
+                }
+            },
+            "stopReason": "end_turn",
+            "usage": {"inputTokens": 10, "outputTokens": 5},
+        }
+        svc._bedrock = reasoning_resp
         result = svc.ground_table(
+            table_name="agreement",
+            table_description="",
+            columns=[],
+            concept_vector=[0.5] * 8,
+            model_id="titan",
+            grounding_mode="ENHANCED",
+            ontology_ids=["fibo"],
+        )
+        assert result.chosen is not None
+        assert result.chosen.label == "Agreement"
+        assert result.match_type != "novel"
+
+    @pytest.mark.parametrize(
+        ("stop_reason", "match_pattern"),
+        [
+            # Token-budget exhaustion: the answer was cut off. Fail loud AND name
+            # the knob so the operator knows how to fix it.
+            ("max_tokens", "rerank_max_tokens"),
+            ("model_context_window_exceeded", "rerank_max_tokens"),
+            # Model-side unusable output: no knob helps, but still an
+            # infrastructure failure that must not parse into a silent novel.
+            ("malformed_model_output", "unusable"),
+            ("content_filtered", "unusable"),
+        ],
+        ids=["max_tokens", "model_context_window_exceeded", "malformed_model_output", "content_filtered"],
+    )
+    def test_rerank_loud_stop_reason_fails_loud(self, stop_reason, match_pattern):
+        # A truncating/blocked stopReason is an infrastructure failure, not an
+        # abstention — do not parse a partial/absent body into a silent novel.
+        # All four are doc-confirmed loud-failure Converse stopReason values.
+        hits = [
+            {"entity_uri": "http://fibo/Agreement", "ontology_id": "fibo", "score": 0.6, "text": "Agreement"},
+        ]
+        svc = _make_service(hits)
+        bad = MagicMock()
+        bad.converse.return_value = {
+            # Even a body that would parse cleanly must not be trusted once the
+            # stopReason flags the response unusable — the guard fires first.
+            "output": {"message": {"content": [{"text": '{"choice": "Agree'}]}},
+            "stopReason": stop_reason,
+            "usage": {"inputTokens": 10, "outputTokens": 200},
+        }
+        svc._bedrock = bad
+        with pytest.raises(GroundingRerankError, match=match_pattern):
+            svc.ground_table(
+                table_name="agr_x",
+                table_description="",
+                columns=[],
+                concept_vector=[0.5] * 8,
+                model_id="titan",
+                grounding_mode="ENHANCED",
+                ontology_ids=["fibo"],
+            )
+
+    def test_rerank_omits_temperature_from_inference_config(self):
+        # Defect 1 of issue #59: sending inferenceConfig.temperature made newer
+        # models (Opus 5 / Sonnet 5) reject the call with a ValidationException,
+        # which the old code swallowed to a silent novel. We only ever wanted 0
+        # (the model default), so the key must NOT be sent at all. Capture the
+        # converse kwargs and assert temperature is absent.
+        hits = [
+            {"entity_uri": "http://fibo/Agreement", "ontology_id": "fibo", "score": 0.6, "text": "Agreement"},
+        ]
+        svc = _make_service(hits)
+        svc._bedrock = _bedrock_returning(
+            json.dumps({"choice": "Agreement", "relationship": "exactMatch", "confidence": 0.9, "reason": "y"})
+        )
+        svc.ground_table(
             table_name="agr_x",
             table_description="",
             columns=[],
@@ -377,7 +492,55 @@ class TestEnhancedRerank:
             grounding_mode="ENHANCED",
             ontology_ids=["fibo"],
         )
-        assert result.match_type == "novel"
+        _, kwargs = svc._bedrock.converse.call_args
+        assert "temperature" not in kwargs["inferenceConfig"]
+
+    def test_rerank_max_tokens_reaches_converse_inference_config(self):
+        # The rerank_max_tokens knob must land on the Bedrock converse call's
+        # inferenceConfig.maxTokens — that's the value that gives reasoning
+        # models JSON headroom. Capture the kwargs and assert the custom value.
+        hits = [
+            {"entity_uri": "http://fibo/Agreement", "ontology_id": "fibo", "score": 0.6, "text": "Agreement"},
+        ]
+        svc = _make_service(hits)
+        svc._bedrock = _bedrock_returning(
+            json.dumps({"choice": "Agreement", "relationship": "exactMatch", "confidence": 0.9, "reason": "y"})
+        )
+        svc.ground_table(
+            table_name="agr_x",
+            table_description="",
+            columns=[],
+            concept_vector=[0.5] * 8,
+            model_id="titan",
+            grounding_mode="ENHANCED",
+            ontology_ids=["fibo"],
+            rerank_max_tokens=1500,
+        )
+        _, kwargs = svc._bedrock.converse.call_args
+        assert kwargs["inferenceConfig"]["maxTokens"] == 1500
+
+    def test_rerank_max_tokens_defaults_to_1000(self):
+        # Omitting the knob uses the 1000 default (above the broken 200, below
+        # the 4096 general default), so a reasoning model's thinking doesn't
+        # truncate the JSON answer on the happy path.
+        hits = [
+            {"entity_uri": "http://fibo/Agreement", "ontology_id": "fibo", "score": 0.6, "text": "Agreement"},
+        ]
+        svc = _make_service(hits)
+        svc._bedrock = _bedrock_returning(
+            json.dumps({"choice": "Agreement", "relationship": "exactMatch", "confidence": 0.9, "reason": "y"})
+        )
+        svc.ground_table(
+            table_name="agr_x",
+            table_description="",
+            columns=[],
+            concept_vector=[0.5] * 8,
+            model_id="titan",
+            grounding_mode="ENHANCED",
+            ontology_ids=["fibo"],
+        )
+        _, kwargs = svc._bedrock.converse.call_args
+        assert kwargs["inferenceConfig"]["maxTokens"] == 1000
 
     def test_to_concept_match_after_real_pipeline(self):
         hits = [

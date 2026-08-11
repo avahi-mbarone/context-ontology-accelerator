@@ -100,6 +100,11 @@ class UnstructuredInductionRequest(BaseModel):
     # STANDARD (embedding-only); ignored when no ontologies are selected.
     grounding_ontology_ids: list[str] | None = None
     grounding_mode: str = "ENHANCED"
+    # Output-token cap for the ENHANCED-mode LLM grounding rerank (mirrors the
+    # structured path). Default 1000; raise it when a reasoning model truncates
+    # its JSON answer (the rerank then fails loud naming this knob). Bounds
+    # mirror the Smithy RerankMaxTokens @range(min: 1, max: 8192).
+    rerank_max_tokens: int = Field(default=1000, ge=1, le=8192)
     # entailment_enabled is always treated as False in v0; the field
     # exists so the API contract is forward-compatible with the planned
     # entailment engine (parent spec Task 13).
@@ -134,6 +139,9 @@ class UnstructuredInductionConfig(BaseModel):
     # pipeline grounds induced classes against those loaded ontologies.
     grounding_ontology_ids: list[str] | None = None
     grounding_mode: str = "ENHANCED"
+    # Output-token cap for the ENHANCED-mode LLM grounding rerank (threaded from
+    # the request; mirrors the structured path). Default 1000.
+    rerank_max_tokens: int = 1000
 
     # Already-constructed dependency-injected clients
     lexical_store: LexicalGraphStore

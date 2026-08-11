@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from coa_ontology.inducer.services.grounding import (
     GroundingCandidate,
+    GroundingRerankError,
     GroundingResult,
     GroundingService,
     _local_name,
@@ -199,9 +200,17 @@ class TestEnhancedMode:
         assert result.chosen is None
         assert "No candidate matches" in result.reason
 
-    def test_llm_failure_returns_novel(self, service):
-        with patch.object(service, "_llm_rerank", return_value=None):
-            result = service.ground_table(
+    def test_llm_rerank_failure_propagates_not_novel(self, service):
+        # A rerank INFRASTRUCTURE failure raises GroundingRerankError; it must
+        # propagate so the induction job fails loud, NOT degrade to a silent
+        # novel result (the enhanced-grounding defect, issue #59). Contrast
+        # test_llm_abstains above: a genuine {"choice": "NONE"} abstention still
+        # yields novel.
+        with (
+            patch.object(service, "_llm_rerank", side_effect=GroundingRerankError("bedrock exploded")),
+            pytest.raises(GroundingRerankError),
+        ):
+            service.ground_table(
                 table_name="occurrence",
                 table_description="events",
                 columns=[],
@@ -210,8 +219,6 @@ class TestEnhancedMode:
                 grounding_mode="ENHANCED",
                 ontology_ids=["fibo-agreements"],
             )
-        assert result.match_type == "novel"
-        assert "failed" in (result.reason or "").lower()
 
 
 class TestToConceptMatch:

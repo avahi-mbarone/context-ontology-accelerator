@@ -252,3 +252,124 @@ class TestCrossAccountAccess:
         assert mock_client.call_args_list[0] == call()
         list_call_args = mock_list.call_args[0]
         assert list_call_args[1] == "test-bucket"
+
+
+# ---------------------------------------------------------------------------
+# Empty extraction — the 39-of-78 silent loss
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestEmptyExtractionIsReported:
+    """A processor can return "" without raising, and used to be counted a success.
+
+    `unstructured` abandons text extraction on drawing-heavy PDF pages and yields
+    zero characters. That empty string was uploaded to staging as a 0-byte object
+    and counted in files_preprocessed, so the source reported Skipped=0/Errored=0
+    while KG build silently dropped every empty file — 39 of 78 PDFs vanished with
+    nothing in the UI to show it.
+    """
+
+    @patch.dict(os.environ, _ENV)
+    @patch("coa_sources.documents.preprocessing.handler.upload_metadata")
+    @patch("coa_sources.documents.preprocessing.handler.upload_file")
+    @patch("coa_sources.documents.preprocessing.handler.read_file_bytes", return_value=b"%PDF-1.7")
+    @patch("coa_sources.documents.preprocessing.handler.get_page_count", return_value=30)
+    @patch("coa_sources.documents.preprocessing.handler.process_pdf", return_value=("", ".md"))
+    @patch("coa_sources.documents.preprocessing.handler.list_objects")
+    @patch("coa_sources.documents.preprocessing.handler.get_s3_client")
+    def test_empty_pdf_is_skipped_not_staged(
+        self, mock_client, mock_list, mock_pdf, mock_pages, mock_read, mock_upload, mock_meta
+    ):
+        mock_list.return_value = [{"Key": "raw/drawing.pdf", "Size": 5000}]
+        from coa_sources.documents.preprocessing.handler import handler
+
+        result = handler({"namespace_id": "ns1", "doc_source_id": "ds1"}, None)
+
+        assert result["files_preprocessed"] == 0, "an empty extraction is not a success"
+        assert result["files_skipped"] == 1
+        assert result["files_errored"] == 0, "empty is skipped, not an error"
+        assert mock_upload.call_count == 0, "no 0-byte object may reach staging"
+        assert mock_meta.call_count == 0
+        assert len(result["issues"]) == 1
+        issue = result["issues"][0]
+        assert issue["filename"] == "raw/drawing.pdf"
+        assert issue["type"] == "skipped"
+        assert "No text extracted" in issue["reason"]
+
+    @patch.dict(os.environ, _ENV)
+    @patch("coa_sources.documents.preprocessing.handler.upload_metadata")
+    @patch("coa_sources.documents.preprocessing.handler.upload_file")
+    @patch("coa_sources.documents.preprocessing.handler.read_file_bytes")
+    @patch("coa_sources.documents.preprocessing.handler.list_objects")
+    @patch("coa_sources.documents.preprocessing.handler.get_s3_client")
+    def test_whitespace_only_is_empty(self, mock_client, mock_list, mock_read, mock_upload, mock_meta):
+        """A file of only whitespace stages nothing — KG build would skip it anyway."""
+        mock_list.return_value = [{"Key": "blank.txt", "Size": 6}]
+        mock_read.return_value = b"  \n\t \n"
+        from coa_sources.documents.preprocessing.handler import handler
+
+        result = handler({"namespace_id": "ns1", "doc_source_id": "ds1"}, None)
+
+        assert result["files_skipped"] == 1
+        assert result["files_preprocessed"] == 0
+        assert mock_upload.call_count == 0
+
+    @patch.dict(os.environ, _ENV)
+    @patch("coa_sources.documents.preprocessing.handler.upload_metadata")
+    @patch("coa_sources.documents.preprocessing.handler.upload_file")
+    @patch("coa_sources.documents.preprocessing.handler.read_file_bytes")
+    @patch("coa_sources.documents.preprocessing.handler.list_objects")
+    @patch("coa_sources.documents.preprocessing.handler.get_s3_client")
+    def test_empty_files_do_not_hide_the_ones_that_worked(
+        self, mock_client, mock_list, mock_read, mock_upload, mock_meta
+    ):
+        """The guard is per-file: a real file still stages, and the counts split."""
+        mock_list.return_value = [{"Key": "good.txt", "Size": 12}, {"Key": "empty.txt", "Size": 0}]
+        mock_read.side_effect = [b"real content", b""]
+        from coa_sources.documents.preprocessing.handler import handler
+
+        result = handler({"namespace_id": "ns1", "doc_source_id": "ds1"}, None)
+
+        assert result["files_total"] == 2
+        assert result["files_preprocessed"] == 1
+        assert result["files_skipped"] == 1
+        assert mock_upload.call_count == 1
+        assert mock_upload.call_args[0][3] == "real content"
+
+    @patch.dict(os.environ, _ENV)
+    @patch("coa_sources.documents.preprocessing.handler.upload_metadata")
+    @patch("coa_sources.documents.preprocessing.handler.upload_file")
+    @patch("coa_sources.documents.preprocessing.handler.read_file_bytes", return_value=b"text")
+    @patch("coa_sources.documents.preprocessing.handler.list_objects")
+    @patch("coa_sources.documents.preprocessing.handler.get_s3_client")
+    def test_every_file_empty_is_a_scan_failure(self, mock_client, mock_list, mock_read, mock_upload, mock_meta):
+        """Nothing extracted from anything is SCAN_FAILED, not a completed scan."""
+        mock_list.return_value = [{"Key": "a.txt", "Size": 1}, {"Key": "b.txt", "Size": 1}]
+        mock_read.side_effect = [b"", b"   "]
+        from coa_sources.documents.preprocessing.handler import handler
+
+        result = handler({"namespace_id": "ns1", "doc_source_id": "ds1"}, None)
+
+        assert result["status"] == "SCAN_FAILED"
+        assert result["files_skipped"] == 2
+        assert result["files_preprocessed"] == 0
+
+    @patch.dict(os.environ, _ENV)
+    @patch("coa_sources.documents.preprocessing.handler.upload_metadata")
+    @patch("coa_sources.documents.preprocessing.handler.upload_file")
+    @patch("coa_sources.documents.preprocessing.handler.read_file_bytes", return_value=b"hello world")
+    @patch("coa_sources.documents.preprocessing.handler.list_objects")
+    @patch("coa_sources.documents.preprocessing.handler.get_s3_client")
+    def test_success_path_is_untouched(self, mock_client, mock_list, mock_read, mock_upload, mock_meta):
+        """A normal extraction is unaffected — same counts, same staging key."""
+        mock_list.return_value = [{"Key": "reports/notes.txt", "Size": 11}]
+        from coa_sources.documents.preprocessing.handler import handler
+
+        result = handler({"namespace_id": "ns1", "doc_source_id": "ds1"}, None)
+
+        assert result["files_preprocessed"] == 1
+        assert result["files_skipped"] == 0
+        assert result["issues"] == []
+        assert mock_upload.call_count == 1
+        assert mock_upload.call_args[0][2].endswith("reports/notes.txt")

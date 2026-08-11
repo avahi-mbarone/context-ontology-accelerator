@@ -83,6 +83,7 @@ class _JsonFormatter(logging.Formatter):
             "threshold",
             "elements",
             "char_count",
+            "processing_method",
             "error",
             "size_bytes",
             "limit_mb",
@@ -317,6 +318,33 @@ def handler(event: dict, context: Any) -> dict:
                 logger.warning("No processor for supported extension, skipping", extra={**log_extra, "extension": ext})
                 files_skipped += 1
                 issues.append({"filename": source_key, "type": "skipped", "reason": f"No processor for {ext}"})
+                continue
+
+            # 4b. Refuse to stage an empty extraction.
+            #
+            # Every processor above can return "" while raising nothing:
+            # `unstructured` abandons text extraction on drawing-heavy pages
+            # ("exceeds thresholds ... falling back to hi_res strategy without
+            # text extraction") and yields zero characters, and the passthrough
+            # and Textract paths do the same for an empty upload or a page with
+            # no LINE blocks. That used to be written to staging as a 0-byte file
+            # and counted as a success, so the source reported Skipped=0/Errored=0
+            # and Completed while KG build silently dropped it — 39 of 78 files
+            # vanished that way with nothing in the UI to show it. Count it as
+            # skipped and say which file and how it was read.
+            if not processed_text.strip():
+                logger.warning(
+                    "Extraction produced no text, skipping file",
+                    extra={**log_extra, "processing_method": processing_method},
+                )
+                files_skipped += 1
+                issues.append(
+                    {
+                        "filename": source_key,
+                        "type": "skipped",
+                        "reason": f"No text extracted ({processing_method}).",
+                    }
+                )
                 continue
 
             # 5. Determine output key — preserve full source path to avoid

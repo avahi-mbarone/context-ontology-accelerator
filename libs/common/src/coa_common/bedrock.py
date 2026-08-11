@@ -51,6 +51,29 @@ def _assessment_has_block(assessment: dict) -> bool:
         return False
 
 
+def extract_text_blocks(content_blocks: list[dict]) -> str:
+    """Join the text of every ``text`` ContentBlock in a Converse response.
+
+    A Converse ``output.message.content`` is an array of ContentBlocks, and a
+    reasoning model (e.g. Claude with extended thinking) emits a
+    ``reasoningContent`` block — which has NO top-level ``text`` key — before
+    the ``text`` block that carries the answer. Indexing ``content[0]["text"]``
+    therefore raises ``KeyError`` whenever reasoning is present. Select blocks
+    by the presence of a ``text`` key instead of by position, and concatenate
+    them (there is normally one, but joining is safe if a model splits its
+    answer across several).
+
+    Raises:
+        ValueError: if no ``text`` block is present (e.g. a response that is
+            only ``reasoningContent`` / ``toolUse``) — a caller that expected a
+            textual answer must fail loudly, never silently receive "".
+    """
+    texts = [b["text"] for b in content_blocks if isinstance(b, dict) and "text" in b]
+    if not texts:
+        raise ValueError("Bedrock response contained no text content block")
+    return "\n".join(texts)
+
+
 class GuardrailBlockedError(Exception):
     """Raised when a Bedrock Guardrail blocks the LLM response."""
 
@@ -220,7 +243,11 @@ class BedrockClient:
             if not content_blocks:
                 logger.error("Bedrock returned no content blocks")
                 raise ValueError("Bedrock returned no content blocks")
-            content = content_blocks[0]["text"]
+            # Select the text block(s) by key, not position: a reasoning model
+            # returns a reasoningContent block (no "text" key) ahead of the
+            # answer, so content[0]["text"] would KeyError. extract_text_blocks
+            # raises ValueError if there is no text block at all.
+            content = extract_text_blocks(content_blocks)
             if not content.strip():
                 logger.error("Bedrock returned empty content")
                 raise ValueError("Bedrock returned empty response")

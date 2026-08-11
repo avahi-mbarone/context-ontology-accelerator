@@ -25,7 +25,9 @@ import unicodedata
 from dataclasses import dataclass
 
 import boto3
+from botocore.exceptions import BotoCoreError, ClientError
 from coa_common import async_boto_config
+from coa_common.bedrock import extract_text_blocks
 from coa_common.bedrock_metrics import CostTracker
 
 from coa_ontology.inducer.schemas import ConceptMatch, MatchCandidate
@@ -33,6 +35,24 @@ from coa_ontology.inducer.schemas import ConceptMatch, MatchCandidate
 log = logging.getLogger(__name__)
 
 GROUNDING_MODES = ("NONE", "STANDARD", "ENHANCED")
+
+
+class GroundingRerankError(Exception):
+    """An LLM rerank call failed for an infrastructure reason, not an abstention.
+
+    Raised when the Bedrock ``converse`` call or its response parsing fails
+    (``ClientError``/``BotoCoreError`` after botocore's bounded retries, a
+    missing text block, unparseable non-JSON output, or a truncated/blocked
+    ``stopReason``). This is deliberately distinct from a genuine abstention —
+    a parseable ``{"choice": "NONE"}`` meaning the LLM *considered the
+    candidates and declined* (a real "novel"). Conflating the two is the defect
+    behind github.com/aws/context-ontology-accelerator issue 59: an
+    infrastructure failure silently classified every table ``novel``. The
+    strategy's batch loop re-raises this (rather than degrading to all-novel) so
+    the induction job fails loud instead of returning a wrong-but-plausible
+    all-novel ontology.
+    """
+
 
 # Connection-pool cap for the shared bedrock-runtime client. The rerank
 # ThreadPool (pipeline.py, _grounding_workers default 24) has ALL threads share
@@ -239,6 +259,7 @@ class GroundingService:
         ontology_ids: list[str] | None = None,
         top_k: int = 30,
         exclude_entity_uri: str | None = None,
+        rerank_max_tokens: int = 1000,
     ) -> GroundingResult:
         """Ground an induced ontology CLASS against loaded ontologies.
 
@@ -267,6 +288,7 @@ class GroundingService:
             ontology_ids=ontology_ids,
             top_k=top_k,
             exclude_entity_uri=exclude_entity_uri,
+            rerank_max_tokens=rerank_max_tokens,
             _rerank_system=_RERANK_SYSTEM_CLASS,
             _subject_kind="class",
         )
@@ -283,6 +305,7 @@ class GroundingService:
         ontology_ids: list[str] | None = None,
         top_k: int = 30,
         exclude_entity_uri: str | None = None,
+        rerank_max_tokens: int = 1000,
         *,
         _rerank_system: str = _RERANK_SYSTEM,
         _subject_kind: str = "table",
@@ -312,6 +335,8 @@ class GroundingService:
             exclude_entity_uri: IRI to drop from recall so the subject can't
                 ground to itself (incremental induction grounds against a pool
                 that includes its own ontology).
+            rerank_max_tokens: Output-token cap for the ENHANCED-mode LLM rerank
+                call; reasoning models spend part of it on discarded thinking.
 
         Returns:
             A ``GroundingResult`` with the chosen match (or ``match_type
@@ -432,12 +457,14 @@ class GroundingService:
             table_description,
             columns,
             raw_candidates,
+            max_tokens=rerank_max_tokens,
             rerank_system=_rerank_system,
             subject_kind=_subject_kind,
         )
 
-        if rerank_result is None or rerank_result.get("choice") == "NONE":
-            # LLM abstained — novel
+        if rerank_result.get("choice") == "NONE":
+            # LLM genuinely abstained — novel. (A failed/unparseable rerank
+            # raises GroundingRerankError in _llm_rerank; it never returns here.)
             return GroundingResult(
                 source_table=table_name,
                 source_column="",
@@ -446,7 +473,7 @@ class GroundingService:
                 match_type="novel",
                 relationship=None,
                 confidence=None,
-                reason=rerank_result.get("reason", "LLM abstained") if rerank_result else "LLM call failed",
+                reason=rerank_result.get("reason", "LLM abstained"),
                 mode="ENHANCED",
             )
 
@@ -653,13 +680,26 @@ class GroundingService:
         candidates: list[GroundingCandidate],
         rerank_system: str = _RERANK_SYSTEM,
         subject_kind: str = "table",
-    ) -> dict | None:
+        max_tokens: int = 1000,
+    ) -> dict:
         """Ask the LLM to pick the best candidate or abstain.
 
         ``subject_kind`` ("table" or "class") + ``rerank_system`` let the
         shared reranker frame the source correctly: tables get a
         ``Columns:`` section; classes (no columns) omit it and are labeled
         SOURCE CLASS. The JSON contract and parsing are identical.
+
+        ``max_tokens`` caps the rerank response; a reasoning model spends part
+        of this budget on its (discarded) thinking, so it defaults well above
+        the short JSON answer's needs.
+
+        Returns the parsed rerank dict (``{"choice": "NONE", ...}`` is a
+        genuine abstention the caller maps to novel). Raises
+        :class:`GroundingRerankError` when the call itself failed
+        (Bedrock error after retries, no text block, a truncating
+        ``stopReason``, or unparseable non-JSON output) — an infrastructure
+        or model-contract failure that must NOT be misread as an abstention
+        and silently grounded novel.
         """
         is_class = subject_kind == "class"
         # Build the prompt with source context + candidate definitions.
@@ -697,11 +737,17 @@ class GroundingService:
             # escaping to fail the whole induction job.
             bedrock = self.bedrock
             _t0 = time.monotonic()
+            # No temperature: it is deprecated on newer models (e.g. Claude Opus 5),
+            # which reject the request with a ValidationException rather than
+            # ignoring it. We only ever wanted 0 (the model default), so omit it.
+            # botocore's bounded retries (async_boto_config, max_attempts=3) cover
+            # transient throttling / 5xx; an error surfacing past them is real and
+            # is raised below, not swallowed to a novel.
             resp = bedrock.converse(
                 modelId=self._llm_model_id,
                 messages=[{"role": "user", "content": [{"text": prompt}]}],
                 system=[{"text": rerank_system}],
-                inferenceConfig={"maxTokens": 200, "temperature": 0},
+                inferenceConfig={"maxTokens": max_tokens},
             )
             # Record token usage on the success path, right after converse returns
             # — usage is present even if the JSON body later fails to parse.
@@ -712,9 +758,22 @@ class GroundingService:
                     resp,
                     latency_ms=(time.monotonic() - _t0) * 1000.0,
                 )
-            raw = resp["output"]["message"]["content"][0]["text"].strip()
-            # Parse JSON response
-            # Handle cases where LLM wraps in markdown
+            # A truncated / malformed / filtered response is an infrastructure
+            # failure, not an abstention — do not try to parse a partial body
+            # into a silent novel. max_tokens most commonly bites reasoning
+            # models, whose thinking shares this budget: surface the knob.
+            stop_reason = resp.get("stopReason")
+            if stop_reason in ("max_tokens", "model_context_window_exceeded"):
+                raise GroundingRerankError(
+                    f"rerank response truncated (stopReason={stop_reason}) for '{table_name}' — "
+                    f"raise rerank_max_tokens (currently {max_tokens})"
+                )
+            if stop_reason in ("malformed_model_output", "content_filtered"):
+                raise GroundingRerankError(f"rerank response unusable (stopReason={stop_reason}) for '{table_name}'")
+            # Select the answer by block type, not position: a reasoning model
+            # returns a reasoningContent block (no "text" key) before the answer.
+            raw = extract_text_blocks(resp["output"]["message"]["content"]).strip()
+            # Parse JSON response; handle cases where the LLM wraps it in markdown.
             if raw.startswith("```"):
                 raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
             result = json.loads(raw)
@@ -727,11 +786,25 @@ class GroundingService:
             )
             return result
         except json.JSONDecodeError as e:
-            log.warning("LLM rerank returned non-JSON for table '%s': %s", table_name, e)
-            return None
-        except Exception as e:
+            # The call succeeded but the model did not return parseable JSON
+            # (prose preamble, wrong quoting, trailing text, or a markdown
+            # wrapper the fence-strip above did not fully normalize). A genuine
+            # abstention has a parseable form ({"choice": "NONE"}); unparseable
+            # output is the model failing the JSON contract, i.e. a malfunction.
+            # Raise so the job fails loud instead of silently grounding novel.
+            snippet = raw[:200].replace("\n", " ")
+            log.error("LLM rerank returned non-JSON for table '%s': %s | raw=%r", table_name, e, snippet)
+            raise GroundingRerankError(f"LLM rerank returned non-JSON for '{table_name}': {e} | raw={snippet!r}") from e
+        except (ClientError, BotoCoreError, ValueError) as e:
+            # Infrastructure failure: Bedrock error after retries (ClientError /
+            # BotoCoreError — includes the temperature ValidationException and any
+            # transient error that outlived the bounded retries) or no usable text
+            # block (ValueError from extract_text_blocks). NOT an abstention —
+            # raise so the job fails loud instead of silently grounding novel.
+            # The GroundingRerankError raised above for a bad stopReason does not
+            # subclass these, so it propagates untouched rather than re-wrapping.
             log.error("LLM rerank failed for table '%s': %s", table_name, e)
-            return None
+            raise GroundingRerankError(f"LLM rerank failed for '{table_name}': {e}") from e
 
     def to_concept_match(self, result: GroundingResult) -> ConceptMatch:
         """Convert a GroundingResult to the existing ConceptMatch schema."""

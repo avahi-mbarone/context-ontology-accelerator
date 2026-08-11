@@ -122,9 +122,12 @@ def _compute_structural_fingerprint(tables) -> str:
     import hashlib
 
     def _norm_ref(ref: str) -> str:
-        # Keep only the trailing table.column (drop catalog/db qualifiers).
-        parts = ref.split(".")
-        return ".".join(parts[-2:]) if len(parts) >= 2 else ref
+        # Keep only the trailing table.column (drop catalog/db qualifiers), using
+        # the one shared parser so the fingerprint agrees with every consumer.
+        from coa_ontology.inducer.services.data_catalog import parse_referred_column
+
+        table, column = parse_referred_column(ref)
+        return f"{table}.{column}" if column is not None else table
 
     parts = []
     for t in sorted(tables, key=lambda x: x.name):
@@ -191,6 +194,14 @@ class WorkbenchInductionRequest(BaseModel):
     label: str | None = None
     embedding_backend: str | None = None
     confidence_threshold: float = 0.80
+    # Output-token cap for the ENHANCED-mode LLM grounding rerank. Default 1000
+    # (well above the short JSON answer, giving reasoning models headroom so
+    # their thinking doesn't truncate the JSON → fail-loud). Per-request so it's
+    # adjustable without a redeploy. Bounds mirror the Smithy RerankMaxTokens
+    # type (@range min 1, max 8192).
+    rerank_max_tokens: int = Field(
+        default=1000, ge=1, le=8192, validation_alias=AliasChoices("rerank_max_tokens", "rerankMaxTokens")
+    )
     grounding_ontology_ids: list[str] | None = Field(
         default=None, validation_alias=AliasChoices("grounding_ontology_ids", "groundingOntologyIds")
     )
@@ -857,6 +868,7 @@ def _run_induction(
                 config=config,
                 pipeline=pipeline,
                 confidence_threshold=body.confidence_threshold,
+                rerank_max_tokens=body.rerank_max_tokens,
                 embedding_backend=body.embedding_backend,
                 scoring_strategy=body.scoring_strategy,
                 structural_weight=body.structural_weight,
@@ -1126,6 +1138,7 @@ def start_induction(body: WorkbenchInductionRequest, request: Request, namespace
             # foundational_grounded stays 0).
             grounding_ontology_ids=getattr(body, "grounding_ontology_ids", None),
             grounding_mode=getattr(body, "grounding_mode", "ENHANCED"),
+            rerank_max_tokens=getattr(body, "rerank_max_tokens", 1000),
         )
         return start_unstructured(body=unstructured_body, request=request, namespace=namespace)
 

@@ -192,6 +192,13 @@ enum MatchType {
 @range(min: 0, max: 1)
 float ConfidenceThreshold
 
+/// Output-token cap for the ENHANCED-mode LLM grounding rerank.
+/// The upper bound mirrors the induction pipeline's top-end output-token
+/// budget; it is a schema guardrail against typos/absurd values, not an
+/// Amazon Bedrock API limit. Omitted → the server default (1000) is used.
+@range(min: 1, max: 8192)
+integer RerankMaxTokens
+
 // ── Operations ──────────────────────────────────────────────────────
 /// Start an ontology induction job from one or more data sources.
 /// Returns immediately with a job ID; induction runs asynchronously.
@@ -215,6 +222,11 @@ operation StartInduction {
 
         /// Confidence threshold for matching against existing ontologies.
         confidenceThreshold: ConfidenceThreshold
+
+        /// Output-token cap for the ENHANCED-mode LLM grounding rerank.
+        /// Raise it when a reasoning model truncates its JSON answer (the
+        /// rerank fails loud naming this knob). Omitted → server default (1000).
+        rerankMaxTokens: RerankMaxTokens
 
         /// Induction strategy to use.
         strategy: InductionStrategy
