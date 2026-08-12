@@ -183,7 +183,31 @@ class TestStoreUris:
 
         mod.main()
 
-        mock_vsf.for_vector_store.assert_called_once_with(f"aoss://{_BASE_ENV['OPENSEARCH_ENDPOINT']}:443")
+        mock_vsf.for_vector_store.assert_called_once_with(
+            f"aoss://{_BASE_ENV['OPENSEARCH_ENDPOINT']}:443",
+            index_names=mod.EMBEDDING_INDEXES,
+        )
+
+    @patch(_P_IDX)
+    @patch(_P_GSF)
+    @patch(_P_VSF)
+    def test_deletes_only_the_indexes_the_build_writes(self, mock_vsf, mock_gsf, mock_idx_cls, mod):
+        """Cleanup must not look for an index the build path never created.
+
+        Left to its default, the toolkit includes ``statement``, which
+        EMBEDDING_INDEXES deliberately excludes — statements are built into the
+        graph but never embedded. Deletion then waits 70 seconds per batch for
+        documents that do not exist, and a 36-source delete ran 10 hours to a
+        timeout. Asserting the two paths agree is what keeps them agreeing.
+        """
+        _make_store_mocks(mock_gsf, mock_vsf)
+        _make_graph_index(mock_idx_cls, [])
+
+        mod.main()
+
+        indexes = mock_vsf.for_vector_store.call_args.kwargs["index_names"]
+        assert "statement" not in indexes, "statement is built into the graph but never embedded"
+        assert indexes == mod.EMBEDDING_INDEXES, "must be the same set the build task writes"
 
 
 # ---------------------------------------------------------------------------
