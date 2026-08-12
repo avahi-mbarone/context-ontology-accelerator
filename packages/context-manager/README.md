@@ -284,6 +284,7 @@ All executed queries are subject to a `max_rows` cap (default: 10,000):
 | `TIER3_PER_SOURCE_TIMEOUT_S` | No | `10` | Default per-source Tier-3 retrieval timeout (seconds) for both vector search and graph traversal. Timed-out sources are recorded as degraded; synthesis proceeds. |
 | `TIER3_VECTOR_TIMEOUT` | No | falls back to `TIER3_PER_SOURCE_TIMEOUT_S` | Per-source override (seconds) for the vector-search retrieval timeout. |
 | `TIER3_GRAPH_TIMEOUT` | No | falls back to `TIER3_PER_SOURCE_TIMEOUT_S` | Per-source override (seconds) for the graph-traversal retrieval timeout. |
+| `LEXICAL_RETRIEVER_TIMEOUT_S` | No | `45` | Standard-mode (non-agentic) Tier-3 lexical retriever per-query timeout (seconds). Raise for slow single-shot graphrag traversal strategies (e.g. `topic_beam`) that would otherwise be truncated by the retriever's built-in 15s default. Ignored on the agentic path, which passes its own per-tool budget. An invalid value logs a warning and keeps the 45s default. |
 | `WS_MAX_MESSAGE_BYTES` | No | `131072` (128 KB) | Maximum WebSocket message size in bytes. Messages exceeding this close the connection with RFC 6455 code 1009. |
 | `WS_RATE_LIMIT_BURST` | No | `10` | Query rate limit: maximum burst tokens per connection. Each query consumes one token. |
 | `WS_RATE_LIMIT_REFILL_SECONDS` | No | `6.0` | Query rate limit: seconds to refill one token (~10 queries/min sustained). |

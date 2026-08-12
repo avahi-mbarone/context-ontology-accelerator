@@ -138,34 +138,3 @@ apply ServeListMetrics @examples([
         }
     }
 ])
-
-apply DescribeSchema @examples([
-    {
-        title: "Describe the queryable schema"
-        input: { namespaceId: "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d", includeProperties: true }
-        output: {
-            classes: [
-                {
-                    uri: "urn:coa:class:Customer"
-                    label: "Customer"
-                    description: "A purchasing organization or individual"
-                    properties: [
-                        {
-                            uri: "urn:coa:prop:segment"
-                            label: "segment"
-                            range: "xsd:string"
-                        }
-                    ]
-                }
-            ]
-            dataSources: [
-                {
-                    dataSourceId: "ds-crm"
-                    name: "CRM Postgres"
-                    sourceType: "jdbc"
-                }
-            ]
-            ontologyVersion: "2025-09-01"
-        }
-    }
-])

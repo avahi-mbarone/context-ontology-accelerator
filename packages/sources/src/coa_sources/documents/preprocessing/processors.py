@@ -66,7 +66,9 @@ def process_docx(content_bytes: bytes, filename: str) -> tuple[str, str]:
     )
     elements = partition_docx(file=io.BytesIO(content_bytes))
     text = elements_to_markdown(elements)
-    logger.info(
+    # WARNING on an empty result — see the note in process_pdf.
+    log = logger.warning if not text.strip() else logger.info
+    log(
         "DOCX processed",
         extra={"doc_filename": filename, "elements": len(elements), "char_count": len(text)},
     )
@@ -101,7 +103,12 @@ def process_pdf(
     # strategy="fast" uses pdfminer only — no layout detection models (torch/detectron2)
     elements = partition_pdf(file=io.BytesIO(content_bytes), strategy="fast")
     text = elements_to_markdown(elements)
-    logger.info(
+    # WARNING, not INFO, on an empty result: `unstructured` gives up on
+    # drawing-heavy pages and returns zero characters without raising, so an
+    # extraction that found nothing and one that worked used to be the same
+    # severity — log-based alerting could not tell them apart.
+    log = logger.warning if not text.strip() else logger.info
+    log(
         "PDF processed",
         extra={"doc_filename": filename, "elements": len(elements), "char_count": len(text)},
     )

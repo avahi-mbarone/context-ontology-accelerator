@@ -19,7 +19,6 @@ service DataLayerService {
         KBSearch
         GraphTraverse
         ServeListMetrics
-        DescribeSchema
     ]
     errors: [
         ValidationError

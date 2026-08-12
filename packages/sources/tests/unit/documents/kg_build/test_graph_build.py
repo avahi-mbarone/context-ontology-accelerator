@@ -402,6 +402,12 @@ class TestLoadStagedDocuments:
 
     @patch("coa_common.s3.boto3")
     def test_skips_empty_files(self, mock_s3, mod):
+        """An empty staged file is skipped AND counted.
+
+        It used to be skipped with a bare ``continue`` that touched no counter, so
+        a source whose files all extracted to zero bytes reported a clean success
+        having put nothing in the graph.
+        """
         all_files = _staged(["empty.txt"])
         mock_paginator = MagicMock()
         mock_paginator.paginate.return_value = [{"Contents": all_files}]
@@ -415,6 +421,26 @@ class TestLoadStagedDocuments:
             docs, load_failed = mod._load_staged_documents(_BASE_ENV["BUCKET_NAME"], _BASE_ENV["STAGING_PREFIX"])
 
         assert len(docs) == 0
+        assert load_failed == 1, "an empty staged file is absent from the graph and must be counted"
+
+    @patch("coa_common.s3.boto3")
+    def test_empty_file_does_not_taint_the_ones_that_loaded(self, mock_s3, mod):
+        """The count is per-file — a good file still loads alongside an empty one."""
+        all_files = _staged(["good.txt", "empty.txt"])
+        mock_paginator = MagicMock()
+        mock_paginator.paginate.return_value = [{"Contents": all_files}]
+        mock_s3.client.return_value.get_paginator.return_value = mock_paginator
+        mock_s3.client.return_value.get_object.side_effect = [
+            {"Body": MagicMock(read=lambda: _bytes("Real content"))},
+            {"Body": MagicMock(read=lambda: b"")},
+        ]
+
+        with patch("llama_index.core.Document") as MockDoc:
+            MockDoc.side_effect = lambda **kw: MagicMock(**kw)
+            docs, load_failed = mod._load_staged_documents(_BASE_ENV["BUCKET_NAME"], _BASE_ENV["STAGING_PREFIX"])
+
+        assert len(docs) == 1
+        assert load_failed == 1
 
     @patch("coa_common.s3.boto3")
     def test_continues_on_file_error(self, mock_s3, mod):

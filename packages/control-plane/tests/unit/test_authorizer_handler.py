@@ -710,7 +710,18 @@ class TestMapRequestToCedar:
         assert action != "denyAll", f"{method} {path} fell through to denyAll"
         assert action == expected_action, f"{method} {path} mapped to {action}, expected {expected_action}"
 
-    def test_no_secured_smithy_operation_is_left_unmapped(self):
+    @pytest.mark.parametrize(
+        ("service", "smithy_file", "min_operations"),
+        [
+            ("ControlPlaneService", "control-plane.smithy", 50),
+            # This test only read the control plane, so a Data Layer route could go
+            # unmapped underneath a guard written to catch exactly that. Both
+            # services publish namespace-scoped routes through the same authorizer,
+            # so both belong here.
+            ("DataLayerService", "data-layer.smithy", 4),
+        ],
+    )
+    def test_no_secured_smithy_operation_is_left_unmapped(self, service: str, smithy_file: str, min_operations: int):
         """Derive the route list from the Smithy model, not from a hand-written table.
 
         CONTROL_PLANE_ROUTES above records the *intended* action per route, which is
@@ -735,15 +746,17 @@ class TestMapRequestToCedar:
         if not smithy_dir.is_dir():  # pragma: no cover - only in a partial checkout
             pytest.skip(f"Smithy sources not present at {smithy_dir}")
 
-        service = re.search(
-            r"service ControlPlaneService\s*\{(.*?)\n\}",
-            (smithy_dir / "control-plane.smithy").read_text(),
+        service_decl = re.search(
+            rf"service {service}\s*\{{(.*?)\n\}}",
+            (smithy_dir / smithy_file).read_text(),
             re.S,
         )
-        assert service, "could not locate the ControlPlaneService declaration"
-        ops_block = service.group(1)[service.group(1).index("operations: [") :]
+        assert service_decl, f"could not locate the {service} declaration"
+        ops_block = service_decl.group(1)[service_decl.group(1).index("operations: [") :]
         operation_names = re.findall(r"^\s+(\w+)\s*$", ops_block[: ops_block.index("]")], re.M)
-        assert len(operation_names) > 50, f"parsed only {len(operation_names)} operations; parser is wrong"
+        assert len(operation_names) >= min_operations, (
+            f"parsed only {len(operation_names)} {service} operations; parser is wrong"
+        )
 
         # Tolerates both the single-line and multi-line @http(...) forms, and any
         # traits sitting between the trait and the operation keyword.

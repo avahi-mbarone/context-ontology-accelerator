@@ -154,9 +154,15 @@ def _require_env(key: str) -> str:
 def _load_staged_documents(bucket: str, staging_prefix: str) -> tuple[list, int]:
     """Download staged text files + metadata sidecars from S3.
 
-    Returns ``(documents, load_failed_count)`` where ``load_failed_count`` is the
-    number of staged text files that were listed but could not be downloaded /
-    decoded (distinct from files intentionally skipped for being empty).
+    Returns ``(documents, unloaded_count)`` where ``unloaded_count`` is the number
+    of staged text files that were listed but produced no document — either they
+    could not be downloaded / decoded, or they held no text at all.
+
+    An empty staged file used to be skipped with a bare ``continue`` that left
+    every counter untouched, so a source whose files all extracted to zero bytes
+    reported a clean success having contributed nothing to the graph. Both
+    outcomes mean "a file we staged is not in the graph", which is what the
+    caller's failure accounting is for, so both are counted here.
 
     Raises on a LISTING failure (transient S3 error, wrong prefix, IAM hiccup):
     an empty listing must NOT be silently indistinguishable from a real failure,
@@ -194,6 +200,7 @@ def _load_staged_documents(bucket: str, staging_prefix: str) -> tuple[list, int]
 
     documents: list[Document] = []
     failed_count = 0
+    empty_count = 0
     for file_obj in text_files:
         key = file_obj["Key"]
         try:
@@ -201,7 +208,13 @@ def _load_staged_documents(bucket: str, staging_prefix: str) -> tuple[list, int]
             text = content_bytes.decode("utf-8", errors="replace")
 
             if not text.strip():
+                # Preprocessing now refuses to stage an empty extraction, so this
+                # only fires for a prefix staged before that guard existed. Count
+                # it: a staged file missing from the graph is the same outcome as
+                # one that failed to download, and a bare `continue` on data that
+                # was expected to exist is how a 50% corpus loss reported clean.
                 logger.warning("Empty staged file, skipping", s3_key=key)
+                empty_count += 1
                 continue
 
             filename = key.rsplit("/", 1)[-1] if "/" in key else key
@@ -258,8 +271,14 @@ def _load_staged_documents(bucket: str, staging_prefix: str) -> tuple[list, int]
             logger.error("Failed to load staged file", s3_key=key, error=tb)
             failed_count += 1
 
-    logger.info("Loaded documents", count=len(documents), failed=failed_count, total_text_files=len(text_files))
-    return documents, failed_count
+    logger.info(
+        "Loaded documents",
+        count=len(documents),
+        failed=failed_count,
+        empty=empty_count,
+        total_text_files=len(text_files),
+    )
+    return documents, failed_count + empty_count
 
 
 # ---------------------------------------------------------------------------
@@ -939,7 +958,10 @@ def main() -> None:
                 ddb_key,
                 {
                     "status": SourceStatus.SCAN_FAILED,
-                    "errorMessage": f"SCAN_FAILED_LOAD: all {load_failed} staged file(s) failed to download/decode",
+                    "errorMessage": (
+                        f"SCAN_FAILED_LOAD: all {load_failed} staged file(s) yielded no document "
+                        "(download/decode error, or no text content)"
+                    ),
                 },
             )
             sys.exit(1)
@@ -1121,7 +1143,8 @@ def main() -> None:
             {
                 "status": SourceStatus.SCAN_FAILED,
                 "errorMessage": (
-                    f"KG Build failed: {docs_fail} doc(s) failed build, {load_failed} file(s) failed to load"
+                    f"KG Build failed: {docs_fail} doc(s) failed build, {load_failed} staged file(s) yielded "
+                    "no document"
                 ),
             },
         )

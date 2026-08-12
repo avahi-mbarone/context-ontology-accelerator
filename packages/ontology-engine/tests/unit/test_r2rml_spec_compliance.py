@@ -25,7 +25,7 @@ from coa_ontology.inducer.services.data_catalog import (
     CatalogTable,
 )
 from coa_ontology.inducer.strategies.base import RR, SCL
-from rdflib import RDF, XSD, Graph, Namespace
+from rdflib import OWL, RDF, RDFS, XSD, Graph, Namespace, URIRef
 
 pytestmark = pytest.mark.unit
 
@@ -943,14 +943,14 @@ class TestForeignKeyObjectMaps:
         col = _object_map_column(g, ns["TriplesMap_Invoices/POM_OrderRef"])
         assert col == '"order_ref"'
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Three-part referredColumns ('schema.table.column') extracts schema as target — not supported",
-    )
     def test_referred_columns_three_part_schema_table_column(self, strategy):
-        """Future-proofing: referredColumns as 'schema.table.column'.
-        parts[0] extracts 'schema' — this is WRONG. The correct target is parts[1]
-        (the table name). Marked xfail so a future fix auto-promotes."""
+        """referredColumns as 'schema.table.column' resolves to the TABLE, not the schema.
+
+        Was xfail: the R2RML builder took ``parts[0]`` (the schema) while the
+        ontology, the SHACL config, and the subtype detector all took
+        ``parts[-2]`` (the table), so the mapping pointed at a TriplesMap that does
+        not exist. All six call sites now share ``parse_referred_column``.
+        """
         tables = [
             CatalogTable(
                 id="1",
@@ -1026,12 +1026,18 @@ class TestForeignKeyObjectMaps:
         conditions = _object_map_join_conditions(g, ns["TriplesMap_Bookings/POM_BookingDay"])
         assert conditions == [('"booking_day"', '"day"'), ('"booking_hour"', '"hour"')]
 
-        # booking_hour does NOT get its own POM (it's part of the composite)
-        all_poms = list(g.objects(ns.TriplesMap_Bookings, RR.predicateObjectMap))
-        pom_uris = [str(p) for p in all_poms]
-        assert not any("POM_BookingHour" in uri for uri in pom_uris), (
-            "booking_hour should NOT have its own POM — it's part of the composite FK"
+        # booking_hour does NOT get a second REFERENCING map — the relationship is
+        # expressed once, on booking_day (R2RML §7.5).
+        hour_pom = ns["TriplesMap_Bookings/POM_BookingHour"]
+        assert _object_map_parent_tmap(g, hour_pom) is None, (
+            "the composite relationship must be carried by exactly one referencing object map"
         )
+
+        # It DOES get a literal mapping. The ontology declares a property for
+        # every column, so leaving booking_hour unmapped left that declaration
+        # with nothing behind it and any SPARQL using it returned nothing.
+        assert _object_map_column(g, hour_pom) == '"booking_hour"'
+        assert _object_map_datatype(g, hour_pom) == XSD.integer
 
     def test_composite_fk_three_columns(self, strategy):
         """Composite FK with 3 columns produces single POM with 3 joinConditions."""
@@ -1995,3 +2001,1194 @@ class TestEdgeCases:
         # First FK constraint wins — parentTriplesMap points to table_a
         parent = _object_map_parent_tmap(g, ns["TriplesMap_Refs/POM_TargetId"])
         assert parent == ns.TriplesMap_TableA
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 10: IRI collision resolution (to_pascal is lossy)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestPascalCaseCollisions:
+    """Distinct tables must never share a class / TriplesMap IRI.
+
+    ``to_pascal`` folds separators and case, so names like ``order_item`` and
+    ``order-item`` collapse onto one local name. Minting IRIs from it directly
+    fused the two tables: one TriplesMap carrying two ``rr:tableName`` values
+    (invalid R2RML — a TriplesMap has exactly one logical table) and one class
+    carrying both tables' labels and key axioms.
+    """
+
+    @staticmethod
+    def _tables(*names):
+        return [
+            CatalogTable(
+                id=str(i),
+                name=name,
+                fullyQualifiedName=f"db.{name}",
+                columns=[CatalogColumn(name="id", dataType="INT")],
+                tableConstraints=[CatalogConstraint(constraintType="PRIMARY_KEY", columns=["id"])],
+            )
+            for i, name in enumerate(names, start=1)
+        ]
+
+    def test_separator_variants_get_distinct_triples_maps(self, strategy):
+        tables = self._tables("order_item", "order-item")
+        g = _build(strategy, tables)
+
+        tmaps = set(g.subjects(RDF.type, RR.TriplesMap))
+        assert len(tmaps) == 2, f"Expected one TriplesMap per table, got {tmaps}"
+
+    def test_each_triples_map_has_exactly_one_table_name(self, strategy):
+        """The R2RML invariant that the collision broke."""
+        tables = self._tables("order_item", "order-item")
+        g = _build(strategy, tables)
+
+        for tmap in g.subjects(RDF.type, RR.TriplesMap):
+            logical_tables = list(g.objects(tmap, RR.logicalTable))
+            assert len(logical_tables) == 1, f"{tmap} has {len(logical_tables)} logical tables"
+            names = [str(n) for lt in logical_tables for n in g.objects(lt, RR.tableName)]
+            assert len(names) == 1, f"{tmap} maps {len(names)} tables: {names}"
+
+    def test_both_source_tables_are_mapped(self, strategy):
+        """Neither table may be silently dropped by the disambiguation."""
+        tables = self._tables("order_item", "order-item")
+        g = _build(strategy, tables)
+
+        mapped = {
+            str(n)
+            for tmap in g.subjects(RDF.type, RR.TriplesMap)
+            for lt in g.objects(tmap, RR.logicalTable)
+            for n in g.objects(lt, RR.tableName)
+        }
+        assert mapped == {'"order_item"', '"order-item"'}
+
+    def test_case_only_variants_get_distinct_triples_maps(self, strategy):
+        tables = self._tables("Customer", "customer")
+        g = _build(strategy, tables)
+
+        assert len(set(g.subjects(RDF.type, RR.TriplesMap))) == 2
+
+    def test_non_colliding_names_keep_bare_pascal_iris(self, strategy):
+        """No discriminator when there is nothing to disambiguate (IRI stability)."""
+        tables = self._tables("orders", "customers")
+        g = _build(strategy, tables)
+        ns = Namespace(PREFIX)
+
+        assert (ns.TriplesMap_Orders, RDF.type, RR.TriplesMap) in g
+        assert (ns.TriplesMap_Customers, RDF.type, RR.TriplesMap) in g
+
+    def test_the_lowest_identity_keeps_the_bare_iri(self, strategy):
+        """The bare form is assigned by identity, never by input order.
+
+        Order would be the obvious rule and is the wrong one: ``_catalog_to_tables``
+        emits tables in whatever order the catalog enumerated them, so an
+        order-dependent assignment moves the bare IRI to a different table when that
+        order changes and a freshly generated mapping stops matching an
+        already-accepted ontology.
+        """
+        tables = self._tables("order_item", "order-item")
+        g = _build(strategy, tables)
+        ns = Namespace(PREFIX)
+
+        assert (ns.TriplesMap_OrderItem, RDF.type, RR.TriplesMap) in g
+        names = [
+            str(n) for lt in g.objects(ns.TriplesMap_OrderItem, RR.logicalTable) for n in g.objects(lt, RR.tableName)
+        ]
+        # min("db.order-item", "db.order_item") — "-" sorts before "_".
+        assert names == ['"order-item"']
+
+    def test_assignment_does_not_depend_on_input_order(self, strategy):
+        """Reversing the caller's list must mint exactly the same IRIs."""
+        forward = _build(strategy, self._tables("order_item", "order-item"))
+        reverse = _build(strategy, self._tables("order-item", "order_item"))
+
+        assert set(forward.subjects(RDF.type, RR.TriplesMap)) == set(reverse.subjects(RDF.type, RR.TriplesMap))
+        # Not just the same IRIs — the same table behind each one.
+        for tmap in forward.subjects(RDF.type, RR.TriplesMap):
+            fwd = [str(n) for lt in forward.objects(tmap, RR.logicalTable) for n in forward.objects(lt, RR.tableName)]
+            rev = [str(n) for lt in reverse.objects(tmap, RR.logicalTable) for n in reverse.objects(lt, RR.tableName)]
+            assert fwd == rev, f"{tmap} maps {fwd} one way and {rev} the other"
+
+    def test_assignment_is_deterministic_across_runs(self, strategy):
+        """Same input order must mint the same IRIs every time."""
+        first = _build(strategy, self._tables("order_item", "order-item"))
+        second = _build(strategy, self._tables("order_item", "order-item"))
+
+        assert set(first.subjects(RDF.type, RR.TriplesMap)) == set(second.subjects(RDF.type, RR.TriplesMap))
+
+    def test_ontology_and_r2rml_agree_on_class_iris(self, strategy):
+        """The two builders must mint identical class IRIs for colliding names."""
+        tables = self._tables("order_item", "order-item")
+        onto, novel = strategy._build_proposal_ontology(PREFIX, tables, [])
+        r2rml = strategy.build_r2rml(PREFIX, tables, novel, onto)
+
+        onto_classes = set(onto.subjects(RDF.type, OWL.Class))
+        r2rml_classes = {c for _, _, c in r2rml.triples((None, RR["class"], None))}
+        assert r2rml_classes <= onto_classes, (
+            f"R2RML references classes absent from the ontology: {r2rml_classes - onto_classes}"
+        )
+        assert len(r2rml_classes) == 2
+
+    def test_ontology_gives_each_table_its_own_class_and_label(self, strategy):
+        tables = self._tables("order_item", "order-item")
+        onto, _ = strategy._build_proposal_ontology(PREFIX, tables, [])
+
+        labels_by_class = {
+            str(cls): sorted(str(lbl) for lbl in onto.objects(cls, RDFS.label))
+            for cls in onto.subjects(RDF.type, OWL.Class)
+        }
+        assert len(labels_by_class) == 2
+        for cls, labels in labels_by_class.items():
+            assert len(labels) == 1, f"{cls} carries labels from multiple tables: {labels}"
+
+    def test_colliding_tables_get_distinct_property_iris(self, strategy):
+        """Discriminated classes must carry discriminated property IRIs too."""
+        tables = [
+            CatalogTable(
+                id="1",
+                name="order_item",
+                fullyQualifiedName="db.order_item",
+                columns=[CatalogColumn(name="qty", dataType="INT")],
+            ),
+            CatalogTable(
+                id="2",
+                name="order-item",
+                fullyQualifiedName="db.order-item",
+                columns=[CatalogColumn(name="qty", dataType="INT")],
+            ),
+        ]
+        g = _build(strategy, tables)
+
+        predicates = {str(p) for _, _, p in g.triples((None, RR.predicate, None))}
+        assert len(predicates) == 2, f"Property IRIs still collide: {predicates}"
+
+    def test_shacl_config_agrees_with_ontology_class_iris(self, strategy):
+        """generate_config_from_db must target the classes the ontology declares."""
+        from coa_ontology.validation.shapes.config import generate_config_from_db
+
+        tables = self._tables("order_item", "order-item")
+        onto, _ = strategy._build_proposal_ontology(PREFIX, tables, [])
+        config = generate_config_from_db(tables, PREFIX)
+
+        onto_classes = set(onto.subjects(RDF.type, OWL.Class))
+        shape_classes = {URIRef(c.class_uri) for c in config.classes}
+        assert shape_classes <= onto_classes, f"Shapes target absent classes: {shape_classes - onto_classes}"
+        assert len(shape_classes) == 2
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 11: ontology / R2RML property parity
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestOntologyR2rmlParity:
+    """Every property the ontology declares must have a mapping behind it.
+
+    A declared-but-unmapped property is worse than a missing one: it shows up in
+    the class/property browser and in the TBox context handed to the NL→SPARQL
+    LLM, so the model is encouraged to author SPARQL against a property Ontop
+    cannot resolve. The query compiles and returns nothing, with no mapping-gap
+    signal anywhere.
+    """
+
+    @staticmethod
+    def _declared_properties(onto):
+        return {str(p) for p in onto.subjects(RDF.type, OWL.ObjectProperty)} | {
+            str(p) for p in onto.subjects(RDF.type, OWL.DatatypeProperty)
+        }
+
+    @staticmethod
+    def _mapped_predicates(r2rml):
+        return {str(p) for _, _, p in r2rml.triples((None, RR.predicate, None))}
+
+    def _both(self, strategy, tables):
+        onto, novel = strategy._build_proposal_ontology(PREFIX, tables, [])
+        r2rml = strategy.build_r2rml(PREFIX, tables, novel, onto)
+        return onto, r2rml
+
+    @staticmethod
+    def _composite_fk_tables(*, arity: int = 2):
+        cols = [("day", "VARCHAR"), ("hour", "INT"), ("minute", "INT")][:arity]
+        parent = CatalogTable(
+            id="1",
+            name="time_slots",
+            fullyQualifiedName="s.time_slots",
+            columns=[CatalogColumn(name=n, dataType=t) for n, t in cols]
+            + [CatalogColumn(name="room", dataType="VARCHAR")],
+            tableConstraints=[CatalogConstraint(constraintType="PRIMARY_KEY", columns=[n for n, _ in cols])],
+        )
+        child = CatalogTable(
+            id="2",
+            name="bookings",
+            fullyQualifiedName="s.bookings",
+            columns=[CatalogColumn(name="booking_id", dataType="INT")]
+            + [CatalogColumn(name=n, dataType=t) for n, t in cols]
+            + [CatalogColumn(name="note", dataType="VARCHAR")],
+            tableConstraints=[
+                CatalogConstraint(constraintType="PRIMARY_KEY", columns=["booking_id"]),
+                CatalogConstraint(
+                    constraintType="FOREIGN_KEY",
+                    columns=[n for n, _ in cols],
+                    referredColumns=[f"time_slots.{n}" for n, _ in cols],
+                ),
+            ],
+        )
+        return [parent, child]
+
+    def test_composite_fk_leaves_no_unmapped_property(self, strategy):
+        onto, r2rml = self._both(strategy, self._composite_fk_tables())
+
+        unmapped = self._declared_properties(onto) - self._mapped_predicates(r2rml)
+        assert unmapped == set(), f"ontology declares properties with no R2RML mapping: {sorted(unmapped)}"
+
+    def test_three_column_composite_fk_leaves_no_unmapped_property(self, strategy):
+        """The gap scaled with arity — a 3-column FK orphaned two properties."""
+        onto, r2rml = self._both(strategy, self._composite_fk_tables(arity=3))
+
+        unmapped = self._declared_properties(onto) - self._mapped_predicates(r2rml)
+        assert unmapped == set(), f"ontology declares properties with no R2RML mapping: {sorted(unmapped)}"
+
+    def test_absorbed_column_is_a_datatype_property_not_an_object_property(self, strategy):
+        """The relationship is carried once; the other columns are plain literals."""
+        onto, _ = self._both(strategy, self._composite_fk_tables())
+        ns = Namespace(PREFIX)
+
+        assert (ns.bookings_day, RDF.type, OWL.ObjectProperty) in onto
+        assert (ns.bookings_hour, RDF.type, OWL.DatatypeProperty) in onto
+        assert (ns.bookings_hour, RDF.type, OWL.ObjectProperty) not in onto
+
+    def test_absorbed_column_range_matches_its_r2rml_datatype(self, strategy):
+        """rdfs:range and rr:datatype must agree or Ontop's type reasoning drops rows."""
+        onto, r2rml = self._both(strategy, self._composite_fk_tables())
+        ns = Namespace(PREFIX)
+
+        onto_range = onto.value(ns.bookings_hour, RDFS.range)
+        r2rml_datatype = _object_map_datatype(r2rml, ns["TriplesMap_Bookings/POM_Hour"])
+        assert onto_range == r2rml_datatype == XSD.integer
+
+    def test_absorbed_column_documents_where_the_relationship_lives(self, strategy):
+        onto, _ = self._both(strategy, self._composite_fk_tables())
+        ns = Namespace(PREFIX)
+
+        comment = str(onto.value(ns.bookings_hour, RDFS.comment))
+        assert "composite foreign key" in comment
+        assert "bookings_day" in comment
+
+    # ── malformed composite FKs degrade consistently on BOTH sides ────────────
+
+    @staticmethod
+    def _malformed_tables(*, referred):
+        return [
+            CatalogTable(
+                id="1",
+                name="bookings",
+                fullyQualifiedName="s.bookings",
+                columns=[
+                    CatalogColumn(name="day", dataType="VARCHAR"),
+                    CatalogColumn(name="hour", dataType="INT"),
+                ],
+                tableConstraints=[
+                    CatalogConstraint(
+                        constraintType="FOREIGN_KEY",
+                        columns=["day", "hour"],
+                        referredColumns=referred,
+                    )
+                ],
+            )
+        ]
+
+    def test_length_mismatch_degrades_to_datatype_on_both_sides(self, strategy):
+        """build_r2rml falls back to literals; the ontology must not claim a relationship."""
+        onto, r2rml = self._both(strategy, self._malformed_tables(referred=["slots.day"]))
+        ns = Namespace(PREFIX)
+
+        assert (ns.bookings_day, RDF.type, OWL.DatatypeProperty) in onto
+        assert (ns.bookings_day, RDF.type, OWL.ObjectProperty) not in onto
+        assert onto.value(ns.bookings_day, RDFS.range) == XSD.string
+        assert _object_map_datatype(r2rml, ns["TriplesMap_Bookings/POM_Day"]) == XSD.string
+
+    def test_multi_table_targets_degrade_to_datatype_on_both_sides(self, strategy):
+        onto, r2rml = self._both(strategy, self._malformed_tables(referred=["a.day", "b.hour"]))
+        ns = Namespace(PREFIX)
+
+        for local, expected in (("bookings_day", XSD.string), ("bookings_hour", XSD.integer)):
+            assert (ns[local], RDF.type, OWL.DatatypeProperty) in onto
+            assert onto.value(ns[local], RDFS.range) == expected
+
+    def test_malformed_composite_fk_leaves_no_unmapped_property(self, strategy):
+        onto, r2rml = self._both(strategy, self._malformed_tables(referred=["slots.day"]))
+
+        unmapped = self._declared_properties(onto) - self._mapped_predicates(r2rml)
+        assert unmapped == set(), f"unmapped after malformed-FK fallback: {sorted(unmapped)}"
+
+    # ── the simple cases must be untouched ───────────────────────────────────
+
+    def test_simple_fk_still_yields_an_object_property(self, strategy):
+        tables = [
+            CatalogTable(
+                id="1",
+                name="orders",
+                fullyQualifiedName="s.orders",
+                columns=[
+                    CatalogColumn(name="id", dataType="INT"),
+                    CatalogColumn(name="customer_id", dataType="INT"),
+                ],
+                tableConstraints=[
+                    CatalogConstraint(constraintType="PRIMARY_KEY", columns=["id"]),
+                    CatalogConstraint(
+                        constraintType="FOREIGN_KEY",
+                        columns=["customer_id"],
+                        referredColumns=["customers.id"],
+                    ),
+                ],
+            ),
+            CatalogTable(
+                id="2",
+                name="customers",
+                fullyQualifiedName="s.customers",
+                columns=[CatalogColumn(name="id", dataType="INT")],
+                tableConstraints=[CatalogConstraint(constraintType="PRIMARY_KEY", columns=["id"])],
+            ),
+        ]
+        onto, r2rml = self._both(strategy, tables)
+        ns = Namespace(PREFIX)
+
+        assert (ns.orders_customerId, RDF.type, OWL.ObjectProperty) in onto
+        assert _object_map_parent_tmap(r2rml, ns["TriplesMap_Orders/POM_CustomerId"]) == ns.TriplesMap_Customers
+        assert self._declared_properties(onto) - self._mapped_predicates(r2rml) == set()
+
+    def test_no_fk_table_has_full_parity(self, strategy):
+        tables = [
+            CatalogTable(
+                id="1",
+                name="statuses",
+                fullyQualifiedName="s.statuses",
+                columns=[
+                    CatalogColumn(name="code", dataType="VARCHAR"),
+                    CatalogColumn(name="label", dataType="VARCHAR"),
+                ],
+                tableConstraints=[CatalogConstraint(constraintType="PRIMARY_KEY", columns=["code"])],
+            )
+        ]
+        onto, r2rml = self._both(strategy, tables)
+
+        assert self._declared_properties(onto) - self._mapped_predicates(r2rml) == set()
+
+    # ── The SHACL shapes are the THIRD artifact and must agree too ──────────
+    #
+    # The parity tests above pin ontology↔R2RML. The shapes were the odd one out:
+    # generate_config_from_db put every column of a composite FK into fk_map, so an
+    # absorbed column got a REFERENCE constraint, which compile_to_shacl turns into
+    # sh:nodeKind sh:IRI + sh:class — while the ontology declares the same column an
+    # owl:DatatypeProperty and the mapping emits an rr:datatype literal for it. The
+    # shape then asserts a class-typed reference against data that is literal by
+    # design: a false-positive violation on every row of every composite-FK child
+    # table, which the user sees as a failed validation run.
+
+    @staticmethod
+    def _shape_constraint_types(tables, class_name):
+        """Map ``property_name -> {ConstraintType}`` for one class's shape."""
+        from coa_ontology.validation.shapes.config import generate_config_from_db
+
+        cfg = generate_config_from_db(tables, uri_prefix=PREFIX)
+        out: dict[str, set] = {}
+        for cls in cfg.classes:
+            if cls.class_name != class_name:
+                continue
+            for c in cls.constraints:
+                out.setdefault(c.property_name, set()).add(c.constraint_type)
+        return out
+
+    def test_shapes_reference_exactly_the_ontology_object_properties(self, strategy):
+        """The invariant, stated directly: sh:class iff owl:ObjectProperty."""
+        from coa_ontology.inducer.strategies.base import to_camel
+        from coa_ontology.validation.shapes.config import ConstraintType
+
+        tables = self._composite_fk_tables()
+        onto, _ = self._both(strategy, tables)
+        ns = Namespace(PREFIX)
+        by_col = self._shape_constraint_types(tables, "bookings")
+
+        referenced = {col for col, types in by_col.items() if ConstraintType.REFERENCE in types}
+        object_props = {
+            col for col in by_col if (ns[f"bookings_{to_camel(col)}"], RDF.type, OWL.ObjectProperty) in onto
+        }
+
+        assert referenced == object_props, (
+            f"shapes assert sh:class for {sorted(referenced)} but the ontology "
+            f"declares object properties for {sorted(object_props)}"
+        )
+
+    def test_absorbed_column_gets_a_datatype_shape_not_a_reference(self, strategy):
+        """The anchor carries the relationship; the absorbed column is a literal."""
+        from coa_ontology.validation.shapes.config import ConstraintType
+
+        by_col = self._shape_constraint_types(self._composite_fk_tables(), "bookings")
+
+        assert ConstraintType.REFERENCE in by_col["day"]
+        assert ConstraintType.REFERENCE not in by_col["hour"]
+        assert ConstraintType.DATATYPE in by_col["hour"]
+
+    def test_three_column_composite_fk_absorbs_both_shapes(self, strategy):
+        """The divergence scaled with arity, so the fix must too."""
+        from coa_ontology.validation.shapes.config import ConstraintType
+
+        by_col = self._shape_constraint_types(self._composite_fk_tables(arity=3), "bookings")
+
+        assert ConstraintType.REFERENCE in by_col["day"]
+        for absorbed in ("hour", "minute"):
+            assert ConstraintType.REFERENCE not in by_col[absorbed]
+            assert ConstraintType.DATATYPE in by_col[absorbed]
+
+    def test_no_shape_asserts_sh_class_against_a_datatype_property(self, strategy):
+        """Checked on the compiled Turtle, not just the intermediate config."""
+        from coa_ontology.validation.shapes.config import compile_to_shacl, generate_config_from_db
+
+        tables = self._composite_fk_tables()
+        onto, _ = self._both(strategy, tables)
+        shapes = Graph().parse(
+            data=compile_to_shacl(generate_config_from_db(tables, uri_prefix=PREFIX), PREFIX), format="turtle"
+        )
+        sh = Namespace("http://www.w3.org/ns/shacl#")
+
+        for prop_shape in shapes.subjects(sh["class"], None):
+            path = shapes.value(prop_shape, sh.path)
+            assert (path, RDF.type, OWL.DatatypeProperty) not in onto, (
+                f"{path} is an owl:DatatypeProperty but its shape asserts sh:class"
+            )
+
+    def test_a_single_column_fk_still_gets_its_reference_shape(self, strategy):
+        """The fix must not strip legitimate references."""
+        from coa_ontology.validation.shapes.config import ConstraintType
+
+        tables = [
+            CatalogTable(
+                id="1",
+                name="customers",
+                fullyQualifiedName="s.customers",
+                columns=[CatalogColumn(name="id", dataType="INT")],
+                tableConstraints=[CatalogConstraint(constraintType="PRIMARY_KEY", columns=["id"])],
+            ),
+            CatalogTable(
+                id="2",
+                name="orders",
+                fullyQualifiedName="s.orders",
+                columns=[
+                    CatalogColumn(name="id", dataType="INT"),
+                    CatalogColumn(name="customer_id", dataType="INT"),
+                ],
+                tableConstraints=[
+                    CatalogConstraint(constraintType="PRIMARY_KEY", columns=["id"]),
+                    CatalogConstraint(
+                        constraintType="FOREIGN_KEY", columns=["customer_id"], referredColumns=["customers.id"]
+                    ),
+                ],
+            ),
+        ]
+        by_col = self._shape_constraint_types(tables, "orders")
+
+        assert ConstraintType.REFERENCE in by_col["customer_id"]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 12: referredColumns parsing is one shared rule
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestReferredColumnParsing:
+    """All consumers must resolve an FK target identically.
+
+    The rule was re-implemented at six call sites under two incompatible
+    conventions: `parts[0]` in the R2RML builder and the RIGOR topological sort,
+    `parts[-2]` in the ontology builder, the SHACL config, the subtype detector,
+    and the fingerprint normalizer. For `schema.table.column` the former yields
+    the SCHEMA, so the mapping referenced a nonexistent TriplesMap while the
+    ontology and shapes correctly referenced the table.
+    """
+
+    @pytest.mark.parametrize(
+        ("ref", "expected"),
+        [
+            ("orders.order_id", ("orders", "order_id")),
+            ("public.orders.order_id", ("orders", "order_id")),
+            ("db.public.orders.order_id", ("orders", "order_id")),
+            ("orders", ("orders", None)),
+        ],
+    )
+    def test_parser_keeps_the_trailing_table_and_column(self, ref, expected):
+        from coa_ontology.inducer.services.data_catalog import parse_referred_column
+
+        assert parse_referred_column(ref) == expected
+
+    @pytest.mark.parametrize(
+        ("ref", "expected"),
+        [
+            ("", ("", None)),
+            (".", ("", "")),
+            ("orders.", ("orders", "")),
+            (".order_id", ("", "order_id")),
+            ("public..order_id", ("", "order_id")),
+        ],
+    )
+    def test_parser_splits_degenerate_input_without_raising(self, ref, expected):
+        """A malformed reference yields an empty half; it is not an error here.
+
+        The parser splits, it does not validate — only the caller knows whether an
+        unusable reference should degrade to a literal (R2RML) or simply find no
+        parent (subtype detection). Pinned because a single-segment value is a known
+        and expected case, so the no-dot guard must stay ahead of the unpacking:
+        without it `"orders"` raises `ValueError: not enough values to unpack`.
+        """
+        from coa_ontology.inducer.services.data_catalog import parse_referred_column
+
+        assert parse_referred_column(ref) == expected
+
+    @pytest.mark.parametrize(
+        "refs",
+        [
+            pytest.param(["day", "hour"], id="no-dot-at-all"),
+            pytest.param([".day", ".hour"], id="empty-table-half"),
+            pytest.param(["readings.", "readings."], id="empty-column-half"),
+            pytest.param(["public..day", "public..hour"], id="empty-middle-segment"),
+        ],
+    )
+    def test_composite_fk_with_an_empty_half_is_not_usable(self, refs):
+        """An empty half must be refused, not merely a `None` one.
+
+        `parse_referred_column` returns `""` — not `None` — for a leading or trailing
+        dot, so an identity check (`col is None`) let these through. An empty TABLE
+        half then reached `_parent_tmap`, which finds no in-run table of that name,
+        reads it as out-of-run, and mints `to_pascal("") == "Entity"`. The mapping
+        emitted `rr:parentTriplesMap ind:TriplesMap_Entity`: a join to a TriplesMap
+        that does not exist, which is the defect this function exists to prevent.
+
+        The single-column FK path guards on truthiness
+        (`if is_fk and simple_fk_target and fk_parent_col`), so identity here also
+        made the two paths disagree about the same malformed reference.
+        """
+        from coa_ontology.inducer.strategies.base import composite_fk_is_usable
+
+        tc = CatalogConstraint(
+            constraintType="FOREIGN_KEY",
+            columns=["day", "hour"],
+            referredColumns=refs,
+        )
+        assert composite_fk_is_usable(tc) is False
+
+    def test_an_empty_fk_target_never_reaches_the_mapping_as_a_parent(self, strategy):
+        """End-to-end: no `TriplesMap_Entity` parent from a degenerate reference.
+
+        Guards the whole path rather than the predicate alone — the unit assertion
+        above would still pass if a caller stopped consulting it.
+        """
+        tables = [
+            CatalogTable(
+                id="1",
+                name="readings",
+                fullyQualifiedName="public.readings",
+                sourceSchema="public",
+                columns=[
+                    CatalogColumn(name="day", dataType="INT"),
+                    CatalogColumn(name="hour", dataType="INT"),
+                ],
+                tableConstraints=[
+                    CatalogConstraint(
+                        constraintType="FOREIGN_KEY",
+                        columns=["day", "hour"],
+                        referredColumns=[".day", ".hour"],
+                    )
+                ],
+            ),
+        ]
+
+        g = _build(strategy, tables)
+
+        parents = {str(o) for o in g.objects(None, RR.parentTriplesMap)}
+        assert parents == set(), f"degenerate FK emitted a parent join: {parents}"
+        # Both columns degrade to datatype literals, matching what the ontology
+        # declares for them.
+        assert len(list(g.triples((None, RR.datatype, None)))) == 2
+
+    @staticmethod
+    def _schema_qualified_tables():
+        return [
+            CatalogTable(
+                id="1",
+                name="invoices",
+                fullyQualifiedName="billing.invoices",
+                columns=[CatalogColumn(name="order_ref", dataType="INT")],
+                tableConstraints=[
+                    CatalogConstraint(
+                        constraintType="FOREIGN_KEY",
+                        columns=["order_ref"],
+                        referredColumns=["public.orders.order_id"],
+                    )
+                ],
+            ),
+            CatalogTable(
+                id="2",
+                name="orders",
+                fullyQualifiedName="public.orders",
+                columns=[CatalogColumn(name="order_id", dataType="INT")],
+                tableConstraints=[CatalogConstraint(constraintType="PRIMARY_KEY", columns=["order_id"])],
+            ),
+        ]
+
+    def test_r2rml_and_ontology_agree_on_a_schema_qualified_target(self, strategy):
+        tables = self._schema_qualified_tables()
+        onto, novel = strategy._build_proposal_ontology(PREFIX, tables, [])
+        r2rml = strategy.build_r2rml(PREFIX, tables, novel, onto)
+        ns = Namespace(PREFIX)
+
+        # Ontology: range is the TABLE's class, never a class named after the schema
+        assert onto.value(ns.invoices_orderRef, RDFS.range) == ns.Orders
+        # R2RML: parent is the TABLE's TriplesMap
+        parent = _object_map_parent_tmap(r2rml, ns["TriplesMap_Invoices/POM_OrderRef"])
+        assert parent == ns.TriplesMap_Orders
+
+    def test_shacl_config_agrees_on_a_schema_qualified_target(self, strategy):
+        from coa_ontology.validation.shapes.config import generate_config_from_db
+
+        config = generate_config_from_db(self._schema_qualified_tables(), PREFIX)
+
+        targets = [
+            c.params.get("target_class")
+            for cls in config.classes
+            for c in cls.constraints
+            if c.params and "target_class" in c.params
+        ]
+        assert targets == [f"{PREFIX}Orders"]
+
+    def test_no_class_is_minted_from_the_schema_name(self, strategy):
+        tables = self._schema_qualified_tables()
+        onto, _ = strategy._build_proposal_ontology(PREFIX, tables, [])
+
+        classes = {str(c) for c in onto.subjects(RDF.type, OWL.Class)}
+        assert f"{PREFIX}Public" not in classes
+
+    def test_join_condition_uses_the_trailing_column(self, strategy):
+        tables = self._schema_qualified_tables()
+        g = _build(strategy, tables)
+        ns = Namespace(PREFIX)
+
+        conditions = _object_map_join_conditions(g, ns["TriplesMap_Invoices/POM_OrderRef"])
+        assert conditions == [('"order_ref"', '"order_id"')]
+
+    def test_fingerprint_treats_qualified_and_bare_refs_as_equal(self):
+        """A rescan reporting a longer qualification must not look like a new schema."""
+        from coa_ontology.induce_catalog import _compute_structural_fingerprint
+
+        def _tables(ref):
+            return [
+                CatalogTable(
+                    id="1",
+                    name="invoices",
+                    fullyQualifiedName="billing.invoices",
+                    columns=[CatalogColumn(name="order_ref", dataType="INT")],
+                    tableConstraints=[
+                        CatalogConstraint(constraintType="FOREIGN_KEY", columns=["order_ref"], referredColumns=[ref])
+                    ],
+                )
+            ]
+
+        bare = _compute_structural_fingerprint(_tables("orders.order_id"))
+        qualified = _compute_structural_fingerprint(_tables("db.public.orders.order_id"))
+        assert bare == qualified
+
+    def test_subtype_detection_handles_a_schema_qualified_self_reference(self):
+        """PK-sharing detection must resolve the parent table, not the schema."""
+        from coa_ontology.inducer.services.subtype_detection import detect_pk_sharing_subtypes
+
+        parent = CatalogTable(
+            id="1",
+            name="claim_amount",
+            fullyQualifiedName="ins.claim_amount",
+            columns=[CatalogColumn(name="claim_id", dataType="INT")],
+            tableConstraints=[CatalogConstraint(constraintType="PRIMARY_KEY", columns=["claim_id"])],
+        )
+        children = [
+            CatalogTable(
+                id=str(i + 2),
+                name=name,
+                fullyQualifiedName=f"ins.{name}",
+                columns=[CatalogColumn(name="claim_id", dataType="INT")],
+                tableConstraints=[
+                    CatalogConstraint(constraintType="PRIMARY_KEY", columns=["claim_id"]),
+                    CatalogConstraint(
+                        constraintType="FOREIGN_KEY",
+                        columns=["claim_id"],
+                        referredColumns=["ins.claim_amount.claim_id"],
+                    ),
+                ],
+            )
+            for i, name in enumerate(("loss_payment", "expense_payment"))
+        ]
+
+        confirmed, _suggested = detect_pk_sharing_subtypes([parent, *children])
+
+        assert ("loss_payment", "claim_amount") in confirmed
+        assert ("expense_payment", "claim_amount") in confirmed
+
+
+@pytest.mark.unit
+class TestOverlappingCompositeForeignKeys:
+    """Two composite FKs sharing a column must both keep their relationship.
+
+    `build_r2rml` walks the columns and CONSUMES each constraint as it anchors it,
+    so for FK1=(a,b)->p1 and FK2=(b,c)->p2: `a` anchors FK1 (absorbing `b`), and
+    `c` — reached with FK1 already consumed — anchors FK2.
+
+    A non-consuming `composite_fk_columns` matched `c` against FK2 while also
+    treating it as absorbed by `b`, so `c` degraded to a literal and the child→p2
+    relationship vanished from the R2RML mapping AND (since both builders share the
+    helper) from the ontology.
+    """
+
+    @staticmethod
+    def _tables():
+        child = CatalogTable(
+            id="1",
+            name="child",
+            fullyQualifiedName="s.child",
+            columns=[
+                CatalogColumn(name="a", dataType="INT"),
+                CatalogColumn(name="b", dataType="INT"),
+                CatalogColumn(name="c", dataType="INT"),
+            ],
+            tableConstraints=[
+                CatalogConstraint(constraintType="FOREIGN_KEY", columns=["a", "b"], referredColumns=["p1.a", "p1.b"]),
+                CatalogConstraint(constraintType="FOREIGN_KEY", columns=["b", "c"], referredColumns=["p2.b", "p2.c"]),
+            ],
+        )
+        p1 = CatalogTable(
+            id="2",
+            name="p1",
+            fullyQualifiedName="s.p1",
+            columns=[CatalogColumn(name="a", dataType="INT"), CatalogColumn(name="b", dataType="INT")],
+            tableConstraints=[CatalogConstraint(constraintType="PRIMARY_KEY", columns=["a", "b"])],
+        )
+        p2 = CatalogTable(
+            id="3",
+            name="p2",
+            fullyQualifiedName="s.p2",
+            columns=[CatalogColumn(name="b", dataType="INT"), CatalogColumn(name="c", dataType="INT")],
+            tableConstraints=[CatalogConstraint(constraintType="PRIMARY_KEY", columns=["b", "c"])],
+        )
+        return [child, p1, p2]
+
+    def test_both_relationships_survive_in_r2rml(self, strategy):
+        g = _build(strategy, self._tables())
+        ns = Namespace(PREFIX)
+
+        parents = {str(p) for _, _, p in g.triples((None, RR.parentTriplesMap, None))}
+        assert str(ns.TriplesMap_P1) in parents
+        assert str(ns.TriplesMap_P2) in parents, "the second composite FK's relationship was dropped"
+
+    def test_each_composite_fk_is_anchored_on_a_distinct_column(self, strategy):
+        g = _build(strategy, self._tables())
+        ns = Namespace(PREFIX)
+
+        assert _object_map_parent_tmap(g, ns["TriplesMap_Child/POM_A"]) == ns.TriplesMap_P1
+        assert _object_map_parent_tmap(g, ns["TriplesMap_Child/POM_C"]) == ns.TriplesMap_P2
+        # b is absorbed by FK1's map and carries a literal mapping only.
+        assert _object_map_parent_tmap(g, ns["TriplesMap_Child/POM_B"]) is None
+        assert _object_map_column(g, ns["TriplesMap_Child/POM_B"]) == '"b"'
+
+    def test_shared_column_is_absorbed_exactly_once(self, strategy):
+        from coa_ontology.inducer.strategies.base import composite_fk_columns
+
+        child = self._tables()[0]
+
+        assert composite_fk_columns(child) == {"b": "a"}
+
+    def test_ontology_matches_the_mapping(self, strategy):
+        tables = self._tables()
+        onto, novel = strategy._build_proposal_ontology(PREFIX, tables, [])
+        r2rml = strategy.build_r2rml(PREFIX, tables, novel, onto)
+        ns = Namespace(PREFIX)
+
+        assert (ns.child_a, RDF.type, OWL.ObjectProperty) in onto
+        assert (ns.child_c, RDF.type, OWL.ObjectProperty) in onto
+        assert (ns.child_b, RDF.type, OWL.DatatypeProperty) in onto
+        assert onto.value(ns.child_c, RDFS.range) == ns.P2
+
+        declared = {str(p) for p in onto.subjects(RDF.type, OWL.ObjectProperty)} | {
+            str(p) for p in onto.subjects(RDF.type, OWL.DatatypeProperty)
+        }
+        mapped = {str(p) for _, _, p in r2rml.triples((None, RR.predicate, None))}
+        assert declared - mapped == set()
+
+    def test_three_overlapping_composite_fks(self, strategy):
+        """Chained overlap: (a,b)->p1, (b,c)->p2, (c,d)->p3."""
+        child = CatalogTable(
+            id="1",
+            name="child",
+            fullyQualifiedName="s.child",
+            columns=[CatalogColumn(name=n, dataType="INT") for n in ("a", "b", "c", "d")],
+            tableConstraints=[
+                CatalogConstraint(constraintType="FOREIGN_KEY", columns=["a", "b"], referredColumns=["p1.a", "p1.b"]),
+                CatalogConstraint(constraintType="FOREIGN_KEY", columns=["b", "c"], referredColumns=["p2.b", "p2.c"]),
+                CatalogConstraint(constraintType="FOREIGN_KEY", columns=["c", "d"], referredColumns=["p3.c", "p3.d"]),
+            ],
+        )
+        g = _build(strategy, [child])
+
+        ns = Namespace(PREFIX)
+        # a anchors FK1 (folding in b); b is skipped as folded, so c anchors FK2
+        # (folding in nothing new); d then anchors FK3. Every constraint keeps a
+        # relationship — matches what the pre-fix mapping emitted, verified by
+        # running both revisions.
+        assert _object_map_parent_tmap(g, ns["TriplesMap_Child/POM_A"]) == ns.TriplesMap_P1
+        assert _object_map_parent_tmap(g, ns["TriplesMap_Child/POM_C"]) == ns.TriplesMap_P2
+        assert _object_map_parent_tmap(g, ns["TriplesMap_Child/POM_D"]) == ns.TriplesMap_P3
+        # b is the only folded column, so it is the only literal.
+        assert _object_map_column(g, ns["TriplesMap_Child/POM_B"]) == '"b"'
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 13: A column in a malformed FK that also anchors a well-formed one
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestMalformedAndUsableCompositeFksShareAColumn:
+    """A broken constraint must not cost an unrelated, expressible relationship.
+
+    ``build_r2rml`` degrades every column of a malformed composite FK to a literal,
+    and ``composite_fk_anchors`` assigns anchors for the usable ones. A column can be
+    in both sets. The malformed check used to run FIRST, so such a column was emitted
+    as ``rr:column`` + ``rr:datatype`` — while the ontology, which asks
+    ``composite_fk_anchors``, still declared it an ``owl:ObjectProperty`` with
+    ``rdfs:range <Parent>``. That is the ontology/mapping contradiction the
+    composite-FK work set out to remove, reintroduced through a different door, and
+    it silently dropped the usable FK's relationship from the mapping entirely: the
+    anchor was consumed, so no other column re-emitted it.
+    """
+
+    @staticmethod
+    def _tables():
+        # Column order matters: `c` must be the first column of a usable composite
+        # FK so `composite_fk_anchors` picks it as the anchor.
+        child = CatalogTable(
+            id="1",
+            name="child",
+            fullyQualifiedName="s.child",
+            columns=[CatalogColumn(name=n, dataType="INT") for n in ("c", "a", "d")],
+            tableConstraints=[
+                # Malformed: two columns, one referred column — no join derivable.
+                CatalogConstraint(constraintType="FOREIGN_KEY", columns=["c", "d"], referredColumns=["broken.x"]),
+                # Usable: anchored on `c`, folding in `a`.
+                CatalogConstraint(
+                    constraintType="FOREIGN_KEY", columns=["c", "a"], referredColumns=["good.px", "good.py"]
+                ),
+            ],
+        )
+        good = CatalogTable(
+            id="2",
+            name="good",
+            fullyQualifiedName="s.good",
+            columns=[CatalogColumn(name=n, dataType="INT") for n in ("px", "py")],
+            tableConstraints=[CatalogConstraint(constraintType="PRIMARY_KEY", columns=["px", "py"])],
+        )
+        return [child, good]
+
+    def test_the_usable_relationship_survives(self, strategy):
+        g = _build(strategy, self._tables())
+        ns = Namespace(PREFIX)
+        pom = ns["TriplesMap_Child/POM_C"]
+
+        assert _object_map_parent_tmap(g, pom) == ns.TriplesMap_Good
+        assert _object_map_join_conditions(g, pom) == [('"a"', '"py"'), ('"c"', '"px"')]
+
+    def test_the_anchor_is_not_degraded_to_a_literal(self, strategy):
+        g = _build(strategy, self._tables())
+        ns = Namespace(PREFIX)
+        pom = ns["TriplesMap_Child/POM_C"]
+
+        assert _object_map_datatype(g, pom) is None
+        assert _object_map_column(g, pom) is None
+
+    def test_a_column_only_in_the_malformed_fk_still_degrades(self, strategy):
+        """The malformed constraint is still unmappable — `d` must stay a literal."""
+        g = _build(strategy, self._tables())
+        ns = Namespace(PREFIX)
+        pom = ns["TriplesMap_Child/POM_D"]
+
+        assert _object_map_column(g, pom) == '"d"'
+        assert _object_map_parent_tmap(g, pom) is None
+
+    def test_range_and_datatype_do_not_contradict(self, strategy):
+        """The invariant that actually broke: rdfs:range vs rr:datatype."""
+        tables = self._tables()
+        onto, novel = strategy._build_proposal_ontology(PREFIX, tables, [])
+        r2rml = strategy.build_r2rml(PREFIX, tables, novel, onto)
+        ns = Namespace(PREFIX)
+
+        # The ontology declares an object property pointing at the USABLE FK's
+        # parent — not at `broken`, which the first-matching-constraint lookup used
+        # to return because the malformed constraint is listed first.
+        assert (ns.child_c, RDF.type, OWL.ObjectProperty) in onto
+        assert onto.value(ns.child_c, RDFS.range) == ns.Good
+
+        # And the mapping agrees: a referencing object map, no rr:datatype.
+        pom = ns["TriplesMap_Child/POM_C"]
+        assert _object_map_parent_tmap(r2rml, pom) == ns.TriplesMap_Good
+        assert _object_map_datatype(r2rml, pom) is None
+
+        # `d` is a literal in both artifacts.
+        assert (ns.child_d, RDF.type, OWL.DatatypeProperty) in onto
+        assert _object_map_datatype(r2rml, ns["TriplesMap_Child/POM_D"]) == XSD.integer
+
+    def test_every_declared_property_is_still_mapped(self, strategy):
+        tables = self._tables()
+        onto, novel = strategy._build_proposal_ontology(PREFIX, tables, [])
+        r2rml = strategy.build_r2rml(PREFIX, tables, novel, onto)
+
+        declared = {str(p) for p in onto.subjects(RDF.type, OWL.ObjectProperty)} | {
+            str(p) for p in onto.subjects(RDF.type, OWL.DatatypeProperty)
+        }
+        mapped = {str(p) for _, _, p in r2rml.triples((None, RR.predicate, None))}
+        assert declared - mapped == set()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 14: Same table name in two databases
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestSameNameInDifferentDatabases:
+    """Two tables sharing a bare name are two tables.
+
+    One induction flattens every database of every requested datasource into a
+    single list (``_catalog_to_tables`` fills ``name`` from the bare table name and
+    puts the qualified form in ``fullyQualifiedName``), so ``public.customers`` and
+    ``analytics.customers`` arrive as two entries both named ``customers``. Keying
+    the local-name helper on the NAME collapsed them: one TriplesMap with two
+    ``rr:logicalTable`` / ``rr:tableName`` values — invalid R2RML, the same defect
+    the separator/case collisions produced, reached by a different route.
+    """
+
+    @staticmethod
+    def _tables():
+        return [
+            CatalogTable(
+                id=f"{schema}.customers",
+                name="customers",
+                fullyQualifiedName=f"{schema}.customers",
+                sourceSchema=schema,
+                columns=[CatalogColumn(name="id", dataType="INT")],
+                tableConstraints=[CatalogConstraint(constraintType="PRIMARY_KEY", columns=["id"])],
+            )
+            for schema in ("public", "analytics")
+        ]
+
+    def test_two_triples_maps(self, strategy):
+        g = _build(strategy, self._tables())
+
+        assert len(set(g.subjects(RDF.type, RR.TriplesMap))) == 2
+
+    def test_each_triples_map_has_exactly_one_table_name(self, strategy):
+        """The R2RML invariant (§2.2: a TriplesMap has one logical table)."""
+        g = _build(strategy, self._tables())
+
+        for tmap in g.subjects(RDF.type, RR.TriplesMap):
+            logical_tables = list(g.objects(tmap, RR.logicalTable))
+            assert len(logical_tables) == 1, f"{tmap} has {len(logical_tables)} logical tables"
+            names = [str(n) for lt in logical_tables for n in g.objects(lt, RR.tableName)]
+            assert len(names) == 1, f"{tmap} maps {len(names)} tables: {names}"
+
+    def test_two_classes(self, strategy):
+        tables = self._tables()
+        onto, _ = strategy._build_proposal_ontology(PREFIX, tables, [])
+
+        classes = {str(c) for c in onto.subjects(RDF.type, OWL.Class)}
+        assert len([c for c in classes if "Customers" in c]) == 2, classes
+
+    def test_the_ontology_and_the_mapping_name_the_same_classes(self, strategy):
+        tables = self._tables()
+        onto, novel = strategy._build_proposal_ontology(PREFIX, tables, [])
+        r2rml = strategy.build_r2rml(PREFIX, tables, novel, onto)
+
+        declared = {str(c) for c in onto.subjects(RDF.type, OWL.Class)}
+        mapped = {str(c) for _, _, c in r2rml.triples((None, RR["class"], None))}
+        assert mapped <= declared, mapped - declared
+
+    def test_an_fk_resolves_within_its_own_schema(self, strategy):
+        """An ambiguous bare target must not join to the other database's table."""
+        tables = self._tables()
+        tables.append(
+            CatalogTable(
+                id="public.orders",
+                name="orders",
+                fullyQualifiedName="public.orders",
+                sourceSchema="public",
+                columns=[CatalogColumn(name="customer_id", dataType="INT")],
+                tableConstraints=[
+                    CatalogConstraint(
+                        constraintType="FOREIGN_KEY", columns=["customer_id"], referredColumns=["customers.id"]
+                    )
+                ],
+            )
+        )
+        g = _build(strategy, tables)
+        ns = Namespace(PREFIX)
+
+        parent = _object_map_parent_tmap(g, ns["TriplesMap_Orders/POM_CustomerId"])
+        assert parent is not None
+        assert str(parent).startswith(f"{PREFIX}TriplesMap_Customers")
+        # The FK must follow the referrer's own schema, not whichever same-named
+        # table happens to be reachable by bare name.
+        parent_schema = g.value(parent, SCL.sourceSchema)
+        assert str(parent_schema) == "public", f"FK left its own schema: {parent_schema}"
+
+    def test_a_unique_bare_name_still_resolves(self, strategy):
+        """The bare-name path must keep working when there is no ambiguity."""
+        tables = [
+            CatalogTable(
+                id="public.customers",
+                name="customers",
+                fullyQualifiedName="public.customers",
+                sourceSchema="public",
+                columns=[CatalogColumn(name="id", dataType="INT")],
+                tableConstraints=[CatalogConstraint(constraintType="PRIMARY_KEY", columns=["id"])],
+            ),
+            CatalogTable(
+                id="analytics.orders",
+                name="orders",
+                fullyQualifiedName="analytics.orders",
+                sourceSchema="analytics",
+                columns=[CatalogColumn(name="customer_id", dataType="INT")],
+                tableConstraints=[
+                    CatalogConstraint(
+                        constraintType="FOREIGN_KEY", columns=["customer_id"], referredColumns=["customers.id"]
+                    )
+                ],
+            ),
+        ]
+        g = _build(strategy, tables)
+        ns = Namespace(PREFIX)
+
+        # Cross-schema, but unambiguous: resolve it rather than dropping the join.
+        assert _object_map_parent_tmap(g, ns["TriplesMap_Orders/POM_CustomerId"]) == ns.TriplesMap_Customers
+
+    def test_a_single_table_keeps_its_bare_iri(self, strategy):
+        """IRI stability: qualifying the identity must not change the local name."""
+        tables = [
+            CatalogTable(
+                id="public.customers",
+                name="customers",
+                fullyQualifiedName="public.customers",
+                sourceSchema="public",
+                columns=[CatalogColumn(name="id", dataType="INT")],
+                tableConstraints=[CatalogConstraint(constraintType="PRIMARY_KEY", columns=["id"])],
+            )
+        ]
+        g = _build(strategy, tables)
+        ns = Namespace(PREFIX)
+
+        assert (ns.TriplesMap_Customers, RDF.type, RR.TriplesMap) in g
+
+
+class TestAmbiguousFkTargetDegradesToLiteral:
+    """An FK naming an ambiguous bare table must not join to an arbitrary parent.
+
+    ``reference_index`` omits a bare name two tables answer to, so the lookup
+    misses. Omission alone is not enough: the out-of-run fallback mints
+    ``TriplesMap_{to_pascal(name)}``, which is exactly the IRI ``pascal_names_for``
+    hands the ``min()`` keeper of the colliding set. So the "unresolved" path landed
+    on one of the candidates and joined real data to the lowest-identity same-named
+    table — the wrong-parent outcome ``reference_index`` documents as worse than no
+    join at all.
+
+    The referrer here sits in a THIRD schema, so the schema-qualified lookup misses
+    too and the bare name is the only thing left to resolve on.
+    """
+
+    @staticmethod
+    def _tables():
+        return [
+            CatalogTable(
+                id=f"{schema}.orders",
+                name="orders",
+                fullyQualifiedName=f"{schema}.orders",
+                sourceSchema=schema,
+                columns=[CatalogColumn(name="order_id", dataType="INT")],
+                tableConstraints=[CatalogConstraint(constraintType="PRIMARY_KEY", columns=["order_id"])],
+            )
+            for schema in ("db_a", "db_b")
+        ] + [
+            CatalogTable(
+                id="db_c.shipments",
+                name="shipments",
+                fullyQualifiedName="db_c.shipments",
+                sourceSchema="db_c",
+                columns=[
+                    CatalogColumn(name="id", dataType="INT"),
+                    CatalogColumn(name="order_id", dataType="INT"),
+                ],
+                tableConstraints=[
+                    CatalogConstraint(constraintType="PRIMARY_KEY", columns=["id"]),
+                    CatalogConstraint(
+                        constraintType="FOREIGN_KEY", columns=["order_id"], referredColumns=["orders.order_id"]
+                    ),
+                ],
+            )
+        ]
+
+    def test_no_parent_triples_map_is_emitted(self, strategy):
+        g = _build(strategy, self._tables())
+        ns = Namespace(PREFIX)
+
+        assert _object_map_parent_tmap(g, ns["TriplesMap_Shipments/POM_OrderId"]) is None
+
+    def test_the_column_becomes_a_datatype_literal(self, strategy):
+        """What the ontology and the shapes say for the same column (no divergence)."""
+        g = _build(strategy, self._tables())
+        ns = Namespace(PREFIX)
+        om = g.value(ns["TriplesMap_Shipments/POM_OrderId"], RR.objectMap)
+
+        assert g.value(om, RR.column) is not None
+        assert g.value(om, RR.datatype) == XSD.integer
+
+    def test_it_does_not_join_to_the_min_keeper(self, strategy):
+        """The specific wrong outcome: the bare fallback IS the keeper's IRI."""
+        g = _build(strategy, self._tables())
+        ns = Namespace(PREFIX)
+        parent = _object_map_parent_tmap(g, ns["TriplesMap_Shipments/POM_OrderId"])
+
+        assert parent != ns.TriplesMap_Orders
+
+    def test_an_unambiguous_target_still_resolves(self, strategy):
+        """The guard must not swallow ordinary out-of-run or in-run references."""
+        tables = [t for t in self._tables() if t.sourceSchema != "db_b"]
+        g = _build(strategy, tables)
+        ns = Namespace(PREFIX)
+
+        assert _object_map_parent_tmap(g, ns["TriplesMap_Shipments/POM_OrderId"]) == ns.TriplesMap_Orders
+
+    def test_the_ontology_declares_a_datatype_property(self, strategy):
+        """Artifact agreement: no owl:ObjectProperty pointing at a guessed class."""
+        g, _ = strategy._build_proposal_ontology(PREFIX, self._tables(), [])
+        ns = Namespace(PREFIX)
+        prop = ns["shipments_orderId"]
+
+        assert (prop, RDF.type, OWL.DatatypeProperty) in g
+        assert (prop, RDF.type, OWL.ObjectProperty) not in g
+        assert (prop, RDFS.range, XSD.integer) in g
+
+    def test_the_shapes_declare_a_datatype_constraint(self, strategy):
+        """Artifact agreement: no sh:class asserted against a literal column."""
+        from coa_ontology.validation.shapes.config import ConstraintType, generate_config_from_db
+
+        cfg = generate_config_from_db(self._tables(), uri_prefix=PREFIX)
+        by_type = {
+            (c.property_name, c.constraint_type)
+            for cls in cfg.classes
+            for c in cls.constraints
+            if cls.class_name == "shipments"
+        }
+
+        assert ("order_id", ConstraintType.DATATYPE) in by_type
+        assert ("order_id", ConstraintType.REFERENCE) not in by_type

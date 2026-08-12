@@ -30,7 +30,7 @@ from rdflib import OWL, RDF, RDFS, XSD, BNode, Graph, Literal, Namespace, URIRef
 from rdflib.namespace import SKOS
 
 from coa_ontology.inducer.schemas import ConceptMatch
-from coa_ontology.inducer.services.data_catalog import CatalogTable
+from coa_ontology.inducer.services.data_catalog import CatalogTable, parse_referred_column
 from coa_ontology.inducer.strategies.base import InductionStrategy
 
 log = logging.getLogger(__name__)
@@ -125,6 +125,7 @@ class RigorOntologyStrategy(InductionStrategy):
         config: dict,
         pipeline,
         confidence_threshold: float = 0.80,
+        rerank_max_tokens: int = 1000,
         embedding_backend: str | None = None,
         scoring_strategy: str = "lexical",
         structural_weight: float = 0.05,
@@ -140,6 +141,8 @@ class RigorOntologyStrategy(InductionStrategy):
             config: Strategy configuration (model ids, iteration limits, etc.).
             pipeline: Owning pipeline, used for shared clients and helpers.
             confidence_threshold: Minimum similarity to accept a high-confidence match.
+            rerank_max_tokens: Accepted for signature parity; this strategy has no
+                LLM grounding rerank, so it is unused.
             embedding_backend: Optional embedding backend override.
             scoring_strategy: "lexical" or "structural_fusion" scoring.
             structural_weight: Weight of the structural signal when fusing scores.
@@ -394,8 +397,7 @@ class RigorOntologyStrategy(InductionStrategy):
             if table and table.tableConstraints:
                 for tc in table.tableConstraints:
                     if tc.constraintType == "FOREIGN_KEY" and tc.referredColumns:
-                        # referredColumns entries look like "TableName.column"
-                        ref_table = tc.referredColumns[0].split(".")[0]
+                        ref_table, _ = parse_referred_column(tc.referredColumns[0])
                         if ref_table in table_map and ref_table != name:
                             visit(ref_table)
             in_progress.discard(name)
@@ -1012,8 +1014,5 @@ class RigorOntologyStrategy(InductionStrategy):
             return None, None
         for tc in table.tableConstraints:
             if tc.constraintType == "FOREIGN_KEY" and col_name in tc.columns and tc.referredColumns:
-                parts = tc.referredColumns[0].split(".")
-                target_table = parts[-2] if len(parts) >= 2 else parts[0]
-                target_pk = parts[-1]
-                return target_table, target_pk
+                return parse_referred_column(tc.referredColumns[0])
         return None, None

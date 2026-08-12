@@ -310,6 +310,7 @@ class UnstructuredInductionPipeline:
                     model_id=config.embedding_client.model_id,
                     grounding_mode=config.grounding_mode,
                     confidence_threshold=config.confidence_threshold,
+                    rerank_max_tokens=config.rerank_max_tokens,
                     uri_prefix=config.ontology_uri_prefix,
                 )
                 graph += grounding_graph

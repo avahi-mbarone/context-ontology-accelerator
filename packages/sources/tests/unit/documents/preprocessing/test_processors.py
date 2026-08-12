@@ -3,6 +3,7 @@
 
 """Tests for the preprocessing Lambda processors module."""
 
+import logging
 import sys
 from types import ModuleType
 from unittest.mock import MagicMock, patch
@@ -285,6 +286,41 @@ class TestProcessPdf:
         assert ext == ".txt"
         assert text == "Textract output"
         mock_textract.assert_called_once_with(b"pdf-bytes", "scan.pdf", textract_client)
+
+    @patch("unstructured.partition.pdf.partition_pdf")
+    @patch("coa_sources.documents.preprocessing.processors.is_scanned_pdf", return_value=False)
+    def test_empty_result_logs_at_warning(self, mock_scanned, mock_partition, caplog):
+        """An extraction that found nothing must not log like one that worked.
+
+        `unstructured` abandons drawing-heavy pages and returns no elements without
+        raising. At INFO, char_count=0 and char_count=3000 were indistinguishable to
+        log-based alerting.
+        """
+        mock_partition.return_value = []
+
+        with caplog.at_level(logging.INFO):
+            text, ext = process_pdf(b"pdf-bytes", "drawing.pdf", MagicMock())
+
+        assert text == ""
+        records = [r for r in caplog.records if r.getMessage() == "PDF processed"]
+        assert len(records) == 1
+        assert records[0].levelno == logging.WARNING
+        assert records[0].char_count == 0
+
+    @patch("unstructured.partition.pdf.partition_pdf")
+    @patch("coa_sources.documents.preprocessing.processors.is_scanned_pdf", return_value=False)
+    def test_non_empty_result_stays_at_info(self, mock_scanned, mock_partition, caplog):
+        el = MagicMock()
+        el.category = "NarrativeText"
+        el.__str__ = MagicMock(return_value="Real content")
+        mock_partition.return_value = [el]
+
+        with caplog.at_level(logging.INFO):
+            process_pdf(b"pdf-bytes", "doc.pdf", MagicMock())
+
+        records = [r for r in caplog.records if r.getMessage() == "PDF processed"]
+        assert len(records) == 1
+        assert records[0].levelno == logging.INFO
 
 
 # ---------------------------------------------------------------------------

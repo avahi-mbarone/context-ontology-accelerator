@@ -133,6 +133,79 @@ def test_transport_fault_fails_job_loud_and_persists_no_proposal(exc: Exception,
         _jobs.pop(job_id, None)
 
 
+def test_grounding_rerank_failure_fails_job_loud_and_persists_no_proposal() -> None:
+    """A ``GroundingRerankError`` at ``match_concepts`` (an LLM rerank
+    INFRASTRUCTURE failure — Bedrock error after retries, a truncating/blocked
+    stopReason, or unparseable output) propagates through the real strategy to
+    ``_run_induction``, which marks the job FAILED and creates NO proposal.
+
+    This is the end-to-end regression guard for the enhanced-grounding defect
+    (issue #59): a rerank failure used to be swallowed into a silent all-novel
+    proposal with a COMPLETED status. It exercises the load-bearing
+    ``except GroundingRerankError: raise`` branch in the strategy — distinct from
+    the transport branch above (GroundingRerankError is NOT an OpenSearch/httpx
+    error) and ahead of the broad ``except Exception`` all-novel fallback. Test A
+    (``test_rerank_converse_error_fails_loud_not_novel``) proves the real
+    ``_llm_rerank`` body RAISES this; this proves the raise reaches a FAILED job.
+    """
+    from coa_ontology.induce_catalog import (
+        WorkbenchInductionRequest,
+        _jobs,
+        _run_induction,
+    )
+    from coa_ontology.inducer.schemas import JobResponse, JobStatus
+    from coa_ontology.inducer.services.grounding import GroundingRerankError
+
+    job_id = "job-rerank-fault"
+    _jobs[job_id] = JobResponse(job_id=job_id, status=JobStatus.PENDING, created_at="2026-01-01T00:00:00Z")
+    job = _jobs[job_id]
+
+    catalog, table_dicts = _one_table_catalog()
+    body = WorkbenchInductionRequest(
+        datasource_ids=["ds-1"],
+        ontology_uri_prefix="http://test.org/ontology/induced#",
+    )
+
+    rerank_exc = GroundingRerankError(
+        "rerank response truncated (stopReason=max_tokens) for 'orders' — raise rerank_max_tokens (currently 1000)"
+    )
+
+    try:
+        with (
+            patch("coa_ontology.induce_catalog._fetch_catalog_from_smus", return_value=catalog),
+            patch("coa_ontology.induce_catalog._catalog_to_tables", return_value=table_dicts),
+            patch("coa_ontology.stores.build_stores", return_value=(MagicMock(), MagicMock())),
+            patch("coa_ontology.stores.adapters.StoreOntologyCatalogAdapter", return_value=MagicMock()),
+            patch("coa_ontology.induce_catalog.dynamo_store") as mock_dynamo,
+            patch("coa_ontology.induce_catalog.emit_induction_job_metrics"),
+        ):
+            mock_dynamo.list_proposals.return_value = []
+
+            _run_induction(
+                job_id=job_id,
+                body=body,
+                namespace="rerank-fault-ns",
+                config={"catalog_source": "smus"},
+                build_pipeline_fn=lambda _config: _make_fake_pipeline(rerank_exc),
+                schemas_mod=schemas_mod,
+                catalog_table_cls=CatalogTable,
+            )
+
+        # Fail-loud: job FAILED, "failed" persisted, and the specific rerank
+        # reason (naming the knob) reaches job.error — NOT a generic message.
+        assert job.status == JobStatus.FAILED
+        failed_calls = [c for c in mock_dynamo.update_job_status.call_args_list if "failed" in c.args]
+        assert failed_calls, "expected an update_job_status(..., 'failed', ...) call"
+        assert job.error is not None
+        assert "GroundingRerankError" in job.error
+        assert "rerank_max_tokens" in job.error
+
+        # Anti-corruption: NO all-novel proposal persisted.
+        mock_dynamo.create_proposal.assert_not_called()
+    finally:
+        _jobs.pop(job_id, None)
+
+
 def test_non_transport_error_falls_back_to_all_novel_and_completes() -> None:
     """Negative guard (narrowness): a non-transport ``RuntimeError`` at
     ``match_concepts`` must NOT fail the job — the strategy's all-novel fallback

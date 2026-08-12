@@ -14,9 +14,38 @@ from coa_common.bedrock import (
     BedrockInvocationResult,
     GuardrailBlockedError,
     InputTooLargeError,
+    extract_text_blocks,
 )
 
 pytestmark = pytest.mark.unit
+
+
+class TestExtractTextBlocks:
+    """Select the answer by block type, not position (reasoning-model safe)."""
+
+    def test_single_text_block(self):
+        assert extract_text_blocks([{"text": "hello"}]) == "hello"
+
+    def test_skips_reasoning_content_block(self):
+        # A reasoning model emits reasoningContent (no "text" key) BEFORE the
+        # answer's text block — the exact shape that made content[0]["text"] raise.
+        blocks = [
+            {"reasoningContent": {"reasoningText": {"text": "let me think", "signature": "sig"}}},
+            {"text": '{"choice": "Claim"}'},
+        ]
+        assert extract_text_blocks(blocks) == '{"choice": "Claim"}'
+
+    def test_joins_multiple_text_blocks(self):
+        assert extract_text_blocks([{"text": "a"}, {"text": "b"}]) == "a\nb"
+
+    def test_raises_when_no_text_block(self):
+        # Only reasoning / non-text content → no answer. Must raise, never "".
+        with pytest.raises(ValueError, match="no text content block"):
+            extract_text_blocks([{"reasoningContent": {"reasoningText": {"text": "x", "signature": "s"}}}])
+
+    def test_raises_on_empty_list(self):
+        with pytest.raises(ValueError, match="no text content block"):
+            extract_text_blocks([])
 
 
 class TestBedrockClient:
@@ -45,6 +74,32 @@ class TestBedrockClient:
             system=[{"text": "system"}],
             inferenceConfig={"maxTokens": 4096},
         )
+
+    @patch("coa_common.bedrock.boto3")
+    def test_invoke_parses_reasoning_model_response(self, mock_boto3):
+        # A reasoning model returns reasoningContent at content[0] and the answer
+        # at content[1]. The old content[0]["text"] indexing raised KeyError here;
+        # invoke() must skip the reasoning block and parse the answer.
+        mock_client = MagicMock()
+        mock_boto3.client.return_value = mock_client
+
+        mock_client.converse.return_value = {
+            "output": {
+                "message": {
+                    "content": [
+                        {"reasoningContent": {"reasoningText": {"text": "deliberating", "signature": "sig"}}},
+                        {"text": '{"key": "value"}'},
+                    ]
+                }
+            },
+            "stopReason": "end_turn",
+            "usage": {"inputTokens": 10, "outputTokens": 5},
+        }
+
+        client = BedrockClient(region="us-east-1")
+        result = client.invoke("system", "user")
+
+        assert result.result == {"key": "value"}
 
     @patch("coa_common.bedrock.boto3")
     def test_invoke_strips_markdown_fences(self, mock_boto3):

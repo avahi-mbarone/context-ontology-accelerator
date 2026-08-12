@@ -925,7 +925,9 @@ export class NamespaceStack extends SCLStack {
     // the whole account root (AccountRootPrincipal), which would let any
     // in-account principal holding sts:AssumeRole escalate to this admin role.
     // Defaults to the account's `Admin` role; override per account with the
-    // comma-separated `smus_admin_principal_arns` context key.
+    // comma-separated `smus_admin_principal_arns` context key (deploy.sh
+    // checks the default actually exists before deploying and fails fast
+    // with a clear message otherwise — see the SCL_SMUS_ADMIN_ARNS preflight).
     const defaultAdminArn = `arn:aws:iam::${this.account}:role/Admin`;
     const parsedAdminArns = (
       (this.node.tryGetContext("smus_admin_principal_arns") as

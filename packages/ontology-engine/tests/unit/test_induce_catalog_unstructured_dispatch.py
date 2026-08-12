@@ -84,6 +84,27 @@ class TestUnstructuredDispatchForwardsGrounding:
         # Default mode still carried through (harmless when no ids).
         assert unstructured_body.grounding_mode == "ENHANCED"
 
+    def test_rerank_max_tokens_forwarded(self):
+        # The rerankMaxTokens knob must reach the unstructured request too, or
+        # the fail-loud fix on the document path can never be tuned (#59).
+        body = WorkbenchInductionRequest(
+            datasource_ids=["ds-1"],
+            ontology_uri_prefix=_PREFIX,
+            strategy="unstructured_lexical_graph",
+            rerankMaxTokens=1500,
+        )
+        unstructured_body = _dispatch(body)
+        assert unstructured_body.rerank_max_tokens == 1500
+
+    def test_rerank_max_tokens_defaults_forwarded(self):
+        body = WorkbenchInductionRequest(
+            datasource_ids=["ds-1"],
+            ontology_uri_prefix=_PREFIX,
+            strategy="unstructured_lexical_graph",
+        )
+        unstructured_body = _dispatch(body)
+        assert unstructured_body.rerank_max_tokens == 1000
+
 
 @pytest.mark.unit
 class TestWorkbenchRequestGroundingAliases:
@@ -115,3 +136,22 @@ class TestWorkbenchRequestGroundingAliases:
         b = WorkbenchInductionRequest(ontology_uri_prefix="http://x/o#")
         assert b.grounding_mode == "ENHANCED"
         assert b.grounding_ontology_ids is None
+
+    def test_rerank_max_tokens_default(self):
+        b = WorkbenchInductionRequest(ontology_uri_prefix="http://x/o#")
+        assert b.rerank_max_tokens == 1000
+
+    @pytest.mark.parametrize("bad", [0, -1, 8193, 100000])
+    def test_rerank_max_tokens_out_of_range_rejected(self, bad):
+        # Runtime enforcement of the Smithy @range(min: 1, max: 8192) — a direct
+        # API caller (not going through the generated client) must not slip an
+        # invalid budget past validation into the rerank inferenceConfig.
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            WorkbenchInductionRequest(ontology_uri_prefix="http://x/o#", rerankMaxTokens=bad)
+
+    @pytest.mark.parametrize("ok", [1, 200, 1000, 8192])
+    def test_rerank_max_tokens_in_range_accepted(self, ok):
+        b = WorkbenchInductionRequest.model_validate({"ontology_uri_prefix": "http://x/o#", "rerankMaxTokens": ok})
+        assert b.rerank_max_tokens == ok

@@ -6,6 +6,8 @@ import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as ecr from "aws-cdk-lib/aws-ecr";
 import * as ecs from "aws-cdk-lib/aws-ecs";
+import * as events from "aws-cdk-lib/aws-events";
+import * as targets from "aws-cdk-lib/aws-events-targets";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as lambdaEventSources from "aws-cdk-lib/aws-lambda-event-sources";
@@ -1089,6 +1091,23 @@ export class SourcesStack extends SCLStack {
     });
     dbFederationTask.addCatch(dbErrorChain, { resultPath: "$.error" });
 
+    // Enrichment deadline, configurable via CDK context so a genuinely
+    // large source can be given more headroom at deploy time without a code
+    // change. `dbScanEnrichmentTimeoutMinutes` sets the CATCHABLE per-task
+    // timeout; the state-machine timeout (below) is this + 2 min so the
+    // catchable States.Timeout always fires first and routes to SCAN_FAILED.
+    // Default 120 min ≈ the measured ~35s/table × ceil(tables/10) throughput
+    // (MAX_WORKERS=10) for a ~2,000-table source; NOT sized to any one dataset.
+    const enrichmentTimeoutMinutesRaw: unknown = this.node.tryGetContext(
+      "dbScanEnrichmentTimeoutMinutes",
+    );
+    const enrichmentTimeoutMinutes = Number(enrichmentTimeoutMinutesRaw ?? 120);
+    if (!Number.isFinite(enrichmentTimeoutMinutes) || enrichmentTimeoutMinutes <= 0) {
+      throw new Error(
+        `dbScanEnrichmentTimeoutMinutes must be a positive number, got: ${String(enrichmentTimeoutMinutesRaw)}`,
+      );
+    }
+
     const dbEnrichmentTask = new tasks.EcsRunTask(this, "DbEnrichment", {
       integrationPattern: sfn.IntegrationPattern.RUN_JOB,
       cluster: dbEnrichmentCluster,
@@ -1123,6 +1142,17 @@ export class SourcesStack extends SCLStack {
         },
       ],
       resultPath: "$.enrichmentResult",
+      // CATCHABLE per-task deadline. The state-machine `timeout` (below) fires
+      // as `ExecutionTimedOut`, which no state can `.addCatch()` — so an
+      // enrichment run that outlives it strands the source in ENRICHING with
+      // no terminal-status write, leaving it undeletable/un-rescannable.
+      // A `taskTimeout` instead raises a catchable
+      // `States.Timeout` that the `addCatch(dbErrorChain)` below routes to
+      // SCAN_FAILED, and Step Functions stops the ECS task. Kept below the
+      // state-machine timeout so this catchable path always fires first.
+      taskTimeout: sfn.Timeout.duration(
+        cdk.Duration.minutes(enrichmentTimeoutMinutes),
+      ),
     });
     dbEnrichmentTask.addRetry({
       errors: ["ECS.ServiceException", "ECS.AmazonECSException"],
@@ -1148,9 +1178,65 @@ export class SourcesStack extends SCLStack {
             .next(dbEnrichmentTask)
             .next(dbUpdateCompleted),
         ),
-        timeout: cdk.Duration.hours(1),
+        // 2 min above the enrichment taskTimeout so the catchable
+        // States.Timeout on DbEnrichment fires first (→ SCAN_FAILED via
+        // dbErrorChain). This outer ceiling only backstops paths the reaper
+        // covers (execution-level abort/timeout with no catchable error).
+        timeout: cdk.Duration.minutes(enrichmentTimeoutMinutes + 2),
       },
     );
+
+    // ── Db-scan reaper (terminal-status safety net) ────────────
+    //
+    // The in-machine dbErrorChain → SCAN_FAILED only fires on CATCHABLE task
+    // errors. An execution-level abort — the state-machine `timeout` above
+    // firing as `ExecutionTimedOut`, an operator `StopExecution` (ABORTED), or
+    // a `FAILED` execution no state caught — is NOT catchable in-machine, so it
+    // strands the source in an active status (SCANNING/ENRICHING) with no
+    // terminal-status write, leaving it undeletable/un-rescannable.
+    //
+    // This EventBridge rule fires the reaper on those terminal execution
+    // statuses and guarantees the terminal-status write. The reaper is
+    // idempotent: it no-ops unless the source is still in an active status, so
+    // it is safe if the in-machine write already ran (both fired) or on
+    // redelivery.
+    const dbScanReaperFn = new lambda.Function(this, "DbScanReaperFn", {
+      functionName: this.prefixed("sources-db-scan-reaper"),
+      runtime: lambda.Runtime.PYTHON_3_12,
+      architecture: lambda.Architecture.ARM_64,
+      handler: "coa_sources.database.pipeline.reaper_handler.handler",
+      code: bundlePython({
+        srcDirs: [
+          // Full src/ tree needed: handler is in database/pipeline/, not api/
+          fromRoot("packages/sources/src"),
+          Paths.commonLib,
+          Paths.smithyGeneratedControlPlanePythonServer,
+        ],
+        requirementsFile: fromRoot("packages/sources/requirements.txt"),
+        architecture: "arm64",
+      }),
+      timeout: cdk.Duration.seconds(30),
+      memorySize: 256,
+      vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      securityGroups: [lambdaSecurityGroup],
+      environment: {
+        SOURCES_TABLE: this.sourcesTable.tableName,
+      },
+    });
+    this.sourcesTable.grantReadWriteData(dbScanReaperFn);
+
+    new events.Rule(this, "DbScanReaperRule", {
+      eventPattern: {
+        source: ["aws.states"],
+        detailType: ["Step Functions Execution Status Change"],
+        detail: {
+          stateMachineArn: [dbScanStateMachine.stateMachineArn],
+          status: ["TIMED_OUT", "ABORTED", "FAILED"],
+        },
+      },
+      targets: [new targets.LambdaFunction(dbScanReaperFn)],
+    });
 
     // ── Database Scan Queue + Trigger Lambda ─────────────────────────
     const dbScanDlq = new sqs.Queue(this, "DbScanDLQ", {

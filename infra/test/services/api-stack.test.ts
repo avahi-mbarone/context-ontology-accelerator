@@ -384,3 +384,90 @@ describe("ApiStack cache invalidation stream handler", () => {
     });
   });
 });
+
+describe("ApiStack GET /health", () => {
+  // The stack passes no ssmPathHandlers here, so every spec path except
+  // /health resolves to the 501 stub. That is exactly the "before" state this
+  // block asserts /health has been lifted out of.
+  const mkStack = (allowedOrigin = "https://app.example.com") => {
+    const app = new cdk.App({ context: TEST_CONTEXT });
+    const depStack = new cdk.Stack(app, "DepStack", {
+      env: { account: "123456789012", region: "us-east-1" },
+    });
+    const vpc = new ec2.Vpc(depStack, "Vpc");
+    const mkTable = (id: string) => mkTestTable(depStack, id);
+    return new ApiStack(app, "TestApiHealth", {
+      env: { account: "123456789012", region: "us-east-1" },
+      allowedOrigin,
+      vpc,
+      rolesTable: mkTable("Roles"),
+      resourceRoleMappingsTable: mkTable("RRM"),
+      cacheInvalidationTable: mkTable("Cache"),
+    });
+  };
+
+  /** The OpenAPI body API Gateway is created from. */
+  const specBody = (stack: ApiStack): Record<string, any> => {
+    const apis = Template.fromStack(stack).findResources(
+      "AWS::ApiGateway::RestApi",
+    );
+    return Object.values(apis)[0].Properties.Body;
+  };
+
+  const healthGet = (stack: ApiStack): Record<string, any> =>
+    specBody(stack).paths["/health"].get;
+
+  it("answers from a mock, not the 501 stub Lambda", () => {
+    // The defect: /health had no ssmPathHandlers entry, so the loop over spec
+    // paths gave it an aws_proxy integration pointing at the inline
+    // not-implemented function.
+    const integration = healthGet(mkStack())["x-amazon-apigateway-integration"];
+    expect(integration.type).toBe("mock");
+    expect(integration.uri).toBeUndefined();
+  });
+
+  it("returns 200 with the Smithy HealthCheck output shape", () => {
+    const response =
+      healthGet(mkStack())["x-amazon-apigateway-integration"].responses.default;
+    expect(response.statusCode).toBe("200");
+    expect(response.responseTemplates["application/json"]).toBe(
+      '{"status":"ok"}',
+    );
+  });
+
+  it("stays unauthenticated", () => {
+    // HealthCheck is @optionalAuth and the sole unsecuredPaths entry — a probe
+    // that needs a token is not a probe.
+    expect(healthGet(mkStack()).security).toEqual([]);
+  });
+
+  it("marks the probe response uncacheable", () => {
+    // A cached "ok" keeps reporting a healthy API after it stopped being one.
+    const params =
+      healthGet(mkStack())["x-amazon-apigateway-integration"].responses.default
+        .responseParameters;
+    expect(params["method.response.header.Cache-Control"]).toBe("'no-store'");
+  });
+
+  it("supplies the security headers the mock has no Lambda to set", () => {
+    const params =
+      healthGet(mkStack())["x-amazon-apigateway-integration"].responses.default
+        .responseParameters;
+    expect(
+      params["method.response.header.Strict-Transport-Security"],
+    ).toContain("max-age=");
+    expect(params["method.response.header.X-Content-Type-Options"]).toBe(
+      "'nosniff'",
+    );
+  });
+
+  it("echoes the configured CORS origin, not a wildcard", () => {
+    const params =
+      healthGet(mkStack("https://app.example.com"))[
+        "x-amazon-apigateway-integration"
+      ].responses.default.responseParameters;
+    expect(
+      params["method.response.header.Access-Control-Allow-Origin"],
+    ).toBe("'https://app.example.com'");
+  });
+});

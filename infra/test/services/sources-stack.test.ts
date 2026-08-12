@@ -565,6 +565,122 @@ describe("SourcesStack", () => {
     });
   });
 
+  describe("Scan timeout terminal state", () => {
+    // Fix A: the DbEnrichment EcsRunTask carries a CATCHABLE per-task timeout
+    // (States.Timeout) so an over-long enrichment routes through the error
+    // chain to SCAN_FAILED, instead of the un-catchable execution-level
+    // ExecutionTimedOut that stranded the source in ENRICHING.
+    it("DbEnrichment task has a catchable per-task TimeoutSeconds and the state machine caps 2 min higher", () => {
+      const machines = template.findResources(
+        "AWS::StepFunctions::StateMachine",
+      );
+      // The ASL is embedded as an escaped JSON string inside a Fn::Join;
+      // strip the backslash escaping so the rendered States Language can be
+      // matched directly. The enrichment timeout is configurable
+      // (dbScanEnrichmentTimeoutMinutes); default 120 min → taskTimeout 7200 s
+      // on DbEnrichment, and the db-scan state-machine `TimeoutSeconds` is that
+      // + 2 min = 7320 s. 7320 is unique to this state machine's own timeout,
+      // so assert on it to prove the taskTimeout < execution-timeout ordering
+      // that keeps the catchable path firing first.
+      const definition = JSON.stringify(Object.values(machines)).replace(
+        /\\/g,
+        "",
+      );
+      // Per-task deadline on DbEnrichment (default 120 min). Both values live
+      // inside the backslash-stripped ASL: the task-level 7200 in the
+      // DbEnrichment state, and the state-machine execution ceiling 7320
+      // (task + 2 min), which keeps the catchable States.Timeout firing before
+      // the un-catchable ExecutionTimedOut.
+      expect(definition).toContain('"TimeoutSeconds":7200');
+      expect(definition).toContain('"TimeoutSeconds":7320');
+    });
+
+    // Fix B: the reaper is the out-of-band backstop for execution-level aborts
+    // that are not catchable in-machine.
+    it("creates the db-scan reaper Lambda in VPC with SOURCES_TABLE", () => {
+      template.hasResourceProperties("AWS::Lambda::Function", {
+        FunctionName: Match.stringLikeRegexp(".*sources-db-scan-reaper$"),
+        Handler: "coa_sources.database.pipeline.reaper_handler.handler",
+        Runtime: "python3.12",
+        Architectures: ["arm64"],
+        VpcConfig: Match.objectLike({
+          SubnetIds: Match.anyValue(),
+          SecurityGroupIds: Match.anyValue(),
+        }),
+        Environment: {
+          Variables: Match.objectLike({
+            SOURCES_TABLE: Match.anyValue(),
+          }),
+        },
+      });
+    });
+
+    it("has an EventBridge rule on aws.states execution status change filtering TIMED_OUT/ABORTED/FAILED with a Lambda target", () => {
+      template.hasResourceProperties("AWS::Events::Rule", {
+        EventPattern: Match.objectLike({
+          source: ["aws.states"],
+          "detail-type": ["Step Functions Execution Status Change"],
+          detail: Match.objectLike({
+            status: ["TIMED_OUT", "ABORTED", "FAILED"],
+          }),
+        }),
+        Targets: Match.arrayWith([
+          Match.objectLike({ Arn: Match.anyValue() }),
+        ]),
+      });
+    });
+
+    it("scopes the reaper rule to the db-scan state machine ARN", () => {
+      // The rule must fire only for the db-scan pipeline, not any state machine.
+      const rules = template.findResources("AWS::Events::Rule");
+      const reaperRule = Object.values(rules).find((r: any) =>
+        r.Properties?.EventPattern?.detail?.stateMachineArn !== undefined,
+      ) as any;
+      expect(reaperRule).toBeDefined();
+      expect(
+        JSON.stringify(
+          reaperRule.Properties.EventPattern.detail.stateMachineArn,
+        ),
+      ).toContain("DbScanStateMachine");
+    });
+
+    // Build a fresh SourcesStack with an extra context override, so the
+    // configurable enrichment timeout can be exercised without disturbing the
+    // shared `template` from beforeAll.
+    const synthWithContext = (extra: Record<string, unknown>): Template => {
+      const app = new cdk.App({ context: { ...TEST_CONTEXT, ...extra } });
+      const network = new NetworkStack(app, "CtxNetwork", { env: TEST_ENV });
+      const storage = new StorageStack(app, "CtxStorage", {
+        network,
+        env: TEST_ENV,
+      });
+      return Template.fromStack(
+        new SourcesStack(app, "CtxSources", { network, storage, env: TEST_ENV }),
+      );
+    };
+
+    it("honors a custom dbScanEnrichmentTimeoutMinutes (task value + 2 min ceiling)", () => {
+      const t = synthWithContext({ dbScanEnrichmentTimeoutMinutes: 30 });
+      const machines = t.findResources("AWS::StepFunctions::StateMachine");
+      const definition = JSON.stringify(Object.values(machines)).replace(
+        /\\/g,
+        "",
+      );
+      // 30 min → task 1800 s, state-machine ceiling 32 min → 1920 s.
+      expect(definition).toContain('"TimeoutSeconds":1800');
+      expect(definition).toContain('"TimeoutSeconds":1920');
+    });
+
+    it("rejects a non-positive / non-numeric dbScanEnrichmentTimeoutMinutes at synth", () => {
+      expect(() => synthWithContext({ dbScanEnrichmentTimeoutMinutes: 0 })).toThrow(
+        /dbScanEnrichmentTimeoutMinutes must be a positive number/,
+      );
+      expect(() =>
+        synthWithContext({ dbScanEnrichmentTimeoutMinutes: "abc" }),
+      ).toThrow(/dbScanEnrichmentTimeoutMinutes must be a positive number/);
+    });
+  });
+
   describe("VPC Configuration — All Lambdas in VPC (security baseline)", () => {
     it("DbScanTriggerFn is deployed in VPC", () => {
       template.hasResourceProperties("AWS::Lambda::Function", {

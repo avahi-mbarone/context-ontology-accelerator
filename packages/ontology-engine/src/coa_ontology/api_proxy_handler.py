@@ -89,6 +89,24 @@ _PATH_MAP = {
     "/namespaces/{namespaceId}/ontology/foundational/{key}/load": "/ontology/foundational/{key}/load",
 }
 
+# Query params a caller spells in camelCase, per backend path, and the snake_case
+# name the ontology engine's FastAPI route actually binds.
+#
+# Without the rename the param survives the whole trip and is then dropped on the
+# floor: this handler forwards any query string, and FastAPI ignores names it does
+# not declare and falls back to its default. That is why MCP's
+# ``describe_schema(max_results=500, include_properties=False)`` has been getting
+# 100 classes with properties — the values were sent, never bound.
+#
+# Scoped per backend path rather than applied globally so a route that genuinely
+# takes a camelCase param keeps getting it verbatim.
+_QUERY_ALIASES: dict[str, dict[str, str]] = {
+    "/graph/schema": {
+        "maxResults": "max_results",
+        "includeProperties": "include_properties",
+    },
+}
+
 
 def _handle_system_health() -> dict:
     """Aggregate backend health: direct checks + ontology-engine /readiness."""
@@ -235,7 +253,8 @@ def handler(event: dict, context) -> dict:
     # ``:``) so OWL IRI values like ``http://example.org/o#Cls`` don't break
     # the URL parser (the ``#`` would otherwise truncate the URL at the
     # fragment marker, dropping subsequent params like ``&namespace=``).
-    filtered = {k: v for k, v in query.items() if v is not None and v != ""}
+    aliases = _QUERY_ALIASES.get(backend_path, {})
+    filtered = {aliases.get(k, k): v for k, v in query.items() if v is not None and v != ""}
     qs = urlencode(filtered) if filtered else ""
     url = f"{ENDPOINT}{backend_path}" + (f"?{qs}" if qs else "")
 
