@@ -3,7 +3,7 @@
 
 """table_to_ontology strategy — the original embedding-based induction.
 
-Extracts concepts from table/column names, embeds them via Bedrock Titan,
+Extracts concepts from table/column names, embeds them via Bedrock (Cohere Embed v4),
 matches against existing ontology classes via vector similarity, and builds
 a proposal ontology containing only novel (unmatched) classes.
 """

@@ -743,8 +743,9 @@ export class SourcesStack extends SCLStack {
     // Register the federation provisioner role as an LF data-lake admin
     // non-destructively (read current admins → append → write), instead of the
     // declarative CfnDataLakeSettings which would overwrite existing admins.
-    // See LakeFormationAdmin for the bootstrap caveat (the CR Lambda role must
-    // itself be an LF admin in accounts that already have admins).
+    // No bootstrap step on any account: PutDataLakeSettings is authorized by the
+    // IAM action, which the custom resource's Lambda role is granted, not by that
+    // role's own DataLakeAdmins membership. See LakeFormationAdmin.
     const lfAdmin = new LakeFormationAdmin(
       this,
       "FederationProvisionerLfAdmin",
@@ -1102,7 +1103,10 @@ export class SourcesStack extends SCLStack {
       "dbScanEnrichmentTimeoutMinutes",
     );
     const enrichmentTimeoutMinutes = Number(enrichmentTimeoutMinutesRaw ?? 120);
-    if (!Number.isFinite(enrichmentTimeoutMinutes) || enrichmentTimeoutMinutes <= 0) {
+    if (
+      !Number.isFinite(enrichmentTimeoutMinutes) ||
+      enrichmentTimeoutMinutes <= 0
+    ) {
       throw new Error(
         `dbScanEnrichmentTimeoutMinutes must be a positive number, got: ${String(enrichmentTimeoutMinutesRaw)}`,
       );

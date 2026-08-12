@@ -922,7 +922,7 @@ def search_nearest(
         f" node.embedding_type AS embedding_type, node.model_id AS model_id,"
         f" node.dimensions AS dimensions,"
         # Convert L2-squared distance to cosine similarity client-side.
-        # Valid because input vectors are unit-normalized (Bedrock Titan
+        # Valid because input vectors are unit-normalized (Bedrock embedders
         # ``normalize: True``). For unit vectors:
         #   ‖a − b‖² = 2 − 2·cos(theta), so cos = 1 − L2² / 2.
         # We compute the conversion in-query to avoid a round-trip

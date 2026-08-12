@@ -80,8 +80,8 @@ app = FastAPI(
     description=(
         "Unified API for ontology catalog management, induction from "
         "structured/unstructured sources, and multi-tier validation.\n\n"
-        "Embeddings are generated directly via **Amazon Bedrock Titan Text "
-        "Embeddings V2** — no separate embedding-generator service needed."
+        "Embeddings are generated directly via **Amazon Bedrock Cohere Embed "
+        "v4** — no separate embedding-generator service needed."
     ),
     version="1.0.0",
 )

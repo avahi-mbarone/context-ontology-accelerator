@@ -4,7 +4,7 @@
 """Workbench /induce router — accepts datasource_ids instead of table_ids.
 
 Fetches catalog metadata from the data-catalog service, extracts concepts,
-embeds via Bedrock Titan, matches against existing ontology classes, then
+embeds via Bedrock (Cohere Embed v4), matches against existing ontology classes, then
 produces a proposal ontology plus R2RML mappings. Both are saved to disk.
 """
 

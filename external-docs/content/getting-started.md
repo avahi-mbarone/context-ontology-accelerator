@@ -63,11 +63,35 @@ All stacks use context-driven configuration via `CoaStack` base class:
 | `project_tag`              | `semantic-context` | AWS `Project` tag value                                        |
 | `vpc_id`                   | (none)             | Import an existing VPC instead of creating one                 |
 | `aoss_max_ocu`             | `96`               | Max OCU capacity for OpenSearch Serverless (indexing + search) |
-| `aoss_min_ocu`             | `0`                | Min OCU capacity for OpenSearch Serverless (indexing + search) |
+| `aoss_min_ocu`             | `2`                | Min OCU capacity for OpenSearch Serverless (indexing + search). Set to `0` for scale-to-zero — see below |
 | `api_throttle_rate_limit`  | `50`               | API Gateway stage requests-per-second rate limit               |
 | `api_throttle_burst_limit` | `100`              | API Gateway stage burst capacity                               |
 
 Resource naming follows `{prefix}-{env}-{name}` (e.g. `coa-dev-neptune`).
+
+#### OpenSearch Serverless capacity and scale-to-zero
+
+The vector collection is a **NextGen** collection (`generation: "NEXTGEN"` on the
+collection group), not Classic. NextGen supports scaling compute to zero when
+idle, which removes the always-on OCU cost floor, but COA ships a minimum of
+**2 OCU** rather than 0 so that a default deployment does not pay cold-start
+latency on its first query after an idle period.
+
+To opt into scale-to-zero:
+
+```bash
+cdk deploy -c aoss_min_ocu=0
+```
+
+Valid `aoss_min_ocu` values are `0`, `2`, `4`, `8`, `16`, or multiples of 16.
+Leave standby replicas alone — AWS rejects `standbyReplicas: DISABLED` for
+NextGen, which manages replicas internally.
+
+The tradeoff at minimum 0: compute scales down after a period of inactivity and
+takes roughly ten seconds to return, and at very low OCU the NextGen circuit
+breaker sheds load with HTTP 429s under an ingestion burst. That is usually the
+right trade for dev and sandbox environments, and usually the wrong one for an
+environment serving interactive queries or running large scans.
 
 #### First-time deployment
 
@@ -84,16 +108,30 @@ Lake Formation **data-lake admin**. The `LakeFormationAdmin` custom resource
 registers it automatically and non-destructively (it appends to the existing
 admin list rather than overwriting it).
 
-There is a one-time bootstrap caveat: `PutDataLakeSettings` can only be called by
-an existing LF admin once an account already has any admins. So:
+There is no manual bootstrap step, on greenfield or on existing accounts alike.
 
-- **Greenfield accounts** (no LF admins yet) self-bootstrap — no action needed.
-- **Accounts that already have LF admins:** register the custom resource's Lambda
-  role as an LF admin once, out-of-band, **before the first deploy**. Otherwise
-  JDBC scans fail at `CreateCatalog` with an access-denied error.
+`PutDataLakeSettings` is authorized by the **IAM permission** `lakeformation:PutDataLakeSettings`, which the custom resource's Lambda role already carries — *not* by the caller's membership in `DataLakeAdmins`. A principal holding that permission can read the settings and modify the admin list whether or not it is itself an admin, and whether or not the account already has admins.
 
-See `infra/README.md` (Lake Formation bootstrap) for the exact registration
-commands and troubleshooting.
+#### What COA changes about your Lake Formation settings
+
+Worth knowing before the first deploy, but nothing here needs action:
+
+- **Your existing data-lake admins are preserved.** The custom resource reads the
+  current settings, appends one principal if absent, and writes them back. It never
+  overwrites the admin list. Other settings, including the `IAM_ALLOWED_PRINCIPALS`
+  defaults that make LF defer to IAM, are round-tripped untouched — deploying COA
+  does not flip an account into strict LF mode.
+- **One principal is added:** the federation provisioner role, published at
+  `/{prefix}/sources/federation-provisioner-role-arn`. It needs data-lake admin
+  standing to grant `DATA_LOCATION_ACCESS` on per-source Glue connections during a
+  JDBC scan.
+- **`cdk destroy` removes it again,** deregistering only the principal COA
+  registered.
+- The read-modify-write has no compare-and-swap, so a governance tool that
+  reconciles LF settings concurrently could race with it. Unlikely to matter in
+  practice; worth knowing if you run one.
+
+See `infra/README.md` (Lake Formation bootstrap) for troubleshooting.
 
 #### Customizing deployments
 

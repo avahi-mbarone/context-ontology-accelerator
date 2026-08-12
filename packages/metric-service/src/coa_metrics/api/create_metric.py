@@ -43,8 +43,9 @@ from coa_metrics.opensearch_client import MetricOpenSearchClient
 from coa_metrics.source_status import (
     SourceValidationUnavailableError,
     check_source_approved,
+    check_source_table_exists,
 )
-from coa_metrics.validator import check_select_shape
+from coa_metrics.validator import check_data_modifying
 
 setup_logging(os.environ.get("LOG_LEVEL", "INFO"))
 logger = structlog.get_logger(__name__)
@@ -108,10 +109,13 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     except ValueError as exc:
         return api_response(400, {"message": str(exc)})
 
-    # Enforce APPROVED source — hard 400, matching the UI's filter.
-    # The UI only offers APPROVED/COMPLETED sources; the API must not be a bypass.
+    # Enforce APPROVED source and an existing sourceTable — hard 400s, matching
+    # the UI's filter. The UI only offers APPROVED/COMPLETED sources and catalog
+    # tables; the API must not be a bypass.
     try:
         source_error = check_source_approved(namespace, metric.data_source_id)
+        if source_error is None:
+            source_error = check_source_table_exists(namespace, metric.data_source_id, metric.source_table)
     except SourceValidationUnavailableError as exc:
         logger.error("source_validation_unavailable", namespace=namespace, error=str(exc))
         return api_response(503, {"message": "Data source validation is unavailable — try again later"})
@@ -194,12 +198,12 @@ def _build_metric_definition(request: CreateMetricRequestContent, caller: str) -
         dialect_name = d.dialect.upper()
         if dialect_name not in VALID_SQL_DIALECTS:
             raise ValueError(invalid_dialect_message(d.dialect))
-        # Structural check: the serve-time SQL firewall only executes
-        # full SELECT statements — reject fragments at onboarding (fail fast)
-        # instead of letting them fail with a generic error at query time.
-        shape_error = check_select_shape(d.expression, dialect_name)
-        if shape_error:
-            raise ValueError(shape_error)
+        # Safety check: DML/DDL is the only hard block. A fragment or a parse
+        # error publishes with a soft warning (see _validate_soft) — the serve
+        # firewall independently rejects both at execution.
+        dml_error = check_data_modifying(d.expression, dialect_name)
+        if dml_error:
+            raise ValueError(dml_error)
         dialects.append(MetricDialect(dialect=dialect_name, expression=d.expression))
 
     ai_context = None

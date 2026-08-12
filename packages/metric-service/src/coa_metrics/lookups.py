@@ -55,6 +55,35 @@ class DataSourceLookup:
         """Get column metadata for a table. Returns None if unavailable."""
         raise NotImplementedError
 
+    def catalog_available(self, data_source_id: str) -> bool:
+        """Whether table metadata could actually be read for this source (#161).
+
+        ``table_exists`` fails OPEN — it returns False both for a table that is
+        genuinely absent and for a catalog that could not be read. Callers that
+        turn absence into a hard rejection must consult this first.
+
+        Args:
+            data_source_id: The data source id to check.
+
+        Returns:
+            True by default: an implementation that cannot tell is assumed
+            available, and ``known_tables`` (empty by default) is what keeps
+            absence unprovable.
+        """
+        return True
+
+    def known_tables(self, data_source_id: str) -> set[str]:
+        """The lower-cased table names this lookup can enumerate (#161).
+
+        Args:
+            data_source_id: The data source id to enumerate.
+
+        Returns:
+            An empty set by default — "I cannot enumerate", which makes a
+            missing table unprovable and so never hard-blocking.
+        """
+        return set()
+
     def get_column_type(self, data_source_id: str, table_name: str, column_name: str) -> str | None:
         """Get the data type of a specific column. Returns None if not found."""
         columns = self.get_table_columns(data_source_id, table_name)
@@ -114,6 +143,7 @@ class SmusCatalogDataSourceLookup(DataSourceLookup):
         self._region = region
         self._tables_by_source: dict[str, dict[str, list[ColumnMetadata]]] = {}
         self._source_present: dict[str, bool] = {}
+        self._load_failed: dict[str, bool] = {}
 
     def _ensure_loaded(self, data_source_id: str) -> None:
         """Fetch and index the approved catalog for a data source (once)."""
@@ -143,6 +173,7 @@ class SmusCatalogDataSourceLookup(DataSourceLookup):
             )
             self._tables_by_source[data_source_id] = tables_index
             self._source_present[data_source_id] = False
+            self._load_failed[data_source_id] = True
             return
 
         for source in catalog.get("sources", []):
@@ -166,6 +197,7 @@ class SmusCatalogDataSourceLookup(DataSourceLookup):
 
         self._tables_by_source[data_source_id] = tables_index
         self._source_present[data_source_id] = present
+        self._load_failed[data_source_id] = False
 
     def data_source_exists(self, data_source_id: str) -> bool:
         """Return whether the data source is present in the approved catalog.
@@ -191,6 +223,32 @@ class SmusCatalogDataSourceLookup(DataSourceLookup):
         """
         self._ensure_loaded(data_source_id)
         return table_name.lower() in self._tables_by_source.get(data_source_id, {})
+
+    def catalog_available(self, data_source_id: str) -> bool:
+        """Whether the approved catalog was read successfully for this source.
+
+        Args:
+            data_source_id: The data source id to check.
+
+        Returns:
+            False only when the catalog read raised — in that case an absent
+            table proves nothing (see ``DataSourceLookup.catalog_available``).
+        """
+        self._ensure_loaded(data_source_id)
+        return not self._load_failed.get(data_source_id, False)
+
+    def known_tables(self, data_source_id: str) -> set[str]:
+        """Return the lower-cased approved table names for a data source.
+
+        Args:
+            data_source_id: The data source id to enumerate.
+
+        Returns:
+            The set of table names in the approved catalog (empty when the
+            source is unknown or its read failed).
+        """
+        self._ensure_loaded(data_source_id)
+        return set(self._tables_by_source.get(data_source_id, {}))
 
     def get_table_columns(self, data_source_id: str, table_name: str) -> list[ColumnMetadata] | None:
         """Return the approved column metadata for a table.

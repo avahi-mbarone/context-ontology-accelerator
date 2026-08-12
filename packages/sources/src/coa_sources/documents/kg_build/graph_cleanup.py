@@ -11,6 +11,17 @@ Uses DeleteSources directly with a small batch_size to avoid Neptune's
 per-query memory limit. The default batch_size=1000 causes MemoryLimitExceeded
 on large documents because delete_statements() passes all 1000 IDs in one query.
 
+Opens the vector store over the SAME ``EMBEDDING_INDEXES`` the build task writes,
+which is why that constant is imported rather than re-derived here. Omitting
+``index_names`` falls back to the toolkit's default set, which includes
+``statement`` — an index the build path deliberately does not create (see the
+constant's rationale in graph_build). Deletion then waits out a 70-second
+"Unable to find documents for all ids in index" timeout per batch for documents
+that were never indexed. A 36-source deletion burned 10 hours that way before the
+Step Functions task timed out and left the source DELETE_FAILED. The two paths
+must agree on the index set: any change to what is embedded has to reach this
+task, or deletion hangs on whatever the build stopped writing.
+
 Applies the same graphrag-toolkit monkey-patches as the build task. Deletion
 reads the vector indexes (``delete_embeddings`` →
 ``_get_existing_doc_ids_for_ids`` → ``paginated_search``), so it hits the exact
@@ -33,6 +44,7 @@ import structlog
 from coa_common.logging import setup_logging
 
 from .graph_build import (
+    EMBEDDING_INDEXES,
     _patch_graphrag_bulk_ingest_retry,
     _patch_graphrag_paginated_search_retry,
     _patch_graphrag_toolkit_for_aoss_nextgen,
@@ -104,7 +116,7 @@ def main() -> None:
 
     with (
         GraphStoreFactory.for_graph_store(graph_store_uri) as graph_store,
-        VectorStoreFactory.for_vector_store(vector_store_uri) as vector_store,
+        VectorStoreFactory.for_vector_store(vector_store_uri, index_names=EMBEDDING_INDEXES) as vector_store,
     ):
         graph_index = LexicalGraphIndex(graph_store, vector_store, tenant_id=TENANT_ID)
 
