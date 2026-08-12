@@ -938,4 +938,36 @@ describe("SourcesStack", () => {
       });
     }
   });
+
+  describe("Preprocessing Lambda reserved concurrency (#48)", () => {
+    it("reserves the default concurrency (5) when unset", () => {
+      template.hasResourceProperties("AWS::Lambda::Function", {
+        FunctionName: Match.stringLikeRegexp("sources-doc-preprocessing$"),
+        ReservedConcurrentExecutions: 5,
+      });
+    });
+
+    it("omits the reservation when lambda_reserved_concurrency=0", () => {
+      const app = new cdk.App({
+        context: { ...TEST_CONTEXT, lambda_reserved_concurrency: 0 },
+      });
+      const network = new NetworkStack(app, "NoResNetwork", { env: TEST_ENV });
+      const storage = new StorageStack(app, "NoResStorage", {
+        network,
+        env: TEST_ENV,
+      });
+      const t = Template.fromStack(
+        new SourcesStack(app, "NoResSources", {
+          network,
+          storage,
+          allowedOrigin: "https://test.example.com",
+          env: TEST_ENV,
+        }),
+      );
+      t.hasResourceProperties("AWS::Lambda::Function", {
+        FunctionName: Match.stringLikeRegexp("sources-doc-preprocessing$"),
+        ReservedConcurrentExecutions: Match.absent(),
+      });
+    });
+  });
 });

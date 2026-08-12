@@ -988,18 +988,27 @@ def fetch_ontology_from_source(
         log.warning("source_url_fetch_failed: url=%s error_type=%s", source_url, type(e).__name__)
         raise HTTPException(502, "Failed to fetch source_url: upstream request failed") from e
 
-    # Persist to local storage for /download
-    os.makedirs(ONTOLOGY_STORAGE_PATH, exist_ok=True)
-    safe_id = re.sub(r"[^A-Za-z0-9._-]+", "_", ontology_id)[:200] or "ontology"
-    file_dest = os.path.join(ONTOLOGY_STORAGE_PATH, f"{safe_id}.ttl")
-    real_dest = os.path.realpath(file_dest)
-    if not _is_within_storage_root(real_dest):
-        raise HTTPException(400, "Invalid ontology_id")
-    with open(real_dest, "wb") as f:
-        f.write(content)
+    # Cache for /download through the same namespace-scoped writer the upload
+    # route uses. Writing to the shared root here (as this path used to) gave two
+    # namespaces holding the same ontology id ONE file, so /download served
+    # whichever fetched last. Format hint is the record's declared format — the
+    # Content-Type sniff below runs after the write, and the extension is
+    # cosmetic (``file_path`` is what /download reads).
+    try:
+        file_dest = _persist_upload(namespace, ontology_id, content, ont.get("format") or "turtle")
+    except ValueError as e:
+        # Which of the two inputs failed containment stays out of the response
+        # (it is a traversal probe's only feedback channel) but goes to the log.
+        log.warning("ontology_fetch_persist_rejected: namespace=%s id=%s reason=%s", namespace, ontology_id, e)
+        raise HTTPException(400, "Invalid namespace or ontology_id") from e
+    except OSError as e:
+        # Disk full / permissions / read-only mount. Without this the bare
+        # OSError becomes a 500 with no record of which namespace+id it was.
+        log.error("ontology_fetch_persist_failed: namespace=%s id=%s error=%r", namespace, ontology_id, e)
+        raise HTTPException(500, "Failed to persist fetched ontology content") from e
 
     updates: dict = {
-        "file_path": real_dest,
+        "file_path": file_dest,
         "last_fetched": datetime.now(UTC).isoformat(),
         "source_url": source_url,
     }

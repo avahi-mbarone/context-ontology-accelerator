@@ -13,6 +13,7 @@ from coa_metrics.source_status import (
     PERMISSIVE_ENV,
     SourceValidationUnavailableError,
     check_source_approved,
+    check_source_table_exists,
     permissive_lookup_enabled,
 )
 
@@ -115,6 +116,114 @@ class TestCheckSourceApproved:
         monkeypatch.delenv("DATA_SOURCES_TABLE", raising=False)
         monkeypatch.setenv(PERMISSIVE_ENV, "true")
         assert check_source_approved("ns-1", "ds-anything") is None
+
+
+class TestCheckSourceTableExists:
+    """#161: sourceTable is a hard block, but ONLY when its absence is provable.
+
+    The catalog lookup fails OPEN (an unreachable catalog looks identical to an
+    empty one), so a naive "table not found → 400" would reject every metric on
+    a COMPLETED source whose assets aren't steward-approved yet. These tests
+    pin the three-way split: provable absence → 400, unknown → 503, and
+    can't-tell → fall through to today's soft warning.
+    """
+
+    def _lookup(self, *, available: bool = True, tables: set[str] | None = None) -> MagicMock:
+        lookup = MagicMock()
+        lookup.catalog_available.return_value = available
+        lookup.known_tables.return_value = tables if tables is not None else set()
+        return lookup
+
+    def _patch_build(self, lookup):
+        return patch(
+            "coa_metrics.data_source_lookup_factory.build_data_source_lookup",
+            return_value=lookup,
+        )
+
+    def test_provable_absence_is_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(PERMISSIVE_ENV, raising=False)
+        with self._patch_build(self._lookup(tables={"orders", "customers"})):
+            error = check_source_table_exists("ns-1", "ds-1", "no_such_table")
+        assert error is not None
+        assert "no_such_table" in error
+
+    def test_present_table_passes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(PERMISSIVE_ENV, raising=False)
+        with self._patch_build(self._lookup(tables={"orders"})):
+            assert check_source_table_exists("ns-1", "ds-1", "Orders") is None
+
+    def test_empty_catalog_falls_back_to_soft_warning(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A COMPLETED source with no steward-approved assets yet knows zero
+        tables — absence is NOT provable, so this must not 400."""
+        monkeypatch.delenv(PERMISSIVE_ENV, raising=False)
+        with self._patch_build(self._lookup(tables=set())):
+            assert check_source_table_exists("ns-1", "ds-1", "orders") is None
+
+    def test_catalog_read_failure_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(PERMISSIVE_ENV, raising=False)
+        with (
+            self._patch_build(self._lookup(available=False, tables={"orders"})),
+            pytest.raises(SourceValidationUnavailableError),
+        ):
+            check_source_table_exists("ns-1", "ds-1", "no_such_table")
+
+    def test_unconfigured_lookup_degrades_to_soft_warning(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A ``None`` lookup means "cannot configure", NOT "read failed".
+
+        ``build_data_source_lookup`` returns None for benign reasons — missing
+        env vars, namespace row absent, ``dataZoneProjectId`` unset. Raising 503
+        here made every sourceTable metric un-creatable in any namespace without
+        a provisioned DataZone project (pre-#161 that degraded to a soft
+        warning). Only a *configured-but-unreadable* catalog is a 503.
+        """
+        monkeypatch.delenv(PERMISSIVE_ENV, raising=False)
+        with self._patch_build(None):
+            assert check_source_table_exists("ns-1", "ds-1", "orders") is None
+
+    def test_schema_qualified_table_matches_bare_catalog_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The documented example uses ``sourceTable: "public.orders"`` but the
+        catalog enumerates bare names — comparing the whole dotted string 400'd
+        a table that exists."""
+        monkeypatch.delenv(PERMISSIVE_ENV, raising=False)
+        with self._patch_build(self._lookup(tables={"orders", "customers"})):
+            assert check_source_table_exists("ns-1", "ds-1", "public.orders") is None
+
+    def test_schema_qualified_absent_table_still_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(PERMISSIVE_ENV, raising=False)
+        with self._patch_build(self._lookup(tables={"orders"})):
+            error = check_source_table_exists("ns-1", "ds-1", "public.no_such_table")
+        assert error is not None
+        assert "no_such_table" in error
+
+    def test_fully_qualified_catalog_name_matches(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A catalog that enumerates dotted names must still match a dotted
+        declaration — the full string is tried before the last segment."""
+        monkeypatch.delenv(PERMISSIVE_ENV, raising=False)
+        with self._patch_build(self._lookup(tables={"public.orders"})):
+            assert check_source_table_exists("ns-1", "ds-1", "public.orders") is None
+
+    def test_lookup_build_error_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(PERMISSIVE_ENV, raising=False)
+        with (
+            patch(
+                "coa_metrics.data_source_lookup_factory.build_data_source_lookup",
+                side_effect=RuntimeError("datazone down"),
+            ),
+            pytest.raises(SourceValidationUnavailableError),
+        ):
+            check_source_table_exists("ns-1", "ds-1", "orders")
+
+    def test_no_source_table_declared_skips_check(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(PERMISSIVE_ENV, raising=False)
+        with patch("coa_metrics.data_source_lookup_factory.build_data_source_lookup") as mock_build:
+            assert check_source_table_exists("ns-1", "ds-1", "") is None
+        mock_build.assert_not_called()
+
+    def test_permissive_mode_skips_enforcement(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(PERMISSIVE_ENV, "true")
+        with patch("coa_metrics.data_source_lookup_factory.build_data_source_lookup") as mock_build:
+            assert check_source_table_exists("ns-1", "ds-1", "no_such_table") is None
+        mock_build.assert_not_called()
 
 
 class TestPermissiveLookupEnabled:

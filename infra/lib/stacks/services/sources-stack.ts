@@ -25,7 +25,10 @@ import { AccessLogsBucket } from "../../constructs";
 import { DynamoDBTable } from "../../constructs/dynamodb-table";
 import { LakeFormationAdmin } from "../../constructs/lakeformation-admin";
 import { SclMonitoring } from "../../constructs";
-import { resolveContext } from "../../context";
+import {
+  resolveContext,
+  resolveLambdaReservedConcurrency,
+} from "../../context";
 import { Paths, fromRoot } from "../../paths";
 import { bundlePython } from "../../utils/python-bundling";
 import { NetworkStack } from "../foundation/network-stack";
@@ -743,8 +746,9 @@ export class SourcesStack extends SCLStack {
     // Register the federation provisioner role as an LF data-lake admin
     // non-destructively (read current admins → append → write), instead of the
     // declarative CfnDataLakeSettings which would overwrite existing admins.
-    // See LakeFormationAdmin for the bootstrap caveat (the CR Lambda role must
-    // itself be an LF admin in accounts that already have admins).
+    // No bootstrap step on any account: PutDataLakeSettings is authorized by the
+    // IAM action, which the custom resource's Lambda role is granted, not by that
+    // role's own DataLakeAdmins membership. See LakeFormationAdmin.
     const lfAdmin = new LakeFormationAdmin(
       this,
       "FederationProvisionerLfAdmin",
@@ -1102,7 +1106,10 @@ export class SourcesStack extends SCLStack {
       "dbScanEnrichmentTimeoutMinutes",
     );
     const enrichmentTimeoutMinutes = Number(enrichmentTimeoutMinutesRaw ?? 120);
-    if (!Number.isFinite(enrichmentTimeoutMinutes) || enrichmentTimeoutMinutes <= 0) {
+    if (
+      !Number.isFinite(enrichmentTimeoutMinutes) ||
+      enrichmentTimeoutMinutes <= 0
+    ) {
       throw new Error(
         `dbScanEnrichmentTimeoutMinutes must be a positive number, got: ${String(enrichmentTimeoutMinutesRaw)}`,
       );
@@ -1390,7 +1397,13 @@ export class SourcesStack extends SCLStack {
         code: preprocessingCode,
         timeout: cdk.Duration.minutes(15),
         memorySize: 3008,
-        reservedConcurrentExecutions: 5,
+        // Reserved concurrency caps document-preprocessing fan-out (bounds
+        // parallel heavy invocations); it is not a correctness requirement.
+        // Configurable via `lambda_reserved_concurrency`; `0`/undefined omits
+        // the reservation so the stack deploys on reduced-quota accounts.
+        reservedConcurrentExecutions: resolveLambdaReservedConcurrency(
+          this.node,
+        ),
         environment: {
           BUCKET_NAME: sourcesBucket.bucketName,
           DOC_SOURCES_TABLE: this.sourcesTable.tableName,

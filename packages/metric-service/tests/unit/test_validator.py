@@ -24,6 +24,7 @@ from coa_metrics.validator import (
     DynamoDBDataSourceLookup,
     NeptuneOntologyLookup,
     OntologyLookup,
+    check_data_modifying,
     check_select_shape,
     validate_metric,
 )
@@ -254,9 +255,9 @@ class TestCheckSelectShape:
         assert check_select_shape("COUNT(*)", "NOT_A_DIALECT") is not None
 
     # ── Deep scan: data-modifying nodes nested inside a SELECT ──────────
-    # Mirrors sql_firewall.py's _DATA_MODIFYING_NODES walk — a top-level
-    # SELECT can smuggle DML through a CTE, which the firewall rejects at
-    # query time, so onboarding must reject it too.
+    # The DML matrix lives in TestCheckDataModifying (the hard block) — this
+    # keeps one case to pin that check_select_shape shares that denylist, plus
+    # the negative case proving the shared walk does not over-reach.
 
     def test_data_modifying_cte_delete_rejected(self) -> None:
         sql = "WITH d AS (DELETE FROM orders RETURNING *) SELECT * FROM d"
@@ -265,22 +266,6 @@ class TestCheckSelectShape:
         assert "data-modifying" in error
         assert "Delete" in error
 
-    def test_data_modifying_cte_insert_rejected(self) -> None:
-        sql = "WITH i AS (INSERT INTO audit (id) VALUES (1) RETURNING *) SELECT * FROM i"
-        error = check_select_shape(sql, "POSTGRESQL")
-        assert error is not None
-        assert "data-modifying" in error
-
-    def test_data_modifying_cte_update_rejected(self) -> None:
-        sql = "WITH u AS (UPDATE orders SET total = 0 RETURNING *) SELECT * FROM u"
-        error = check_select_shape(sql, "POSTGRESQL")
-        assert error is not None
-        assert "data-modifying" in error
-
-    def test_select_into_rejected(self) -> None:
-        error = check_select_shape("SELECT * INTO backup_orders FROM orders", "POSTGRESQL")
-        assert error is not None
-
     def test_read_only_cte_and_subquery_still_pass(self) -> None:
         # Deep scan must not flag legitimate nested SELECTs
         sql = (
@@ -288,6 +273,234 @@ class TestCheckSelectShape:
             "SELECT COUNT(*) FROM recent WHERE id IN (SELECT order_id FROM refunds)"
         )
         assert check_select_shape(sql, "POSTGRESQL") is None
+
+
+# ── check_data_modifying: the hard block (#161) ──────────────────────────
+
+
+class TestCheckDataModifying:
+    """#161: only DML/DDL is a hard block. A parse error or a non-SELECT
+    fragment is allowed through (it becomes a soft warning) because the serve
+    side independently blocks DML at execution and simply fails Tier-1 on a
+    fragment without crashing.
+    """
+
+    # ── Allowed: fragments and parse errors are NOT the hard block ──────
+
+    @pytest.mark.parametrize("sql", ["COUNT(*)", "SUM(orders.total_amount)", "AVG(price)"])
+    def test_fragment_is_allowed(self, sql: str) -> None:
+        assert check_data_modifying(sql, "TRINO") is None
+
+    @pytest.mark.parametrize("sql", ["SELECT FROM WHERE (((", "SELEKT 1 FRM", "))) nonsense ((("])
+    def test_parse_error_without_dml_is_allowed(self, sql: str) -> None:
+        assert check_data_modifying(sql, "TRINO") is None
+
+    def test_plain_select_is_allowed(self) -> None:
+        assert check_data_modifying("SELECT SUM(total_amount) AS r FROM orders", "TRINO") is None
+
+    def test_read_only_cte_and_subquery_allowed(self) -> None:
+        sql = (
+            "WITH recent AS (SELECT * FROM orders WHERE created > '2026-01-01') "
+            "SELECT COUNT(*) FROM recent WHERE id IN (SELECT order_id FROM refunds)"
+        )
+        assert check_data_modifying(sql, "POSTGRESQL") is None
+
+    def test_column_named_like_a_keyword_allowed(self) -> None:
+        """The regex is anchored at statement start — a column called
+        `update_time` must not be mistaken for an UPDATE statement."""
+        assert check_data_modifying("SELECT update_time, delete_flag FROM t", "POSTGRESQL") is None
+
+    def test_dml_inside_a_comment_is_allowed(self) -> None:
+        """Comments are stripped before the regex, so DML mentioned in a
+        comment does not block — the AST walk governs the real statement."""
+        assert check_data_modifying("-- DROP TABLE x\nSELECT 1", "POSTGRESQL") is None
+
+    # ── Blocked: DML/DDL, however it is smuggled in ──────────────────────
+
+    def test_trailing_dml_statement_blocked(self) -> None:
+        error = check_data_modifying("SELECT 1; DROP TABLE x", "POSTGRESQL")
+        assert error is not None
+        assert "data-modifying" in error
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "WITH d AS (DELETE FROM orders RETURNING *) SELECT * FROM d",
+            "WITH i AS (INSERT INTO audit (id) VALUES (1) RETURNING *) SELECT * FROM i",
+            "WITH u AS (UPDATE orders SET total = 0 RETURNING *) SELECT * FROM u",
+        ],
+    )
+    def test_dml_nested_in_cte_blocked(self, sql: str) -> None:
+        error = check_data_modifying(sql, "POSTGRESQL")
+        assert error is not None
+        assert "data-modifying" in error
+
+    def test_select_into_blocked(self) -> None:
+        assert check_data_modifying("SELECT * INTO backup_orders FROM orders", "POSTGRESQL") is not None
+
+    @pytest.mark.parametrize(
+        "sql",
+        ["DROP TABLE orders", "INSERT INTO t VALUES (1)", "ALTER TABLE t ADD c int", "CREATE TABLE t (c int)"],
+    )
+    def test_top_level_dml_blocked(self, sql: str) -> None:
+        assert check_data_modifying(sql, "POSTGRESQL") is not None
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "MSCK REPAIR TABLE t",  # ParseError in sqlglot — regex must catch it
+            "DELETE FROM orders WHERE (((",  # unparseable DML — regex must catch it
+            "UNLOAD ('SELECT 1') TO 's3://b/k'",
+            "EXPLAIN SELECT 1",
+        ],
+    )
+    def test_unparseable_or_command_dml_blocked_by_regex(self, sql: str) -> None:
+        """Pre-parse regex mirrors the serve firewall's _BLOCKED_STATEMENTS so
+        DML hidden in an otherwise-unparseable string is still caught."""
+        assert check_data_modifying(sql, "POSTGRESQL") is not None
+
+    def test_block_message_is_actionable(self) -> None:
+        error = check_data_modifying("DROP TABLE orders", "POSTGRESQL")
+        assert error is not None
+        assert "read-only" in error
+
+    # ── DML/admin verbs beyond the original 8-node denylist ──────────────
+    # The first cut copied the serve firewall's regex + node tuple but dropped
+    # its ALLOWLIST stage, so every verb below published (201) instead of
+    # hard-blocking. sqlglot funnels unknown verbs (CALL, VACUUM, OPTIMIZE, …)
+    # into exp.Command, which is what makes the AST walk cover them.
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "TRUNCATE TABLE orders",
+            "GRANT SELECT ON orders TO bob",
+            "REVOKE SELECT ON orders FROM bob",
+            "COPY orders FROM 's3://bucket/key' CREDENTIALS ''",
+            "CALL some_proc()",
+            "VACUUM orders",
+            "SET search_path = evil_schema",
+            "ANALYZE orders",
+            "COMMENT ON TABLE orders IS 'x'",
+            "LOAD DATA INPATH 'x' INTO TABLE orders",
+            "RENAME TABLE orders TO orders_old",
+            "ALTER SESSION SET query_tag = 'x'",
+            "OPTIMIZE orders",
+        ],
+    )
+    def test_admin_and_dml_verbs_blocked(self, sql: str) -> None:
+        error = check_data_modifying(sql, "POSTGRESQL")
+        assert error is not None, f"{sql!r} must be hard-blocked"
+        assert "data-modifying" in error
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "SELECT 1; TRUNCATE TABLE x",
+            "SELECT 1; GRANT SELECT ON x TO bob",
+            "SELECT 1; SET role admin",
+            "SELECT 1; CALL p()",
+        ],
+    )
+    def test_stacked_admin_statement_blocked(self, sql: str) -> None:
+        """The regex is ``^\\s*``-anchored so it only sees the FIRST statement —
+        the AST walk over every parsed statement is what catches these."""
+        error = check_data_modifying(sql, "POSTGRESQL")
+        assert error is not None, f"{sql!r} must be hard-blocked"
+        assert "data-modifying" in error
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "COUNT(*)",
+            "SUM(orders.total_amount)",
+            "AVG(price)",
+            "COUNT(DISTINCT user_id)",
+            "SUM(CASE WHEN paid THEN 1 ELSE 0 END)",
+            "SUM(amount) / NULLIF(COUNT(*), 0)",
+            "SELECT COUNT(*) FROM orders GROUP BY region",
+            "SELECT date_trunc('month', created_at) AS m, SUM(total) FROM orders GROUP BY 1",
+            "SELECT SUM(x) OVER (PARTITION BY y ORDER BY z) FROM t",
+            "SELECT a FROM t1 JOIN t2 ON t1.id = t2.id WHERE t2.d BETWEEN DATE '2020-01-01' AND CURRENT_DATE",
+        ],
+    )
+    def test_widened_denylist_keeps_fragments_and_selects_soft(self, sql: str) -> None:
+        """Invariant guard for the widened node tuple: aggregate fragments parse
+        to exp.Count/exp.Sum (not statement nodes) and read-only SELECTs must
+        keep returning None. Regression net against denylist over-reach."""
+        assert check_data_modifying(sql, "POSTGRESQL") is None
+
+    # ── Tokenizer / recursion failures must not escape as a 500 ──────────
+    # sqlglot's TokenError is a SIBLING of ParseError (both SqlglotError), and
+    # deeply-nested parens raise RecursionError. Neither is a ValueError, so
+    # create/update handlers (which catch ValueError) turned them into a 500.
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "'; DROP TABLE users; --",  # TokenError (unterminated quote)
+            "SELECT 'unterminated",
+            'SELECT "unterminated',
+            "'",
+        ],
+    )
+    def test_token_error_does_not_raise(self, sql: str) -> None:
+        result = check_data_modifying(sql, "POSTGRESQL")
+        assert result is None or isinstance(result, str)
+
+    def test_deeply_nested_parens_does_not_raise(self) -> None:
+        """RecursionError from sqlglot's recursive-descent parser must be
+        absorbed (soft), not surface as an unhandled 500."""
+        sql = "SELECT " + "(" * 500 + "1" + ")" * 500
+        result = check_data_modifying(sql, "POSTGRESQL")
+        assert result is None or isinstance(result, str)
+
+    def test_token_error_with_leading_dml_still_blocked(self) -> None:
+        """Defense in depth: DML at the START of a token-error string is caught
+        by the pre-parse regex before parsing is even attempted."""
+        error = check_data_modifying("DROP TABLE users; --'", "POSTGRESQL")
+        assert error is not None
+
+    # ── Stacked DML that also BREAKS the parse ───────────────────────────
+    # The gap the two other layers each miss: the ``^\s*`` regex only sees the
+    # leading SELECT, and the AST walk never runs because the trailing statement
+    # is exactly what makes sqlglot raise. All four below returned None (accepted)
+    # until the parse-failure path started re-checking each ``;``-segment.
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "SELECT 1; MSCK REPAIR TABLE t",  # ParseError
+            "SELECT 1; UNLOAD ('SELECT 1') TO 's3://b/'",  # ParseError
+            "SELECT 1; PUT file:///a @s",  # ParseError
+            "'; DROP TABLE users; --",  # TokenError (unterminated quote)
+        ],
+    )
+    def test_stacked_dml_that_breaks_the_parser_blocked(self, sql: str) -> None:
+        error = check_data_modifying(sql, "POSTGRESQL")
+        assert error is not None, f"{sql!r} must be hard-blocked"
+        assert "data-modifying" in error
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "total_amount",  # bare column — the canonical soft fragment
+            "SELECT FROM WHERE (((",  # parse error, read-only
+            "COUNT(*)",
+            "SUM(x) OVER (PARTITION BY y)",
+            "RANK() OVER (ORDER BY total DESC)",
+            "revenue - cost",
+            "SELECT ((( FROM t",
+            "SELECT SUM(amount) FROM orders WHERE note = 'a;b'",  # ';' inside a literal
+            "SELECT * FROM t WHERE label = 'x; DELETE FROM y'",  # DML-looking literal
+            "SELECT SUM(x) FROM t -- DELETE FROM y",  # DML in a trailing comment
+        ],
+    )
+    def test_segment_scan_keeps_read_only_sql_soft(self, sql: str) -> None:
+        """Regression guard on the segment scan: splitting on ``;`` must not
+        start hard-blocking fragments, parse errors, or a ``;`` that lives
+        inside a string literal or comment."""
+        assert check_data_modifying(sql, "POSTGRESQL") is None
 
 
 # ── Check 2: Table References ───────────────────────────────────────────
@@ -329,6 +542,96 @@ class TestCheck2TableReferences:
         result = validate_metric(valid_metric, data_sources_lookup=None)
         table_warnings = [w for w in result.warnings if w["check"] == "table_reference"]
         assert len(table_warnings) == 0
+
+
+class TestSourceTableProvableAbsence:
+    """#161: the DECLARED sourceTable is an ERROR when its absence is provable.
+
+    Provable = the catalog was read, it enumerates at least one table for the
+    source, and the declared table is not among them. Everything else stays a
+    soft WARNING — see the docstrings below for why each case is unprovable.
+    """
+
+    def _enumerating_lookup(self, *, available: bool = True, tables: set[str] | None = None):
+        class _Lookup(MockDataSourceLookup):
+            def catalog_available(self, data_source_id: str) -> bool:
+                return available
+
+            def known_tables(self, data_source_id: str) -> set[str]:
+                return {t.lower() for t in (tables or set())}
+
+        return _Lookup(sources={"ds-abc123"}, tables={"ds-abc123": tables or set()})
+
+    def _metric(self, source_table: str) -> dict:
+        return {
+            "expression": {"dialects": [{"dialect": "trino", "expression": "SELECT SUM(amount) FROM t"}]},
+            "dataSourceId": "ds-abc123",
+            "sourceTable": source_table,
+            "ontologyConcepts": [],
+        }
+
+    def test_provable_absence_is_error(self) -> None:
+        lookup = self._enumerating_lookup(tables={"orders", "customers"})
+        result = validate_metric(self._metric("no_such_table"), data_sources_lookup=lookup)
+
+        assert not result.valid
+        errors = [e for e in result.errors if e["check"] == "table_reference"]
+        assert len(errors) == 1
+        assert "no_such_table" in errors[0]["message"]
+
+    def test_present_source_table_passes(self) -> None:
+        lookup = self._enumerating_lookup(tables={"orders"})
+        result = validate_metric(self._metric("Orders"), data_sources_lookup=lookup)
+
+        assert result.valid
+        assert not [e for e in result.errors if e["check"] == "table_reference"]
+
+    def test_empty_catalog_stays_warning(self) -> None:
+        """A COMPLETED source with no approved assets enumerates nothing —
+        absence unprovable, so this must not become an ERROR."""
+        lookup = self._enumerating_lookup(tables=set())
+        result = validate_metric(self._metric("no_such_table"), data_sources_lookup=lookup)
+
+        assert result.valid
+        assert [w for w in result.warnings if w["check"] == "table_reference"]
+
+    def test_unavailable_catalog_stays_warning(self) -> None:
+        """Read failure: table_exists fails open, so absence proves nothing."""
+        lookup = self._enumerating_lookup(available=False, tables={"orders"})
+        result = validate_metric(self._metric("no_such_table"), data_sources_lookup=lookup)
+
+        assert result.valid
+        assert [w for w in result.warnings if w["check"] == "table_reference"]
+
+    def test_non_enumerating_lookup_stays_warning(self, lookup: MockDataSourceLookup) -> None:
+        """A lookup that doesn't implement known_tables (base default) can never
+        prove absence — this is what keeps the promotion safe by default."""
+        result = validate_metric(self._metric("missing_table"), data_sources_lookup=lookup)
+
+        assert result.valid
+        assert [w for w in result.warnings if w["check"] == "table_reference"]
+
+    def test_sql_extracted_tables_stay_warning(self) -> None:
+        """find_all(exp.Table) also matches CTE/subquery aliases, which are not
+        catalog tables — those must never be promoted to ERROR."""
+        lookup = self._enumerating_lookup(tables={"orders"})
+        metric = {
+            "expression": {
+                "dialects": [
+                    {
+                        "dialect": "trino",
+                        "expression": "WITH cte AS (SELECT amount FROM orders) SELECT SUM(amount) FROM cte",
+                    }
+                ]
+            },
+            "dataSourceId": "ds-abc123",
+            "sourceTable": "orders",
+            "ontologyConcepts": [],
+        }
+        result = validate_metric(metric, data_sources_lookup=lookup)
+
+        assert result.valid  # 'cte' is not in the catalog but must not block
+        assert any("cte" in w["message"] for w in result.warnings if w["check"] == "table_reference")
 
 
 # ── Check 3: Column References ──────────────────────────────────────────

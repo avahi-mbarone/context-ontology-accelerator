@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from botocore.exceptions import ClientError
+from coa_metrics.source_status import PERMISSIVE_ENV
 
 pytestmark = pytest.mark.unit
 
@@ -147,7 +148,11 @@ class TestImportFromS3:
         mock_neptune.return_value.get_metric.return_value = None
         mock_neptune.return_value.create_metric.return_value = None
 
-        with patch.dict("os.environ", {"OSI_BUCKET_NAME": "test-bucket"}):
+        # Permissive lookup: this test covers the S3 read path, not the #564
+        # APPROVED-source enforcement import applies per metric (which would
+        # otherwise fail closed with a 503 — DATA_SOURCES_TABLE is unset here).
+        env = {"OSI_BUCKET_NAME": "test-bucket", PERMISSIVE_ENV: "true"}
+        with patch.dict("os.environ", env):
             resp = handler(self._make_event(body={"s3Key": "test-ns/imports/abc/file.yaml"}), None)
 
         assert resp["statusCode"] == 200

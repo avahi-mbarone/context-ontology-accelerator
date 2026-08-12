@@ -61,7 +61,7 @@ export interface OntologyStackProps extends cdk.StackProps {
  *   - Neptune DB (shared) — read/write for catalog projection + Turtle load
  *   - OpenSearch Serverless (shared) — read/write for lexical embeddings
  *   - DynamoDB (own table) — jobs, proposals, namespace registry
- *   - Bedrock — LLM (RIGOR induction) + embedding (Titan V2)
+ *   - Bedrock — LLM (RIGOR induction) + embedding (Cohere Embed v4)
  *   - DataZone/SMUS — read approved catalog metadata
  *
  * Reachable via Cloud Map private DNS (resolvable VPC-wide):

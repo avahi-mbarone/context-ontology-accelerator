@@ -119,6 +119,57 @@ class TestSmusCatalogDataSourceLookup:
         assert lookup.table_exists("ds-1", "orders") is False
         assert lookup.get_table_columns("ds-1", "orders") is None
 
+    @patch("coa_common.metadata_store.catalog_reader.read_approved_catalog")
+    def test_catalog_available_false_on_read_failure(self, mock_read):
+        """#161: table_exists() fails OPEN (False) on a read failure, so it
+        cannot distinguish 'absent' from 'unknown'. catalog_available() is the
+        signal that makes absence provable — without it a hard sourceTable
+        block would reject valid metrics whenever the catalog is down."""
+        mock_read.side_effect = RuntimeError("catalog down")
+        lookup = _lookup()
+
+        assert lookup.catalog_available("ds-1") is False
+
+    @patch("coa_common.metadata_store.catalog_reader.read_approved_catalog")
+    def test_catalog_available_true_on_successful_read(self, mock_read):
+        mock_read.return_value = _CATALOG
+        lookup = _lookup()
+
+        assert lookup.catalog_available("ds-1") is True
+
+    @patch("coa_common.metadata_store.catalog_reader.read_approved_catalog")
+    def test_catalog_available_true_when_source_absent_but_read_succeeded(self, mock_read):
+        """A successful read that simply lacks the source is still 'available' —
+        the catalog spoke, it just had nothing for this source."""
+        mock_read.return_value = {"sources": []}
+        lookup = _lookup()
+
+        assert lookup.catalog_available("ds-missing") is True
+
+    @patch("coa_common.metadata_store.catalog_reader.read_approved_catalog")
+    def test_known_tables_returns_lowercased_names(self, mock_read):
+        mock_read.return_value = _CATALOG
+        lookup = _lookup()
+
+        assert lookup.known_tables("ds-1") == {"orders"}
+
+    @patch("coa_common.metadata_store.catalog_reader.read_approved_catalog")
+    def test_known_tables_empty_when_read_failed(self, mock_read):
+        mock_read.side_effect = RuntimeError("catalog down")
+        lookup = _lookup()
+
+        assert lookup.known_tables("ds-1") == set()
+
+    def test_base_lookup_defaults_never_prove_absence(self):
+        """The base interface must default to 'I cannot enumerate tables', so a
+        lookup implementation that doesn't override these can never trigger the
+        hard sourceTable block."""
+        from coa_metrics.lookups import DataSourceLookup
+
+        base = DataSourceLookup()
+        assert base.catalog_available("ds-1") is True
+        assert base.known_tables("ds-1") == set()
+
 
 class TestNeptuneOntologyLookup:
     """Tests for the Neptune SPARQL-backed ontology class check."""

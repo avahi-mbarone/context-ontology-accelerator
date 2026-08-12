@@ -107,9 +107,16 @@ def _apply(request_type: str, target: str) -> None:
         _lf.put_data_lake_settings(DataLakeSettings=settings)
     except ClientError as e:
         if e.response.get("Error", {}).get("Code") == "AccessDeniedException":
-            # Bootstrap chicken-and-egg: this Lambda's role must itself be an LF
-            # admin in an account that already has admins (see infra/README.md).
-            raise PermissionError(f"Lambda role must be a Lake Formation data-lake admin to manage admins: {e}") from e
+            # NOT a missing data-lake-admin registration. PutDataLakeSettings is
+            # authorized by the IAM action, which this role is granted — a
+            # non-admin caller holding it can modify the admin list (verified by
+            # direct test against an account with four existing admins). So a
+            # denial here means the ACTION is blocked: an SCP, a permission
+            # boundary, or the grant having been removed from the role.
+            raise PermissionError(
+                f"lakeformation:PutDataLakeSettings denied for this Lambda role — check for an SCP or "
+                f"permission boundary denying the action (data-lake admin membership is NOT required): {e}"
+            ) from e
         raise
 
 

@@ -24,9 +24,22 @@ export const CTX_CALLBACK_URLS = "callbackUrls";
 export const CTX_LOGOUT_URLS = "logoutUrls";
 export const CTX_GRAPH_BASE_URI = "graph_base_uri";
 export const CTX_EVENT_SOURCE_PREFIX = "event_source_prefix";
+export const CTX_LAMBDA_RESERVED_CONCURRENCY = "lambda_reserved_concurrency";
 
 /** Default values when context keys are not provided. */
 export const DEFAULT_PROJECT_TAG = "semantic-context";
+
+/**
+ * Default reserved concurrency for the two Lambdas that request it
+ * (VKG reload, doc preprocessing). Bounds each function's blast radius; it is
+ * NOT load-bearing for a single-tenant deployment. Set the
+ * `lambda_reserved_concurrency` context to `0` to omit the reservation
+ * entirely — required on accounts whose Lambda concurrent-executions quota
+ * (`L-B99A9384`) is at the reduced default of 10, where reserving any
+ * concurrency drops unreserved capacity below the account minimum and CDK
+ * rolls back. See external-docs/content/deploying.md.
+ */
+export const DEFAULT_LAMBDA_RESERVED_CONCURRENCY = 5;
 export const DEFAULT_CALLBACK_URLS = ["https://localhost/authenticate/"];
 export const DEFAULT_LOGOUT_URLS = ["https://localhost/"];
 export const DEFAULT_GROUP_CLAIM = "cognito:groups";

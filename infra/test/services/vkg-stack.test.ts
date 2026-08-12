@@ -16,6 +16,28 @@ const TEST_CONTEXT = {
 
 const PREFIX = `${DEFAULT_RESOURCE_PREFIX}-${DEFAULT_ENV}`;
 
+/**
+ * Render a VkgStack template with additional CDK context merged over the
+ * defaults. Each call gets its own App so context does not leak between tests.
+ */
+function renderVkgWithContext(
+  extraContext: Record<string, unknown>,
+): Template {
+  const app = new cdk.App({ context: { ...TEST_CONTEXT, ...extraContext } });
+  const network = new NetworkStack(app, "CtxNetwork");
+  const bucketStack = new cdk.Stack(app, "CtxBucketStack");
+  const bucket = new s3.Bucket(bucketStack, "OntologyBucket", {
+    bucketName: `${PREFIX}-ontology-artifacts`,
+  });
+  return Template.fromStack(
+    new VkgStack(app, "CtxVkg", {
+      network,
+      serviceNamespace: network.serviceNamespace,
+      ontologyBucket: bucket,
+    }),
+  );
+}
+
 describe("VkgStack", () => {
   let template: Template;
   let templateWithBucket: Template;
@@ -265,6 +287,42 @@ describe("VkgStack", () => {
         SecurityGroupIds: Match.anyValue(),
       }),
     });
+  });
+
+  // ── Reserved concurrency (configurable; #48) ─────────────────────
+
+  test("VkgReloadFn reserves the default concurrency (5) when unset", () => {
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      FunctionName: `${PREFIX}-vkg-reload`,
+      ReservedConcurrentExecutions: 5,
+    });
+  });
+
+  test("VkgReloadFn honours a custom lambda_reserved_concurrency value", () => {
+    const t = renderVkgWithContext({ lambda_reserved_concurrency: 3 });
+    t.hasResourceProperties("AWS::Lambda::Function", {
+      FunctionName: `${PREFIX}-vkg-reload`,
+      ReservedConcurrentExecutions: 3,
+    });
+  });
+
+  test("VkgReloadFn omits the reservation when lambda_reserved_concurrency=0", () => {
+    // On reduced-quota accounts (Lambda concurrent-executions = 10) any
+    // reservation is rejected; 0 must drop the property entirely, not set 0.
+    const t = renderVkgWithContext({ lambda_reserved_concurrency: 0 });
+    t.hasResourceProperties("AWS::Lambda::Function", {
+      FunctionName: `${PREFIX}-vkg-reload`,
+      ReservedConcurrentExecutions: Match.absent(),
+    });
+  });
+
+  test("synth fails fast on an invalid lambda_reserved_concurrency", () => {
+    expect(() => renderVkgWithContext({ lambda_reserved_concurrency: -1 })).toThrow(
+      /lambda_reserved_concurrency must be a non-negative integer/,
+    );
+    expect(() =>
+      renderVkgWithContext({ lambda_reserved_concurrency: "abc" }),
+    ).toThrow(/lambda_reserved_concurrency must be a non-negative integer/);
   });
 
   // ── OE monitoring (cdk-monitoring-constructs) ────────────────────

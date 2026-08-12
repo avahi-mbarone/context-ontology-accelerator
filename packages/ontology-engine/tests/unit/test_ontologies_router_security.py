@@ -12,6 +12,7 @@ These tests verify that the except _httpx.HTTPError handler produces opaque 502 
 from __future__ import annotations
 
 import os
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -80,8 +81,8 @@ class TestHTTPErrorMessageSanitization:
 class TestStorageRootContainment:
     """``_is_within_storage_root`` is the single containment predicate.
 
-    Three call sites depend on it: the ``/download`` local-file fallback, the
-    ``source_url`` fetch destination, and ``_persist_upload``.
+    Two call sites depend on it: the ``/download`` local-file fallback and
+    ``_persist_upload`` (which the ``source_url`` fetch also writes through).
     """
 
     def test_sibling_directory_sharing_the_root_prefix_is_outside(self, tmp_path, monkeypatch):
@@ -268,3 +269,141 @@ class TestPersistUploadPathTraversal:
         with open(dest, "rb") as fh:
             assert fh.read() == b"payload"
         assert dest.endswith(".ttl")
+
+
+class TestFetchDestinationIsNamespaceScoped:
+    """CWE-668: ``/fetch`` must cache bytes under the caller's namespace dir.
+
+    The fetch destination used to be built inline in the shared storage root,
+    so two namespaces refreshing the same ontology id resolved to ONE file and
+    both registry rows pointed at it — ``/download`` then served whichever
+    namespace fetched last, across the namespace boundary.
+    """
+
+    def _fetch(self, ontology_id, namespace, body_bytes):
+        """Drive ``fetch_ontology_from_source`` with the network stubbed out.
+
+        Returns the ``file_path`` the endpoint recorded on the registry.
+        """
+        from coa_ontology.catalog.routers import ontologies
+
+        graph = MagicMock()
+        graph.get_ontology.return_value = {
+            "format": "turtle",
+            "uri": ontology_id,
+            "source_url": "https://example.com/o.ttl",
+        }
+
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.headers = {"content-type": "text/turtle"}
+        resp.iter_bytes.return_value = [body_bytes]
+
+        with (
+            patch.object(ontologies, "_graph", return_value=graph),
+            patch.object(
+                ontologies,
+                "_resolve_and_validate_url",
+                return_value=("https://93.184.216.34:443/o.ttl", "example.com", "443"),
+            ),
+            patch("httpx.Client") as client_cls,
+        ):
+            client_cls.return_value.__enter__.return_value.stream.return_value.__enter__.return_value = resp
+            ontologies.fetch_ontology_from_source(ontology_id, None, namespace=namespace)
+
+        return graph.update_ontology.call_args[0][1]["file_path"]
+
+    @pytest.fixture()
+    def storage_root(self, tmp_path, monkeypatch):
+        from coa_ontology.catalog.routers import ontologies
+
+        root = tmp_path / "ontologies"
+        root.mkdir()
+        monkeypatch.setattr(ontologies, "ONTOLOGY_STORAGE_PATH", str(root))
+        return root
+
+    def test_two_namespaces_fetching_one_id_do_not_share_a_file(self, storage_root):
+        ontology_id = "https://schema.org/"
+
+        a = self._fetch(ontology_id, "nsa", b"<http://a> a <http://x> .")
+        b = self._fetch(ontology_id, "nsb", b"<http://b> a <http://x> .")
+
+        assert a != b, "both namespaces cached the same ontology id to one file"
+        assert os.path.dirname(a) == os.path.realpath(str(storage_root / "nsa"))
+        assert os.path.dirname(b) == os.path.realpath(str(storage_root / "nsb"))
+        # Each namespace still holds its own bytes (the leak is a content swap,
+        # not just a shared name).
+        with open(a, "rb") as fh:
+            assert fh.read() == b"<http://a> a <http://x> ."
+        with open(b, "rb") as fh:
+            assert fh.read() == b"<http://b> a <http://x> ."
+        # Nothing loose in the shared root.
+        assert sorted(p.name for p in storage_root.iterdir()) == ["nsa", "nsb"]
+
+    def test_traversal_namespace_is_rejected_before_any_write(self, storage_root):
+        from fastapi import HTTPException
+
+        with pytest.raises(HTTPException) as exc:
+            self._fetch("https://schema.org/", "../escape", b"<http://a> a <http://x> .")
+
+        assert exc.value.status_code == 400
+        assert not list(storage_root.iterdir())
+
+    def test_traversal_ontology_id_is_slugified_not_rejected(self, storage_root):
+        """A traversal-shaped ontology id is neutralised, not refused.
+
+        Unlike the namespace (matched against ``[a-zA-Z0-9_\\-]+`` and rejected
+        outright), the id is caller-supplied IRI text that must survive as a
+        filename, so ``/`` is substituted away — ``../../etc/passwd`` becomes the
+        flat name ``.._.._etc_passwd.ttl``. The write therefore succeeds INSIDE
+        the namespace dir; expecting a ``400`` here would encode the wrong
+        contract. What matters is that no separator survives to escape.
+        """
+        dest = self._fetch("../../etc/passwd", "validns", b"<http://a> a <http://x> .")
+
+        ns_dir = os.path.realpath(str(storage_root / "validns"))
+        assert os.path.dirname(dest) == ns_dir
+        assert os.sep not in os.path.basename(dest)
+        assert sorted(p.name for p in storage_root.iterdir()) == ["validns"]
+
+    def test_symlinked_destination_file_is_rejected(self, storage_root, tmp_path):
+        """The resolved-dest check is what actually yields a 400 for the id.
+
+        A symlink planted at the destination filename resolves outside the
+        namespace dir, so ``dirname(dest) != ns_dir`` trips and the endpoint
+        must refuse rather than write through the link. This is the only
+        reachable path to that branch — see the slugification test above.
+        """
+        from fastapi import HTTPException
+
+        outside = tmp_path / "outside.ttl"
+        ns_dir = storage_root / "validns"
+        ns_dir.mkdir()
+        (ns_dir / "https_schema.org_.ttl").symlink_to(outside)
+
+        with pytest.raises(HTTPException) as exc:
+            self._fetch("https://schema.org/", "validns", b"<http://a> a <http://x> .")
+
+        assert exc.value.status_code == 400
+        assert not outside.exists(), "nothing may be written through the symlink"
+
+    def test_filesystem_failure_returns_500_not_a_bare_oserror(self, storage_root, monkeypatch):
+        """A disk/permission failure must surface as a handled 500.
+
+        Only ``ValueError`` used to be caught, so an ``OSError`` from
+        ``makedirs``/``open`` escaped the route as an unlabelled 500 with no log
+        line naming the namespace and id.
+        """
+        from coa_ontology.catalog.routers import ontologies
+        from fastapi import HTTPException
+
+        def boom(*_args, **_kwargs):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(ontologies, "_persist_upload", boom)
+
+        with pytest.raises(HTTPException) as exc:
+            self._fetch("https://schema.org/", "validns", b"<http://a> a <http://x> .")
+
+        assert exc.value.status_code == 500
+        assert "No space left" not in str(exc.value.detail), "OS error text must not reach the client"
