@@ -22,7 +22,7 @@ Document schema (a subset of the shared canonical mapping):
   - text: embedding source text
   - embedding: 1024-d float vector
 
-Embedding generation via Bedrock Titan Text Embeddings V2.
+Embedding generation via Bedrock Cohere Embed v4 (DEFAULT_EMBED_MODEL_ID).
 """
 
 from __future__ import annotations

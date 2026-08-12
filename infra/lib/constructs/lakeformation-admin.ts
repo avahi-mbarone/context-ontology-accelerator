@@ -31,13 +31,21 @@ export interface LakeFormationAdminProps {
  * writes the full settings back (`PutDataLakeSettings`) — preserving existing
  * admins and other settings. Removes the role on stack deletion (best-effort).
  *
- * NOTE: `PutDataLakeSettings` requires the caller (this construct's Lambda role)
- * to already be an LF data-lake admin once any admins exist. In a greenfield
- * account (no admins) it self-bootstraps; in an account that already has admins,
- * add `adminLambdaRole` as an LF admin once, out-of-band, before first deploy.
+ * NOTE: `PutDataLakeSettings` is authorized by the IAM permission granted below,
+ * NOT by the caller's own membership in `DataLakeAdmins`. This works unattended on
+ * any account, greenfield or with admins already present, and needs no
+ * out-of-band bootstrap. An earlier version of this comment claimed the caller
+ * had to be a data-lake admin itself; that was verified false by direct test (a
+ * non-admin role with only the two `*DataLakeSettings` permissions modified the
+ * admin list on an account with four existing admins). An `AccessDeniedException`
+ * here means the IAM action is denied — look for an SCP or permission boundary.
  */
 export class LakeFormationAdmin extends Construct {
-  /** Execution role of the onEvent Lambda — must be an LF admin to write settings. */
+  /**
+   * Execution role of the onEvent Lambda — the principal that calls
+   * `PutDataLakeSettings`. It needs the IAM action (granted below), not
+   * data-lake admin membership.
+   */
   public readonly adminLambdaRole: iam.IRole;
 
   constructor(scope: Construct, id: string, props: LakeFormationAdminProps) {
