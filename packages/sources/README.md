@@ -684,10 +684,16 @@ always enforced on the connection.
   a handful per source onboarding, so no custom retry is warranted. The Bedrock
   enrichment client uses `adaptive` mode (client-side rate limiting + backoff),
   since per-table LLM invocation is the actual throttle-prone path.
-- CloudWatch metrics are emitted as EMF (namespace `SemanticContext/Sources`,
-  auto-extracted from container logs — no `PutMetricData` call).
+- CloudWatch metrics are written as EMF JSON on stdout (namespace
+  `COA/Sources`) — no `PutMetricData` call. **This only becomes a
+  metric on the Lambda paths.** EMF auto-extraction is a property of the Lambda
+  log pipeline; the enrichment **ECS task** runs with a plain `awsLogs` driver
+  and no `PutMetricData` grant, so its `emit_metric` calls land in CloudWatch
+  Logs as JSON lines and never become CloudWatch metrics. The enrichment metric
+  table below is therefore log-only today — see
+  [Observability](#observability--structured-scan-dashboard).
 
-**Discovery metrics** (emitted from `discovery_handler.py`):
+**Discovery metrics** (emitted from `pipeline/discovery_handler.py`, Lambda — live):
 
 | Metric | Unit | Dimensions | Description |
 |---|---|---|---|
@@ -695,8 +701,30 @@ always enforced on the connection.
 | `DiscoveryDuration` | Milliseconds | `SourceType` | Metadata discovery time |
 | `ValidationLatency` | Milliseconds | `SourceType` | Connection test time |
 | `TablesDiscovered` | Count | `SourceType` | Tables found in source |
+| `ConnectionValidation` | Count | `SourceType`, `Result` | Connection test outcome (`Result` = `Success` \| `Failure`) |
 
-**Enrichment metrics** (emitted from `enrichment_handler.py` / `table_enricher.py`):
+**Catalog write metrics** (emitted from `metadata_writer.py`, Lambda — live):
+
+| Metric | Unit | Dimensions | Description |
+|---|---|---|---|
+| `CatalogAssetWrites` | Count | `Operation` | SageMaker Catalog assets written per discovery. `Operation` = `Create` \| `Update` — the writer has **no delete path**, so this is not full CRUD. Emitted as two aggregate datums per scan, not per asset. |
+
+**Review / acceptance metrics** (emitted from `api/database_routes.py` and
+`database/bulk_review/worker.py`, both Lambda — live):
+
+| Metric | Unit | Dimensions | Description |
+|---|---|---|---|
+| `TablesApprovedByReview` | Count | `ReviewScope` | Tables a human approved. `ReviewScope` = `Table` (single-table review) \| `Bulk` (bulk approve). Only status *transitions* count, so an idempotent re-approve does not inflate the rate. |
+| `TablesRejectedByReview` | Count | `ReviewScope` | Tables a human rejected, same scoping. |
+
+**Provisioning metrics** (emitted from `connectors/glue_connection_provisioner.py`, Lambda — live):
+
+| Metric | Unit | Dimensions | Description |
+|---|---|---|---|
+| `GlueApiThrottles` | Count | `Api` | **Terminal** Glue / Lake Formation throttles, i.e. those that survived botocore's `standard` retry mode. Retried-then-succeeded throttles are invisible here. |
+
+**Enrichment metrics** (emitted from `pipeline/enrichment_handler.py` /
+`enrichment/table_enricher.py` — **ECS task, log-only**, see the EMF note above):
 
 | Metric | Unit | Dimensions | Description |
 |---|---|---|---|
@@ -716,6 +744,40 @@ always enforced on the connection.
 - `NamespaceId`: the namespace owning the data source
 - `Stage`: `Pass1` (per-table LLM enrichment) or `Pass2` (cross-table FK inference)
 - `ErrorType`: `Throttling`, `Validation`, `Guardrail`, or `Other`
+- `SourceType`: `DATABASE`, `GLUE_DATABASE`, `JDBC_DATABASE`, … (the source's declared type)
+- `Result`: `Success` | `Failure`
+- `Operation`: `Create` | `Update`
+- `ReviewScope`: `Table` | `Bulk`
+- `Api`: the throttled AWS API name (`CreateConnection`, `GrantPermissions`, `RegisterResource`, `CreateCatalog`)
+
+#### Observability — structured scan dashboard
+
+The CloudWatch dashboard `<prefix>-sources-structured-scan` (defined in
+`infra/lib/stacks/services/sources-stack.ts`) charts the scan and enrichment
+pipeline. Widgets use `SEARCH()` so a new source subtype appears without a stack
+change.
+
+| Widget | Source |
+|---|---|
+| Scan duration p50/p90/p99, stage durations | `COA/Sources` (live) |
+| Tables discovered | `COA/Sources` (live) |
+| Connection validation Success/Failure | `COA/Sources` (live) |
+| Catalog asset writes Create/Update | `COA/Sources` (live) |
+| Review approved/rejected + acceptance rate | `COA/Sources` (live) |
+| Glue API throttles | `COA/Sources` (live) |
+| Scan state-machine outcomes, execution time, failed drill-down | `AWS/States` (AWS-native) |
+| Bedrock latency, errors, token usage | `AWS/Bedrock` (AWS-native) |
+| Overlay match rate | **dark — placeholder text, pending #114** |
+
+Two caveats are stated on the dashboard itself rather than hidden here:
+
+- **`AWS/Bedrock` is account-wide per `ModelId`.** Sources enrichment and
+  ontology induction invoke the same Haiku model, so those series are the sum of
+  both pipelines. Per-pipeline LLM attribution needs `PutMetricData` from the
+  enrichment ECS task, which it does not have.
+- **Overlay match rate has no metric yet.** #114 (SageMaker Catalog Overlay, M2)
+  is unbuilt, so that slot is an honest text placeholder instead of a query that
+  would render as a permanently empty graph.
 
 #### Engine support
 

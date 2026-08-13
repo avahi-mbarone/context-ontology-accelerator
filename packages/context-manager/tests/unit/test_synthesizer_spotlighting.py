@@ -183,3 +183,42 @@ class TestPromptBuildWithSpotlighting:
             assert "important data" in result.answer or "important  data" in result.answer
         finally:
             Synthesizer._generate_marker_token = original_generate
+
+
+@pytest.mark.unit
+class TestOutputLanguageDirective:
+    """Work item #901: the output-language directive must be present, standalone, and LAST.
+
+    The buried 'respond in the same language' requirement was insufficient under sampling,
+    causing intermittent wrong-language answers (e.g. Russian for an English question). The
+    fix promotes it to a strong standalone directive appended last in the system instruction.
+    """
+
+    async def test_system_instruction_contains_language_directive(self, mock_bedrock):
+        synth = Synthesizer(mock_bedrock, guardrail_id="gr-1")
+        await synth.synthesize("q", [_chunk("test content")], [])
+        system_arg = mock_bedrock.converse.call_args.kwargs["system"]
+
+        assert "OUTPUT LANGUAGE" in system_arg
+        # Pins to the QUESTION's language and tells the model to ignore the context's language.
+        assert "language of the user's question" in system_arg
+        assert "ignore their" in system_arg.lower() or "IGNORE their" in system_arg
+
+    async def test_language_directive_is_last(self, mock_bedrock):
+        """The directive must come AFTER the anti-injection clause so it holds the strongest
+        (final) position in the prompt."""
+        synth = Synthesizer(mock_bedrock, guardrail_id="gr-1")
+        await synth.synthesize("q", [_chunk("test content")], [])
+        system_arg = mock_bedrock.converse.call_args.kwargs["system"]
+
+        assert "SECURITY:" in system_arg
+        assert "OUTPUT LANGUAGE" in system_arg
+        assert system_arg.index("OUTPUT LANGUAGE") > system_arg.index("SECURITY:")
+
+    async def test_weak_buried_bullet_removed(self, mock_bedrock):
+        """The old mid-list bullet phrasing should no longer be the language mechanism."""
+        synth = Synthesizer(mock_bedrock, guardrail_id="gr-1")
+        await synth.synthesize("q", [_chunk("test content")], [])
+        system_arg = mock_bedrock.converse.call_args.kwargs["system"]
+
+        assert "- Respond in the same language as the user's question" not in system_arg

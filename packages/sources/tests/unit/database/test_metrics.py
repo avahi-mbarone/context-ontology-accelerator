@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 
+import structlog.testing
 from coa_sources.database.metrics import NAMESPACE, emit_metric
 
 
@@ -36,3 +37,23 @@ def test_emit_metric_drops_none_dimensions(capsys):
 
     assert "SourceType" not in doc
     assert doc["_aws"]["CloudWatchMetrics"][0]["Dimensions"] == [[]]
+
+
+class _BadDimension:
+    def __str__(self) -> str:
+        raise TypeError("not serializable")
+
+
+def test_emit_metric_failure_logs_name_and_error():
+    """A swallowed emission error must still carry the metric name and cause."""
+    with structlog.testing.capture_logs() as logs:
+        emit_metric("ScanDuration", 1.0, "Milliseconds", SourceType=_BadDimension())
+
+    assert logs == [
+        {
+            "event": "metric_emission_failed",
+            "log_level": "warning",
+            "metric_name": "ScanDuration",
+            "error": "not serializable",
+        }
+    ]

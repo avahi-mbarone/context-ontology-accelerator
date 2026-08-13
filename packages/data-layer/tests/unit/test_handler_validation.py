@@ -190,7 +190,11 @@ class TestQuerySuccess:
             "execute": False,
             "tierOverride": "premium",
             "mode": "standard",
-            "dimensions": ["a", "b"],
+            # The CONTRACT's shape (a list of DimensionFilter objects). The handler
+            # is a thin adapter — it forwards verbatim and the Context Manager
+            # normalizes/validates (issue #53). Pass-through of values this layer
+            # does not validate stays covered by tierOverride: "premium" above.
+            "dimensions": [{"name": "region", "value": "EMEA", "operator": "="}],
             "timeoutMs": 999_999,
             "includeSupporting": True,
             "maxResults": 5,
@@ -208,7 +212,7 @@ class TestQuerySuccess:
         assert payload["options"]["execute"] is False
         assert payload["options"]["tierOverride"] == "premium"
         assert payload["options"]["mode"] == "standard"
-        assert payload["options"]["dimensions"] == ["a", "b"]
+        assert payload["options"]["dimensions"] == [{"name": "region", "value": "EMEA", "operator": "="}]
         assert payload["options"]["timeoutMs"] == handler_module.REST_TIMEOUT_MS  # capped
         assert payload["options"]["includeSupporting"] is True
         assert payload["options"]["maxResults"] == 5

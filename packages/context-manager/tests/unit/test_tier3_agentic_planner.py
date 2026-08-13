@@ -296,6 +296,20 @@ class TestPlannerCallShape:
         # focus on graph exploration (not spend a step on a plain semantic search).
         assert "semantic search" in system and ("end of the session" in system or "automatically" in system)
 
+    @pytest.mark.asyncio
+    async def test_assess_system_carries_language_constraint(self):
+        """Work item #901: the assess prompt (which produces working_answer, later injected
+        into synthesis as <agent_preliminary_findings>) must instruct the model to write in
+        the sub-question's language, so it cannot seed a foreign language into synthesis."""
+        fake = FakeLLM(text='{"sufficient": true, "working_answer": "ok"}')
+        planner = BedrockStepPlanner(fake)
+        await planner.assess(sub_question=_sq("How is permission enforced?"), context=AccumulatedContext())
+        system = fake.calls[-1]["system"]
+        assert "LANGUAGE:" in system
+        assert "SAME language as the sub-question" in system
+        # Explicitly tells it to ignore the (possibly foreign-language) gathered context.
+        assert "ignore their language" in system.lower()
+
 
 # ── lazy-import invariant (Req 12.3) ────────────────────────────────────
 

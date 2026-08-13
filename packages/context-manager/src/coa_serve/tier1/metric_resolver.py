@@ -564,9 +564,15 @@ class MetricResolver:
         requires on a path (Athena) that has no native bind-parameter mechanism.
 
         Only dimensions in ``allowed`` (the metric's declared dimensions) are
-        substituted; unknown keys are ignored. A template with no placeholders is
+        substituted. A template with no placeholders and no supplied values is
         returned unchanged. Raises ValueError if a declared placeholder has no
         provided value (fail-closed: never execute a half-substituted template).
+
+        Also raises ValueError if a SUPPLIED dimension matches no placeholder in the
+        template. Ignoring it would execute the UNFILTERED metric and return the
+        global figure at confidence 1.0 — a wrong answer the caller cannot detect,
+        which is worse than bypassing Tier-1. The orchestrator catches this and
+        falls through to Tier-2/3, which can still answer the filtered question.
         """
         if not dimensions:
             # No values supplied — only valid if the template has no placeholders.
@@ -587,7 +593,19 @@ class MetricResolver:
 
         # Case-insensitive value lookup, consistent with the allowed-set check
         # (a caller passing {"Region": ...} must satisfy placeholder :region).
+        #
+        # lower() is sufficient here — and agrees with the casefold() dedup in
+        # ``InvokeRequest._normalize_dimensions`` — only because _PLACEHOLDER_RE
+        # admits ASCII names exclusively, and no ASCII character has
+        # lower() != casefold(). Widening that pattern to accept non-ASCII would
+        # split the two paths: names distinct under lower() but equal under
+        # casefold() would clear dedup and then collapse here, dropping a filter.
+        # Both halves of that invariant are pinned by
+        # test_metric_resolver.py::TestDimensionSubstitution (the ASCII-only and
+        # lower-equals-casefold tests).
         dimensions_ci = {str(k).lower(): v for k, v in dimensions.items()}
+
+        bound: set[str] = set()
 
         def _replace(match: re.Match) -> str:
             name = match.group(1) or match.group(2)
@@ -595,9 +613,18 @@ class MetricResolver:
                 raise ValueError(f"Dimension '{name}' is not a declared dimension of this metric")
             if name.lower() not in dimensions_ci:
                 raise ValueError(f"No value supplied for dimension placeholder '{name}'")
+            bound.add(name.lower())
             return _literal(dimensions_ci[name.lower()])
 
-        return _PLACEHOLDER_RE.sub(_replace, sql_template)
+        substituted = _PLACEHOLDER_RE.sub(_replace, sql_template)
+
+        # Fail closed on any supplied filter the template cannot apply, rather than
+        # silently answering the unfiltered question (see docstring).
+        unapplied = sorted(set(dimensions_ci) - bound)
+        if unapplied:
+            raise ValueError(f"Metric template has no placeholder for supplied dimensions: {unapplied}")
+
+        return substituted
 
     def list_all(self, namespace: str) -> list[dict[str, Any]]:
         """Return compact summaries of all metrics for a namespace (for Tier 3 context)."""

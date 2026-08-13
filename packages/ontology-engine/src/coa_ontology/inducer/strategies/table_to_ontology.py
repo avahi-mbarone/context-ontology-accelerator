@@ -359,17 +359,28 @@ class TableToOntologyStrategy(InductionStrategy):
                 # emit the custom coa:groundedTo — it was redundant with those
                 # axioms, and this matches how the RIGOR path grounds (subClassOf
                 # only).
-                g.add((table_cls, RDFS.subClassOf, grounding_cls))
-                if tm.match_type == "exact":
-                    g.add((table_cls, SKOS.exactMatch, grounding_cls))
-                else:
-                    g.add((table_cls, SKOS.closeMatch, grounding_cls))
-                if tm.similarity is not None:
-                    g.add((table_cls, match_confidence, Literal(tm.similarity, datatype=XSD.float)))
+                #
+                # Skip a self-match: if a class's grounding match resolves to
+                # its own IRI (grounding_cls == table_cls), a reflexive
+                # rdfs:subClassOf is a self-loop the Tier-1 TaxonomyCycleValidator
+                # reports as a cycle and a self skos:exactMatch/closeMatch is
+                # semantically vacuous — emit none of the grounding axioms.
+                if grounding_cls != table_cls:
+                    g.add((table_cls, RDFS.subClassOf, grounding_cls))
+                    if tm.match_type == "exact":
+                        g.add((table_cls, SKOS.exactMatch, grounding_cls))
+                    else:
+                        g.add((table_cls, SKOS.closeMatch, grounding_cls))
+                    if tm.similarity is not None:
+                        g.add((table_cls, match_confidence, Literal(tm.similarity, datatype=XSD.float)))
             elif tm and tm.match_type == "ambiguous" and tm.matched_class_uri:
-                g.add((table_cls, SKOS.relatedMatch, URIRef(tm.matched_class_uri)))
-                if tm.similarity is not None:
-                    g.add((table_cls, match_confidence, Literal(tm.similarity, datatype=XSD.float)))
+                related_cls = URIRef(tm.matched_class_uri)
+                # Same self-match guard as the grounded branch: a self
+                # skos:relatedMatch is vacuous and only inflates grounding signal.
+                if related_cls != table_cls:
+                    g.add((table_cls, SKOS.relatedMatch, related_cls))
+                    if tm.similarity is not None:
+                        g.add((table_cls, match_confidence, Literal(tm.similarity, datatype=XSD.float)))
 
             # Emit owl:hasKey for primary key columns
             if table.tableConstraints:

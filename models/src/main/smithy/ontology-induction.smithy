@@ -106,6 +106,22 @@ enum InductionJobStatus {
     SERIALIZING = "serializing"
 }
 
+/// Opt-in expansion for `GetInductionJob`. Omitting it returns the slim poll
+/// shape: every scalar count, `status`, `proposalId`/`duplicateOf` and `error`
+/// are preserved, but `report.matches` is returned empty so the response stays
+/// under the API's 6MB response cap (at 50k tables the full match list holds
+/// ~836k entries and makes a completed job unpollable). Per-match detail is
+/// persisted on the proposal and read via the proposal endpoints.
+enum IncludeMode {
+    /// Return the full induction report including every entry in `report.matches`.
+    /// May exceed the 6MB response cap on large inductions — intended for
+    /// debugging, not for polling.
+    REPORT = "report"
+
+    /// Synonym for `report`.
+    FULL = "full"
+}
+
 /// Discriminator distinguishing structured (table-to-ontology) induction runs
 /// from unstructured (knowledge-graph-to-ontology) induction runs. Persisted
 /// as a top-level attribute on `OntologyProposals` and induction-job items
@@ -266,6 +282,14 @@ operation GetInductionJob {
         @required
         @httpLabel
         jobId: Uuid
+
+        /// Omitted (default) returns a slim poll shape with `report.matches`
+        /// emptied so the response stays under the API-proxy Lambda's 6MB
+        /// response cap at scale (avoids 413 RequestEntityTooLarge). `report`
+        /// or `full` returns the full report including every concept match,
+        /// which may exceed that cap on large inductions. See #807.
+        @httpQuery("include")
+        include: IncludeMode
     }
 
     output := {

@@ -3,6 +3,8 @@
 
 """Unit tests for request/response models."""
 
+import json
+
 import pytest
 from coa_serve.models import (
     ConfidenceScore,
@@ -161,6 +163,330 @@ class TestRetrieverStrategyValidation:
             options={"tierOverride": 3},
         )
         assert req.options == {"tierOverride": 3}
+
+
+@pytest.mark.unit
+class TestDimensionsNormalization:
+    """``options.dimensions`` wire-shape normalization (issue #53).
+
+    The contract declares a LIST of ``DimensionFilter`` objects; Tier-1 binds
+    placeholders from a name->value MAPPING. These pin the conversion at the
+    boundary, and that malformed input is a 400-path ValueError rather than an
+    AttributeError deeper in (which surfaced as a blanket 500).
+    """
+
+    def test_contract_shape_list_normalized_to_mapping(self):
+        req = InvokeRequest(
+            query="test",
+            namespace="demo",
+            options={"dimensions": [{"name": "region", "value": "EMEA", "operator": "="}]},
+        )
+        assert req.options["dimensions"] == {"region": "EMEA"}
+
+    def test_multiple_filters_normalized(self):
+        req = InvokeRequest(
+            query="test",
+            namespace="demo",
+            options={"dimensions": [{"name": "region", "value": "EMEA"}, {"name": "year", "value": "2024"}]},
+        )
+        assert req.options["dimensions"] == {"region": "EMEA", "year": "2024"}
+
+    def test_operator_omitted_defaults_to_equality(self):
+        req = InvokeRequest(
+            query="test",
+            namespace="demo",
+            options={"dimensions": [{"name": "region", "value": "EMEA"}]},
+        )
+        assert req.options["dimensions"] == {"region": "EMEA"}
+
+    def test_dict_shape_passed_through_unchanged(self):
+        # The internal shape stays valid — substitute_dimensions' own contract.
+        req = InvokeRequest(
+            query="test",
+            namespace="demo",
+            options={"dimensions": {"region": "EMEA"}},
+        )
+        assert req.options["dimensions"] == {"region": "EMEA"}
+
+    def test_non_string_value_preserved(self):
+        # substitute_dimensions renders ints/bools as typed SQL literals.
+        req = InvokeRequest(
+            query="test",
+            namespace="demo",
+            options={"dimensions": [{"name": "year", "value": 2024}]},
+        )
+        assert req.options["dimensions"] == {"year": 2024}
+
+    def test_empty_list_drops_the_key(self):
+        # Absent-equivalent: Tier-1 must take the no-dimensions path.
+        req = InvokeRequest(query="test", namespace="demo", options={"dimensions": []})
+        assert "dimensions" not in req.options
+
+    def test_none_drops_the_key(self):
+        req = InvokeRequest(query="test", namespace="demo", options={"dimensions": None})
+        assert "dimensions" not in req.options
+
+    def test_absent_dimensions_is_valid(self):
+        req = InvokeRequest(query="test", namespace="demo", options={})
+        assert "dimensions" not in req.options
+
+    def test_non_equality_operator_rejected(self):
+        # Silently treating '>' as '=' would return a WRONG answer with a 200.
+        with pytest.raises(ValidationError, match="operator"):
+            InvokeRequest(
+                query="test",
+                namespace="demo",
+                options={"dimensions": [{"name": "year", "value": "2024", "operator": ">"}]},
+            )
+
+    def test_duplicate_dimension_rejected(self):
+        with pytest.raises(ValidationError, match="Duplicate"):
+            InvokeRequest(
+                query="test",
+                namespace="demo",
+                options={"dimensions": [{"name": "region", "value": "EMEA"}, {"name": "region", "value": "APAC"}]},
+            )
+
+    def test_duplicate_dimension_case_insensitive_rejected(self):
+        # substitute_dimensions lowercases keys, so these collide downstream.
+        with pytest.raises(ValidationError, match="Duplicate"):
+            InvokeRequest(
+                query="test",
+                namespace="demo",
+                options={"dimensions": [{"name": "Region", "value": "EMEA"}, {"name": "region", "value": "APAC"}]},
+            )
+
+    def test_list_of_bare_strings_rejected(self):
+        with pytest.raises(ValidationError, match="dimension filter"):
+            InvokeRequest(query="test", namespace="demo", options={"dimensions": ["region", "year"]})
+
+    def test_missing_name_rejected(self):
+        with pytest.raises(ValidationError, match="name"):
+            InvokeRequest(query="test", namespace="demo", options={"dimensions": [{"value": "EMEA"}]})
+
+    def test_blank_name_rejected(self):
+        with pytest.raises(ValidationError, match="name"):
+            InvokeRequest(query="test", namespace="demo", options={"dimensions": [{"name": "  ", "value": "EMEA"}]})
+
+    def test_missing_value_rejected(self):
+        with pytest.raises(ValidationError, match="value"):
+            InvokeRequest(query="test", namespace="demo", options={"dimensions": [{"name": "region"}]})
+
+    def test_scalar_dimensions_rejected(self):
+        with pytest.raises(ValidationError, match="dimensions"):
+            InvokeRequest(query="test", namespace="demo", options={"dimensions": "region=EMEA"})
+
+    def test_null_value_rejected(self):
+        # substitute_dimensions would bind the literal string 'None' — a filter on
+        # the wrong value, returned with a 200.
+        with pytest.raises(ValidationError, match="value"):
+            InvokeRequest(query="test", namespace="demo", options={"dimensions": [{"name": "region", "value": None}]})
+
+    def test_object_value_rejected(self):
+        # A Python repr would otherwise leak into the SQL literal.
+        with pytest.raises(ValidationError, match="value"):
+            InvokeRequest(
+                query="test", namespace="demo", options={"dimensions": [{"name": "region", "value": {"a": 1}}]}
+            )
+
+    def test_array_value_rejected(self):
+        with pytest.raises(ValidationError, match="value"):
+            InvokeRequest(
+                query="test", namespace="demo", options={"dimensions": [{"name": "region", "value": ["A", "B"]}]}
+            )
+
+    def test_name_is_trimmed(self):
+        # An untrimmed key never matches the ':region' placeholder, so the filter
+        # would be silently dropped and Tier-1 bypassed as if unfiltered.
+        req = InvokeRequest(
+            query="test", namespace="demo", options={"dimensions": [{"name": "  region  ", "value": "EMEA"}]}
+        )
+        assert req.options["dimensions"] == {"region": "EMEA"}
+
+    def test_duplicate_detected_after_trimming(self):
+        with pytest.raises(ValidationError, match="Duplicate"):
+            InvokeRequest(
+                query="test",
+                namespace="demo",
+                options={"dimensions": [{"name": " region", "value": "EMEA"}, {"name": "region ", "value": "APAC"}]},
+            )
+
+    def test_empty_dict_drops_the_key(self):
+        # Absent-equivalent, same as an empty list.
+        req = InvokeRequest(query="test", namespace="demo", options={"dimensions": {}})
+        assert "dimensions" not in req.options
+
+    # --- the dict shape gets the SAME per-entry checks as the list shape ---
+    # A dict reaches here from internal callers AND over both transports (the SSE
+    # path forwards options verbatim; the REST handler forwards a top-level
+    # "dimensions" object unchanged, and there is no API Gateway request
+    # validator). A free pass would let it bind 'None' or a Python repr into SQL.
+
+    def test_dict_shape_null_value_rejected(self):
+        with pytest.raises(ValidationError, match="value"):
+            InvokeRequest(query="test", namespace="demo", options={"dimensions": {"region": None}})
+
+    def test_dict_shape_object_value_rejected(self):
+        with pytest.raises(ValidationError, match="value"):
+            InvokeRequest(query="test", namespace="demo", options={"dimensions": {"region": {"a": 1}}})
+
+    def test_dict_shape_array_value_rejected(self):
+        with pytest.raises(ValidationError, match="value"):
+            InvokeRequest(query="test", namespace="demo", options={"dimensions": {"region": ["A", "B"]}})
+
+    def test_dict_shape_duplicate_case_insensitive_rejected(self):
+        with pytest.raises(ValidationError, match="Duplicate"):
+            InvokeRequest(query="test", namespace="demo", options={"dimensions": {"Region": "EMEA", "region": "APAC"}})
+
+    def test_dict_shape_blank_name_rejected(self):
+        with pytest.raises(ValidationError, match="name"):
+            InvokeRequest(query="test", namespace="demo", options={"dimensions": {"  ": "EMEA"}})
+
+    def test_dict_shape_name_is_trimmed(self):
+        req = InvokeRequest(query="test", namespace="demo", options={"dimensions": {"  region  ": "EMEA"}})
+        assert req.options["dimensions"] == {"region": "EMEA"}
+
+    # --- numeric edge cases ---
+
+    def test_nan_value_rejected(self):
+        # json.loads accepts the non-standard NaN/Infinity tokens, and sqlglot
+        # renders them as the BARE words nan/inf — which SQL engines parse as a
+        # COLUMN reference, silently comparing two columns instead of filtering.
+        for token in ("NaN", "Infinity", "-Infinity"):
+            value = json.loads(f'{{"v": {token}}}')["v"]
+            with pytest.raises(ValidationError, match="finite"):
+                InvokeRequest(query="test", namespace="demo", options={"dimensions": [{"name": "n", "value": value}]})
+
+    def test_finite_float_value_accepted(self):
+        req = InvokeRequest(query="test", namespace="demo", options={"dimensions": [{"name": "rate", "value": 1.5}]})
+        assert req.options["dimensions"] == {"rate": 1.5}
+
+    def test_bool_value_accepted(self):
+        # bool is checked BEFORE int/float: bool IS an int in Python, and
+        # isfinite() must not run on it. substitute_dimensions renders TRUE/FALSE.
+        req = InvokeRequest(query="test", namespace="demo", options={"dimensions": [{"name": "active", "value": True}]})
+        assert req.options["dimensions"] == {"active": True}
+
+    # --- operator ---
+
+    def test_blank_operator_treated_as_absent(self):
+        # The contract documents operator as optional (defaulting to equality), and
+        # a generated client may serialize an unset optional string as "" — that
+        # must not 400.
+        for operator in ("", "  ", "=", " = "):
+            req = InvokeRequest(
+                query="test",
+                namespace="demo",
+                options={"dimensions": [{"name": "region", "value": "EMEA", "operator": operator}]},
+            )
+            assert req.options["dimensions"] == {"region": "EMEA"}
+
+    def test_non_string_operator_rejected(self):
+        with pytest.raises(ValidationError, match="operator"):
+            InvokeRequest(
+                query="test",
+                namespace="demo",
+                options={"dimensions": [{"name": "region", "value": "EMEA", "operator": 5}]},
+            )
+
+    def test_word_operator_rejected(self):
+        with pytest.raises(ValidationError, match="operator"):
+            InvokeRequest(
+                query="test",
+                namespace="demo",
+                options={"dimensions": [{"name": "region", "value": "EMEA", "operator": "eq"}]},
+            )
+
+    def test_null_operator_treated_as_absent(self):
+        req = InvokeRequest(
+            query="test",
+            namespace="demo",
+            options={"dimensions": [{"name": "region", "value": "EMEA", "operator": None}]},
+        )
+        assert req.options["dimensions"] == {"region": "EMEA"}
+
+    def test_coexists_with_other_option_validators(self):
+        # Four @field_validator("options") hooks chain on the same field; the
+        # dimensions one must not drop the keys the others validate.
+        req = InvokeRequest(
+            query="test",
+            namespace="demo",
+            options={
+                "dimensions": [{"name": "region", "value": "EMEA"}],
+                "mode": "agentic",
+                "excludeTools": ["vector_search"],
+                "retrieverStrategy": "chunk_based_semantic",
+                "tierOverride": 1,
+            },
+        )
+        assert req.options["dimensions"] == {"region": "EMEA"}
+        assert req.options["mode"] == "agentic"
+        assert req.options["excludeTools"] == ["vector_search"]
+        assert req.options["retrieverStrategy"] == "chunk_based_semantic"
+        assert req.options["tierOverride"] == 1
+
+    # --- bounds on a single filter (options is a free-form dict) ---
+
+    def test_oversized_name_rejected(self):
+        with pytest.raises(ValidationError, match="at most 128 characters"):
+            InvokeRequest(query="test", namespace="demo", options={"dimensions": [{"name": "n" * 129, "value": "v"}]})
+
+    def test_name_at_max_length_accepted(self):
+        name = "n" * 128
+        req = InvokeRequest(query="test", namespace="demo", options={"dimensions": [{"name": name, "value": "v"}]})
+        assert req.options["dimensions"] == {name: "v"}
+
+    def test_oversized_value_rejected(self):
+        with pytest.raises(ValidationError, match="at most 4000 characters"):
+            InvokeRequest(
+                query="test", namespace="demo", options={"dimensions": [{"name": "region", "value": "v" * 4001}]}
+            )
+
+    def test_value_at_max_length_accepted(self):
+        value = "v" * 4000
+        req = InvokeRequest(
+            query="test", namespace="demo", options={"dimensions": [{"name": "region", "value": value}]}
+        )
+        assert req.options["dimensions"] == {"region": value}
+
+    def test_oversized_name_rejected_in_dict_shape(self):
+        with pytest.raises(ValidationError, match="at most 128 characters"):
+            InvokeRequest(query="test", namespace="demo", options={"dimensions": {"n" * 129: "v"}})
+
+    def test_error_message_does_not_echo_unbounded_input(self):
+        # The rejected value is attacker-controlled and unbounded, so interpolating
+        # it whole would let a caller inflate the exception — and anything derived
+        # from it — to the size of their payload.
+        payload = {"dimensions": [{"name": "region", "value": {"k": "A" * 100_000}}]}
+        with pytest.raises(ValidationError) as exc:
+            InvokeRequest(query="test", namespace="demo", options=payload)
+        rendered = str(exc.value)
+        assert "truncated" in rendered
+        # Bounded well below the input size. Pydantic appends its own input_value
+        # echo, so this asserts an order of magnitude, not an exact ceiling.
+        assert len(rendered) < 5_000, len(rendered)
+
+    def test_missing_name_and_missing_value_are_distinct_messages(self):
+        # An ABSENT field must not be reported as a malformed one: "'name' is
+        # required" tells the caller to add it, where "must be a non-empty string"
+        # would suggest what they sent was the wrong shape.
+        with pytest.raises(ValidationError, match="'name' is required"):
+            InvokeRequest(query="test", namespace="demo", options={"dimensions": [{"value": "EMEA"}]})
+        with pytest.raises(ValidationError, match="'value' is required"):
+            InvokeRequest(query="test", namespace="demo", options={"dimensions": [{"name": "region"}]})
+
+    def test_present_but_invalid_name_reports_shape_not_absence(self):
+        with pytest.raises(ValidationError, match="must be a non-empty string"):
+            InvokeRequest(query="test", namespace="demo", options={"dimensions": [{"name": 5, "value": "EMEA"}]})
+
+    def test_callers_options_dict_not_mutated(self):
+        # The validator must not rewrite the dict the caller passed in: main.py
+        # hands over payload["options"], and a retry or a log of the original
+        # payload would otherwise see the normalized shape.
+        caller_options = {"dimensions": [{"name": "region", "value": "EMEA"}]}
+        req = InvokeRequest(query="test", namespace="demo", options=caller_options)
+        assert caller_options == {"dimensions": [{"name": "region", "value": "EMEA"}]}
+        assert req.options["dimensions"] == {"region": "EMEA"}
 
 
 @pytest.mark.unit

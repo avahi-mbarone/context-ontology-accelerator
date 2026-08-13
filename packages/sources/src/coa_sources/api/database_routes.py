@@ -863,6 +863,14 @@ def _handle_review_table(event: dict[str, Any], namespace_id: str, source_id: st
             return api_response(500, {"error": "Failed to write review"})
         if old_table_status != new_table_status:
             _adjust_approval_counter(namespace_id, source_id, _approval_delta(old_table_status, new_table_status))
+            # Acceptance rate, single-table half. Only transitions count — a
+            # re-approve of an already-APPROVED table is not a new decision.
+            from coa_control_plane_server.models.review_status import ReviewStatus
+
+            if new_table_status == ReviewStatus.APPROVED:
+                emit_metric("TablesApprovedByReview", 1, "Count", ReviewScope="Table")
+            elif new_table_status == ReviewStatus.REJECTED:
+                emit_metric("TablesRejectedByReview", 1, "Count", ReviewScope="Table")
 
     return api_response(200, {"tableId": table_id, "reviewStatus": new_table_status})
 

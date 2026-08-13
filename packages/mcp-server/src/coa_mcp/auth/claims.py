@@ -41,6 +41,7 @@ class CallerIdentity:
     namespaces: list[str]
     roles: list[str]
     raw_claims: dict
+    email: str = ""
 
 
 class ClaimsExtractionError(Exception):
@@ -123,6 +124,7 @@ def extract_caller_identity(authorization_header: str | None) -> CallerIdentity:
         namespaces=namespaces,
         roles=roles,
         raw_claims=claims,
+        email=claims.get("email", "") or "",
     )
 
 

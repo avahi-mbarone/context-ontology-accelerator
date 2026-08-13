@@ -39,6 +39,8 @@ import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
+from coa_sources.database.metrics import emit_metric
+
 logger = logging.getLogger(__name__)
 
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
@@ -102,6 +104,33 @@ _IPV4_RE = re.compile(r"^(\d{1,3}\.){3}\d{1,3}$")
 _DATABASE_RE = re.compile(r"^[A-Za-z0-9_\-]{1,128}$")
 _IAM_ROLE_ARN_RE = re.compile(r"^arn:(aws|aws-us-gov|aws-cn):iam::\d+:role/.+$")
 
+# Terminal throttle codes across Glue / Lake Formation / STS.
+_THROTTLE_CODES = frozenset(
+    {
+        "ThrottlingException",
+        "Throttling",
+        "ThrottledException",
+        "TooManyRequestsException",
+        "RequestLimitExceeded",
+        "RequestThrottled",
+        "RequestThrottledException",
+        "SlowDown",
+    }
+)
+
+
+def _count_if_throttle(exc: ClientError, api: str) -> None:
+    """Emit ``GlueApiThrottles`` when ``exc`` is a terminal throttle.
+
+    ponytail: counts only throttles that survive botocore's standard retry mode
+    (i.e. the ones that actually failed the call). Retried-then-succeeded
+    throttles are invisible here — surfacing those needs a botocore event hook
+    on ``needs-retry.*``, which is not worth the wiring until this metric shows
+    real pressure.
+    """
+    if exc.response.get("Error", {}).get("Code") in _THROTTLE_CODES:
+        emit_metric("GlueApiThrottles", 1, "Count", Api=api)
+
 
 def _lf_grant(
     lf_client, principal: dict, resource: dict, permissions: list[str], *, database_name: str, resource_type: str
@@ -114,6 +143,7 @@ def _lf_grant(
         code = exc.response.get("Error", {}).get("Code")
         if code in ("AlreadyExistsException", "InvalidInputException"):
             return True
+        _count_if_throttle(exc, "GrantPermissions")
         logger.warning(
             "lf_native_grant_failed",
             extra={"database": database_name, "resource_type": resource_type},
@@ -295,6 +325,7 @@ def provision_federated_catalog(
     except glue.exceptions.AlreadyExistsException:
         logger.info("glue_connection_already_exists", extra={"connection_name": name})
     except ClientError as exc:
+        _count_if_throttle(exc, "CreateConnection")
         raise RuntimeError(f"Failed to create Glue connection {name}: {exc}") from exc
 
     # ── Step 1b: Poll the managed connection to READY and surface the real error ──
@@ -351,6 +382,7 @@ def provision_federated_catalog(
         if exc.response.get("Error", {}).get("Code") == "AlreadyExistsException":
             logger.info("lf_resource_already_registered", extra={"connection_name": name})
         else:
+            _count_if_throttle(exc, "RegisterResource")
             _rollback(name, conn_arn, drop_catalog=False, drop_lf=False)
             raise RuntimeError(f"Failed to register LF resource for {name}: {exc}") from exc
 
@@ -368,6 +400,7 @@ def provision_federated_catalog(
     except glue.exceptions.AlreadyExistsException:
         logger.info("glue_federated_catalog_already_exists", extra={"catalog_name": name})
     except ClientError as exc:
+        _count_if_throttle(exc, "CreateCatalog")
         _rollback(name, conn_arn, drop_catalog=False, drop_lf=True)
         raise RuntimeError(f"Failed to create federated catalog {name}: {exc}") from exc
 
@@ -386,6 +419,7 @@ def provision_federated_catalog(
         if code in ("AlreadyExistsException", "InvalidInputException"):
             logger.info("lf_database_grant_already_exists", extra={"catalog_name": name})
         else:
+            _count_if_throttle(exc, "GrantPermissions")
             raise RuntimeError(f"Failed to grant LF permissions on {name}/{public_schema_name}: {exc}") from exc
 
     return {"glueConnectionName": name, "athenaDataCatalogName": name}
@@ -476,7 +510,8 @@ def grant_consumer_select(*, catalog_name: str, schemas: list[str], principal_ar
                 Permissions=["SELECT", "DESCRIBE"],
             )
             logger.info("lf_grant_applied", extra={"catalog": catalog_name, "schema": schema})
-        except ClientError:
+        except ClientError as exc:
+            _count_if_throttle(exc, "GrantPermissions")
             logger.warning("lf_grant_failed", extra={"catalog": catalog_name, "schema": schema}, exc_info=True)
             all_granted = False
     return all_granted

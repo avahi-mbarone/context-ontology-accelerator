@@ -1590,6 +1590,43 @@ class TestReviewTable:
             amount=1,
         )
 
+    # ── #116 enrichment acceptance rate (ReviewScope=Table) ──────────────
+    # The sources-structured-scan dashboard SEARCHes
+    # {COA/Sources,ReviewScope} for these exact metric names, so a
+    # rename on either side silently darkens the widget.
+
+    def _review_and_capture_metrics(self, _review_env, *, decision, table_status):
+        _mock_single_asset_load(
+            _review_env["smus"],
+            table_id=self._TABLE_ID,
+            form_content=_serialize_table(
+                table_status=table_status,
+                columns=[{"name": "col_a", "review_status": table_status}],
+            ),
+        )
+        with patch(f"{_DR}.emit_metric") as mock_emit:
+            status, _ = _parse(
+                _dr._handle_review_table(self._event({"decision": decision}), _NAMESPACE_ID, _SOURCE_ID, self._TABLE_ID)
+            )
+        assert status == 200
+        return [(c.args[0], c.args[1], c.kwargs) for c in mock_emit.call_args_list if c.args]
+
+    def test_approve_transition_emits_tables_approved_metric(self, _review_env):
+        emitted = self._review_and_capture_metrics(_review_env, decision="APPROVED", table_status="PENDING_REVIEW")
+        assert ("TablesApprovedByReview", 1, {"ReviewScope": "Table"}) in emitted
+        assert not any(name == "TablesRejectedByReview" for name, _, _ in emitted)
+
+    def test_reject_transition_emits_tables_rejected_metric(self, _review_env):
+        emitted = self._review_and_capture_metrics(_review_env, decision="REJECTED", table_status="PENDING_REVIEW")
+        assert ("TablesRejectedByReview", 1, {"ReviewScope": "Table"}) in emitted
+        assert not any(name == "TablesApprovedByReview" for name, _, _ in emitted)
+
+    def test_idempotent_review_emits_no_acceptance_metric(self, _review_env):
+        """Re-approving an already-APPROVED table is not a new human decision —
+        counting it would inflate the acceptance rate on every retry."""
+        emitted = self._review_and_capture_metrics(_review_env, decision="APPROVED", table_status="APPROVED")
+        assert not any(name in ("TablesApprovedByReview", "TablesRejectedByReview") for name, _, _ in emitted)
+
     def test_approve_cascades_pending_columns_to_approved(self, _review_env):
         # Per-asset APPROVE cascades PENDING columns to APPROVED (children
         # first), then approves the table — no 409 precondition anymore.
@@ -1739,9 +1776,9 @@ class TestReviewTable:
         # Request still succeeds despite the counter failure.
         assert status == 200
         assert body["reviewStatus"] == "APPROVED"
-        # Drift is made observable.
-        mock_emit.assert_called_once()
-        assert mock_emit.call_args[0][0] == "ApprovalCounterUpdateFailed"
+        # Drift is made observable. (The same path also emits the #116
+        # acceptance-rate metric, so assert on the name rather than call count.)
+        assert "ApprovalCounterUpdateFailed" in [c.args[0] for c in mock_emit.call_args_list if c.args]
 
     def test_approve_is_noop_on_columns_when_all_terminal(self, _review_env):
         # With the precondition that all columns must already be terminal,

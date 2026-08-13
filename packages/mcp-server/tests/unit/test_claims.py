@@ -190,3 +190,47 @@ class TestCreateTestToken:
         assert identity.agent_id == "test-agent"
         assert identity.namespaces == ["default"]
         assert identity.roles == ["viewer"]
+
+
+@pytest.mark.unit
+class TestEmailExtraction:
+    """Email is threaded from the verified JWT into CallerIdentity so grants
+    keyed on ``User::<email>`` (the UI-created default) resolve for a caller
+    whose ``sub`` is an opaque Cognito UUID.
+    """
+
+    def test_valid_token_extracts_email(self):
+        token = create_test_token(user_id="uuid-1234", email="alice@example.com")
+        identity = extract_caller_identity(f"Bearer {token}")
+        assert identity.email == "alice@example.com"
+
+    def test_missing_email_defaults_to_empty_string(self):
+        # Cognito access tokens do not carry the email claim. Absence must
+        # produce ``""``, not ``None`` — downstream grant resolution treats an
+        # empty string as "no email lookup" (build_principal_keys skips empty
+        # identifiers), whereas ``None`` would break the type contract.
+        token = create_test_token(user_id="uuid-1234")  # no email kwarg
+        identity = extract_caller_identity(f"Bearer {token}")
+        assert identity.email == ""
+
+    def test_none_email_coalesced_to_empty_string(self):
+        """An explicit ``"email": None`` in the JWT (e.g. some IdPs emit this
+        for unverified/hidden emails) is coalesced to ``""`` via the ``or ""``
+        guard in extract_caller_identity — otherwise it would land on
+        CallerIdentity as ``None`` and later crash sanitize_principal_key,
+        which calls ``urllib.parse.quote`` on the value.
+        """
+        token = jwt.encode(
+            {
+                "sub": "uuid-1234",
+                "email": None,
+                "iss": _TEST_ISSUER,
+                "aud": _TEST_AUDIENCE,
+                "exp": int(time.time()) + 3600,
+            },
+            _private_key,
+            algorithm="RS256",
+            headers={"kid": _TEST_KID},
+        )
+        identity = extract_caller_identity(f"Bearer {token}")
+        assert identity.email == ""
