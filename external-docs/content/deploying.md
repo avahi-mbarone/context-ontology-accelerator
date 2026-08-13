@@ -19,6 +19,31 @@ This guide walks you through deploying Context Ontology Accelerator into your AW
 
 Context Ontology Accelerator deploys into a single AWS account and region. Ensure the deploying principal has `AdministratorAccess` or equivalent permissions for the initial deployment.
 
+### Service Quotas
+
+Two account service quotas can block a deploy. The preflight check
+(`scripts/preflight-deploy.sh`) validates both before CDK runs, but on a fresh
+or sandbox account it is worth confirming them up front:
+
+| Quota | Code | Requirement | If too low |
+|-------|------|-------------|------------|
+| **VPC** (VPCs per Region) | `L-F678F1CE` | Room for one more VPC in the target region | Delete an unused VPC or request an increase |
+| **Lambda** (Concurrent executions) | `L-B99A9384` | Enough unreserved headroom to reserve the deployment's Lambda concurrency (default 5 × 2 functions = 10) above Lambda's account-wide minimum of 10 | Request an increase, **or** deploy with `SCL_LAMBDA_RESERVED_CONCURRENCY=0` (see [Lambda reserved concurrency](#lambda-reserved-concurrency)) |
+
+Check them with:
+
+```bash
+aws ec2 describe-vpcs --query 'length(Vpcs)' --output text
+aws lambda get-account-settings \
+  --query 'AccountLimit.[ConcurrentExecutions,UnreservedConcurrentExecutions]'
+```
+
+New accounts sometimes have the Lambda concurrent-executions quota at the
+reduced default of `10`, on which reserving *any* concurrency is rejected.
+Raising it (`L-B99A9384`) opens an AWS Support case rather than being granted
+immediately, so if you are on a reduced-quota account and want to deploy now,
+disable the reservations with `SCL_LAMBDA_RESERVED_CONCURRENCY=0`.
+
 ### Region Selection
 
 Context Ontology Accelerator defaults to `us-east-1` if no region is set. To deploy to a different region, export `AWS_DEFAULT_REGION` (used by the AWS CLI and preflight checks) **and** `CDK_DEFAULT_REGION` (used by CDK/`bin/app.ts` for AZ resolution and region-specific config) before running any deploy command:
@@ -254,6 +279,24 @@ SCL_DB_SCAN_ENRICHMENT_TIMEOUT_MINUTES=180 make deploy-dev
 ```
 
 The value is minutes and must be a positive number; CDK fails synth otherwise. On a direct `cdk deploy` (rather than the `make`/`deploy.sh` path) pass it as CDK context instead — `--context dbScanEnrichmentTimeoutMinutes=180`, or set it in the `context` block of `infra/cdk.json`. The Step Functions state-machine ceiling is derived automatically as this value plus two minutes, so the per-task deadline always trips first and routes the source to `SCAN_FAILED`.
+
+#### Lambda reserved concurrency
+
+Two Lambdas — the VKG reloader and the document preprocessor — reserve concurrent executions (default **5** each) to bound their blast radius. On an account whose **Lambda concurrent-executions quota** (`L-B99A9384`) is at the reduced default of **10** — which AWS applies to some new accounts — reserving *any* concurrency is rejected, because it would drop unreserved capacity below Lambda's account-wide minimum of 10. The deploy runs for ~30 minutes and then fails and rolls back on `coa-dev-vkg` (and `coa-dev-sources` after it) with:
+
+```
+Specified ReservedConcurrentExecutions for function decreases account's
+UnreservedConcurrentExecution below its minimum value of [10].
+```
+
+The preflight check (`scripts/preflight-deploy.sh`) catches this before CDK runs. Raising the quota via `request-service-quota-increase` on `L-B99A9384` opens an AWS Support case rather than being granted immediately, so the fast unblock is to deploy without the reservations:
+
+```bash
+# Deploy without reserving Lambda concurrency (default is 5 per function)
+SCL_LAMBDA_RESERVED_CONCURRENCY=0 make deploy-dev
+```
+
+The value must be a non-negative integer; CDK fails synth otherwise. `0` (or unset via context) omits the reservation entirely — the functions then draw from the shared unreserved pool with no dedicated guarantee or cap, which is fine for a single-tenant evaluation. On a direct `cdk deploy`, pass it as context instead — `--context lambda_reserved_concurrency=0`, or set it in the `context` block of `infra/cdk.json`.
 
 ### Internal Environment Variables
 

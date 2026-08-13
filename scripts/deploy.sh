@@ -17,6 +17,9 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 #   SCL_API_DOMAIN, SCL_API_CERT_ARN (API region), SCL_HOSTED_ZONE_ID
 # Database scan enrichment timeout (minutes; raise for very large sources):
 #   SCL_DB_SCAN_ENRICHMENT_TIMEOUT_MINUTES=180 make deploy-dev
+# Lambda reserved concurrency (default 5; set 0 to disable reserving on
+# accounts whose Lambda concurrent-executions quota is the reduced default 10):
+#   SCL_LAMBDA_RESERVED_CONCURRENCY=0 make deploy-dev
 # SMUS admin principal(s) — required, comma-separated IAM role/user ARN(s)
 # that human admins federate into (e.g. your IAM Identity Center
 # permission-set role): SCL_SMUS_ADMIN_ARNS=arn:aws:iam::123456789012:role/... make deploy-dev
@@ -30,6 +33,7 @@ CONTEXT="--context env=$ENV"
 [ -n "${SCL_API_CERT_ARN:-}" ]  && CONTEXT="$CONTEXT --context api_cert_arn=$SCL_API_CERT_ARN"
 [ -n "${SCL_HOSTED_ZONE_ID:-}" ] && CONTEXT="$CONTEXT --context hosted_zone_id=$SCL_HOSTED_ZONE_ID"
 [ -n "${SCL_DB_SCAN_ENRICHMENT_TIMEOUT_MINUTES:-}" ] && CONTEXT="$CONTEXT --context dbScanEnrichmentTimeoutMinutes=$SCL_DB_SCAN_ENRICHMENT_TIMEOUT_MINUTES"
+[ -n "${SCL_LAMBDA_RESERVED_CONCURRENCY:-}" ] && CONTEXT="$CONTEXT --context lambda_reserved_concurrency=$SCL_LAMBDA_RESERVED_CONCURRENCY"
 [ -n "${SCL_SMUS_ADMIN_ARNS:-}" ] && CONTEXT="$CONTEXT --context smus_admin_principal_arns=$SCL_SMUS_ADMIN_ARNS"
 
 # ── Preflight: SMUS admin principal ──────────────────────────────────────

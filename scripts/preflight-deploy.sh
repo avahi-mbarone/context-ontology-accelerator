@@ -142,7 +142,42 @@ else
   warn "AWS credentials not available — skipping VPC limit check"
 fi
 
-# ── 7. Stale cdk.context.json ────────────────────────────────────────────
+# ── 7. Lambda reserved-concurrency headroom (requires AWS credentials) ────
+# The VKG-reload and doc-preprocessing Lambdas each reserve
+# `lambda_reserved_concurrency` (default 5) executions. Lambda refuses ANY
+# reservation that would drop account-wide unreserved concurrency below its
+# floor of 10 — the reduced default AWS applies to some new accounts. We check
+# ACTUAL unreserved headroom (not the raw L-B99A9384 quota) because other
+# functions' existing reservations already reduce it. Without this, deploy runs
+# ~30 min then fails and rolls back on coa-dev-vkg / coa-dev-sources.
+RESERVED_PER_FN="${SCL_LAMBDA_RESERVED_CONCURRENCY:-5}"
+if [[ "$RESERVED_PER_FN" =~ ^[0-9]+$ ]] && [ "$RESERVED_PER_FN" -gt 0 ]; then
+  if command -v aws >/dev/null 2>&1 && aws sts get-caller-identity >/dev/null 2>&1; then
+    NUM_RESERVED_FNS=2 # VkgReloadFn + SourcesPreProcessingFn
+    NEEDED=$((RESERVED_PER_FN * NUM_RESERVED_FNS))
+    MIN_UNRESERVED=10 # Lambda's hard floor; binding on reduced-quota accounts
+    UNRESERVED=$(aws lambda get-account-settings --region "$REGION" \
+      --query 'AccountLimit.UnreservedConcurrentExecutions' --output text 2>/dev/null || echo "?")
+    if [[ "$UNRESERVED" =~ ^[0-9]+$ ]]; then
+      if [ "$((UNRESERVED - NEEDED))" -lt "$MIN_UNRESERVED" ]; then
+        err "Lambda concurrency headroom too low in $REGION: $UNRESERVED unreserved, deployment reserves $NEEDED."
+        err "Lambda rejects reservations that leave fewer than $MIN_UNRESERVED unreserved executions account-wide."
+        err "Fix: request an increase for quota L-B99A9384, or deploy without reservations:"
+        err "  SCL_LAMBDA_RESERVED_CONCURRENCY=0 make deploy-dev"
+      else
+        ok "Lambda concurrency headroom: $UNRESERVED unreserved, reserving $NEEDED in $REGION"
+      fi
+    else
+      warn "Could not read Lambda account settings — skipping concurrency headroom check"
+    fi
+  else
+    warn "AWS credentials not available — skipping Lambda concurrency check"
+  fi
+else
+  ok "Lambda reserved concurrency disabled (lambda_reserved_concurrency=0) — skipping headroom check"
+fi
+
+# ── 8. Stale cdk.context.json ────────────────────────────────────────────
 if [ -f "$REPO_ROOT/infra/cdk.context.json" ]; then
   warn "infra/cdk.context.json exists — cached lookups may be stale."
   warn "If deploy fails with 'resource not found', delete it: rm infra/cdk.context.json"

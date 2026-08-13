@@ -19,7 +19,10 @@ import type { IAlarmActionStrategy } from "cdk-monitoring-constructs/lib/common/
 import { SCLStack } from "../../constructs/scl-stack";
 import { SclMonitoring } from "../../constructs";
 import { BRAND } from "../../constants";
-import { resolveContext } from "../../context";
+import {
+  resolveContext,
+  resolveLambdaReservedConcurrency,
+} from "../../context";
 import { NetworkStack } from "../foundation/network-stack";
 
 export interface VkgStackProps extends cdk.StackProps {
@@ -214,6 +217,11 @@ export class VkgStack extends SCLStack {
     // ================================================================
     // Ontology Reload (EventBridge → Lambda → ECS forceNewDeployment)
     // ================================================================
+    // Reserved concurrency bounds this function's blast radius (it drives ECS
+    // service updates and is effectively serial). Configurable via
+    // `lambda_reserved_concurrency`; `0`/undefined omits the reservation so the
+    // stack deploys on reduced-quota accounts (see resolveLambdaReservedConcurrency).
+    const reservedConcurrency = resolveLambdaReservedConcurrency(this.node);
     const reloadFn = new lambda.Function(this, "VkgReloadFn", {
       functionName: this.prefixed("vkg-reload"),
       runtime: lambda.Runtime.PYTHON_3_12,
@@ -233,7 +241,7 @@ export class VkgStack extends SCLStack {
         VKG_IMAGE_PARAM_NAME: vkgImageParam.parameterName,
       },
       timeout: cdk.Duration.seconds(30),
-      reservedConcurrentExecutions: 5,
+      reservedConcurrentExecutions: reservedConcurrency,
       logRetention: logs.RetentionDays.ONE_MONTH,
       vpc,
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },

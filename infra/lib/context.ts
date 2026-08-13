@@ -8,6 +8,7 @@ import {
   CTX_PROJECT_TAG,
   CTX_GRAPH_BASE_URI,
   CTX_EVENT_SOURCE_PREFIX,
+  CTX_LAMBDA_RESERVED_CONCURRENCY,
   DEFAULT_RESOURCE_PREFIX,
   DEFAULT_ENV,
   DEFAULT_PROJECT_TAG,
@@ -15,6 +16,7 @@ import {
   DEFAULT_URN_PREFIX,
   DEFAULT_VOCAB_PREFIX,
   DEFAULT_DZ_TYPE_PREFIX,
+  DEFAULT_LAMBDA_RESERVED_CONCURRENCY,
 } from "./constants";
 
 /** Resolved context values available to any stack or construct. */
@@ -92,4 +94,31 @@ export function resolveContext(node: Node): ResolvedContext {
 export function prefixed(node: Node, name: string): string {
   const { prefix, envName } = resolveContext(node);
   return `${prefix}-${envName}-${name}`;
+}
+
+/**
+ * Resolve the `lambda_reserved_concurrency` context value shared by the VKG
+ * reload and doc-preprocessing Lambdas.
+ *
+ * Returns the reserved-concurrency count to apply, or `undefined` meaning "do
+ * not reserve" (pass straight to `reservedConcurrentExecutions` — CDK omits the
+ * property when it is `undefined`). A value of `0` maps to `undefined` so that
+ * on reduced-quota accounts the reservation can be disabled without CDK
+ * rejecting a literal `0` reservation.
+ *
+ * Validates that the value is a non-negative integer and throws at synth time
+ * otherwise, matching the fail-fast behavior of the other numeric context
+ * knobs (e.g. `dbScanEnrichmentTimeoutMinutes`).
+ */
+export function resolveLambdaReservedConcurrency(
+  node: Node,
+): number | undefined {
+  const raw: unknown = node.tryGetContext(CTX_LAMBDA_RESERVED_CONCURRENCY);
+  const value = Number(raw ?? DEFAULT_LAMBDA_RESERVED_CONCURRENCY);
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error(
+      `${CTX_LAMBDA_RESERVED_CONCURRENCY} must be a non-negative integer, got: ${String(raw)}`,
+    );
+  }
+  return value === 0 ? undefined : value;
 }

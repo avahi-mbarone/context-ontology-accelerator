@@ -25,7 +25,10 @@ import { AccessLogsBucket } from "../../constructs";
 import { DynamoDBTable } from "../../constructs/dynamodb-table";
 import { LakeFormationAdmin } from "../../constructs/lakeformation-admin";
 import { SclMonitoring } from "../../constructs";
-import { resolveContext } from "../../context";
+import {
+  resolveContext,
+  resolveLambdaReservedConcurrency,
+} from "../../context";
 import { Paths, fromRoot } from "../../paths";
 import { bundlePython } from "../../utils/python-bundling";
 import { NetworkStack } from "../foundation/network-stack";
@@ -1394,7 +1397,13 @@ export class SourcesStack extends SCLStack {
         code: preprocessingCode,
         timeout: cdk.Duration.minutes(15),
         memorySize: 3008,
-        reservedConcurrentExecutions: 5,
+        // Reserved concurrency caps document-preprocessing fan-out (bounds
+        // parallel heavy invocations); it is not a correctness requirement.
+        // Configurable via `lambda_reserved_concurrency`; `0`/undefined omits
+        // the reservation so the stack deploys on reduced-quota accounts.
+        reservedConcurrentExecutions: resolveLambdaReservedConcurrency(
+          this.node,
+        ),
         environment: {
           BUCKET_NAME: sourcesBucket.bucketName,
           DOC_SOURCES_TABLE: this.sourcesTable.tableName,
