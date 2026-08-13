@@ -126,3 +126,103 @@ def check_source_approved(namespace: str, data_source_id: str) -> str | None:
             f"metrics can only reference APPROVED or COMPLETED sources"
         )
     return None
+
+
+def check_source_table_exists(namespace: str, data_source_id: str, source_table: str) -> str | None:
+    """Verify the declared ``sourceTable`` exists in the source's catalog (#161).
+
+    Rejects only **provable** absence. The catalog lookup fails open (an
+    unreachable catalog is indistinguishable from an empty one), and a source
+    can legitimately be COMPLETED while none of its assets are steward-approved
+    yet — so a table is treated as absent only when the catalog was read
+    successfully, knows at least one table for the source, and the declared one
+    is not among them. Anything less falls back to the soft ``table_reference``
+    warning that ``validate_metric`` already emits.
+
+    "Cannot configure" and "read failed" are deliberately NOT the same thing:
+
+    - ``build_data_source_lookup`` returns ``None`` for benign, expected
+      reasons — env vars unset, the namespace row absent, no
+      ``dataZoneProjectId`` yet. That is an *unprovisioned* namespace, not a
+      failure, and 503-ing it would make every ``sourceTable`` metric
+      un-creatable there. It degrades to the soft warning (pre-#161 behavior).
+    - A lookup that *built* but whose catalog read failed
+      (``catalog_available()`` false) is a genuine outage: enforcement is
+      impossible on a source we should be able to read, so that fails closed
+      with a 503.
+
+    Args:
+        namespace: The namespace the metric belongs to.
+        data_source_id: The source referenced by the metric's ``dataSourceId``.
+        source_table: The metric's declared ``sourceTable``.
+
+    Returns:
+        None when the table exists, its absence cannot be proven, the lookup
+        cannot be configured, or permissive mode is enabled; otherwise a
+        rejection message for a 400.
+
+    Raises:
+        SourceValidationUnavailableError: When the lookup was built but its
+            catalog could not be read — fail closed (503), matching
+            ``check_source_approved``.
+    """
+    if not source_table:
+        return None
+
+    if permissive_lookup_enabled():
+        logger.warning(
+            "permissive_source_lookup_active",
+            namespace=namespace,
+            data_source_id=data_source_id,
+            detail="sourceTable existence NOT enforced — dev/testing mode",
+        )
+        return None
+
+    from coa_metrics import data_source_lookup_factory
+
+    try:
+        lookup = data_source_lookup_factory.build_data_source_lookup(namespace)
+    except Exception as exc:
+        logger.error("data_source_lookup_init_failed", namespace=namespace, error=str(exc), exc_info=True)
+        raise SourceValidationUnavailableError(f"data source lookup unavailable: {exc}") from exc
+
+    if lookup is None:
+        # Not configured / namespace not provisioned — not an outage. Degrade to
+        # the soft table_reference warning validate_metric already emits.
+        logger.info(
+            "source_table_check_skipped_no_lookup",
+            namespace=namespace,
+            data_source_id=data_source_id,
+            source_table=source_table,
+        )
+        return None
+
+    if not lookup.catalog_available(data_source_id):
+        raise SourceValidationUnavailableError(
+            f"table catalog unavailable for data source '{data_source_id}' in namespace '{namespace}'"
+        )
+
+    known = lookup.known_tables(data_source_id)
+    if not known:
+        # Source known to the sources table but with no approved assets yet —
+        # absence is not provable, so fall back to the soft warning. Debug, not
+        # info: this fires on every create against a COMPLETED source.
+        logger.debug(
+            "source_table_check_skipped_empty_catalog",
+            namespace=namespace,
+            data_source_id=data_source_id,
+            source_table=source_table,
+        )
+        return None
+
+    # Accept either form: the catalog may enumerate bare names (`orders`) while
+    # the metric declares a schema-qualified one (`public.orders`, as the docs'
+    # example does), or vice versa.
+    declared = source_table.lower()
+    if declared in known or declared.rsplit(".", 1)[-1] in known:
+        return None
+
+    return (
+        f"Source table '{source_table}' not found in data source '{data_source_id}' — "
+        f"known tables: {', '.join(sorted(known))}"
+    )

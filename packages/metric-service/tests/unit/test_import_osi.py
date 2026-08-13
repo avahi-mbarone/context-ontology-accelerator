@@ -17,8 +17,18 @@ from coa_metrics.osi_parser import (
     OsiDocument,
     OsiMetric,
 )
+from coa_metrics.source_status import PERMISSIVE_ENV
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _permissive_source_lookup(monkeypatch: pytest.MonkeyPatch):
+    """Skip APPROVED-source enforcement (#564) in handler tests — mirrors
+    test_create_metric. The dedicated enforcement tests below patch
+    ``check_source_approved`` directly, which bypasses this env var."""
+    monkeypatch.setenv(PERMISSIVE_ENV, "true")
+    yield
 
 
 # ── Fixtures ────────────────────────────────────────────────────────────
@@ -286,25 +296,240 @@ class TestAiContextMapping:
         assert result.ai_context.instructions == instructions
 
 
-# ── SQL shape enforcement on import ──────────────────────────────
+# ── SQL validation on import: soft/hard split (#161) ────────────────────
 
 
-class TestImportSqlShapeEnforcement:
-    """Fragment expressions are rejected per-metric at import time."""
+class TestImportSqlValidationSoftHardSplit:
+    """#161: only DML/DDL is rejected per-metric at import time; a fragment
+    imports successfully (its soft warning is surfaced by validation)."""
 
-    def test_fragment_expression_raises(self) -> None:
+    def _doc_for(self, expression: str) -> tuple[OsiMetric, OsiDocument]:
         osi_metric = OsiMetric(
-            name="frag",
-            description="Fragment metric",
-            expression=[OsiDialectExpression(dialect="ANSI_SQL", expression="COUNT(*)")],
+            name="m",
+            description="Metric",
+            expression=[OsiDialectExpression(dialect="ANSI_SQL", expression=expression)],
             custom_extensions=OsiCustomExtension(data_source_id="ds-1", source_table="t"),
         )
-        doc = OsiDocument(metrics=[osi_metric])
-        with pytest.raises(ValueError, match="full SELECT statement"):
+        return osi_metric, OsiDocument(metrics=[osi_metric])
+
+    def test_fragment_expression_imports(self) -> None:
+        """A fragment no longer aborts the import (was ValueError)."""
+        osi_metric, doc = self._doc_for("COUNT(*)")
+        result = _osi_metric_to_definition(osi_metric, doc, "user")
+        assert result.expression_dialects[0].expression == "COUNT(*)"
+
+    def test_unparseable_expression_imports(self) -> None:
+        osi_metric, doc = self._doc_for("SELECT FROM WHERE (((")
+        result = _osi_metric_to_definition(osi_metric, doc, "user")
+        assert result.expression_dialects[0].expression == "SELECT FROM WHERE ((("
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "SELECT 1; DROP TABLE x",
+            "WITH d AS (DELETE FROM orders RETURNING *) SELECT * FROM d",
+            "DROP TABLE orders",
+        ],
+    )
+    def test_data_modifying_expression_raises(self, sql: str) -> None:
+        osi_metric, doc = self._doc_for(sql)
+        with pytest.raises(ValueError, match="data-modifying"):
             _osi_metric_to_definition(osi_metric, doc, "user")
 
 
-# ── Fail-closed data source lookup ───────────────────────────────
+# ── sourceTable enforcement on import (#161 / #564) ─────────────────────
+
+OSI_WITH_BAD_SOURCE_TABLE = """\
+osi_spec_version: "1.0"
+metrics:
+  - name: bad_table_metric
+    description: "References a table the catalog does not know"
+    expression:
+      dialects:
+        - dialect: ANSI_SQL
+          expression: "SELECT COUNT(*) FROM orders"
+    custom_extensions:
+      - vendor_name: COA
+        data:
+          data_source_id: ds-abc123
+          source_table: no_such_table
+"""
+
+# No source_table in custom_extensions → import defaults it to the metric NAME.
+OSI_DEFAULTED_SOURCE_TABLE = """\
+osi_spec_version: "1.0"
+metrics:
+  - name: no_such_table
+    description: "source_table defaults to the metric name"
+    expression:
+      dialects:
+        - dialect: ANSI_SQL
+          expression: "SELECT COUNT(*) FROM orders"
+    custom_extensions:
+      - vendor_name: COA
+        data:
+          data_source_id: ds-abc123
+"""
+
+
+class TestImportSourceTableEnforcement:
+    """check_source_table_exists is wired into create + update but was NOT wired
+    into import — so an imported metric could carry an unchecked sourceTable,
+    re-opening the #564 UI-bypass class. Import keeps its per-metric semantics
+    (skip-with-warning), it does not 400 the whole batch.
+    """
+
+    @staticmethod
+    def _warnings(response: dict) -> str:
+        return " ".join(json.loads(response["body"]).get("warnings", []))
+
+    @patch("coa_metrics.api.import_osi._get_opensearch")
+    @patch("coa_metrics.api.import_osi._get_neptune")
+    @patch("coa_metrics.api.import_osi.check_source_table_exists")
+    def test_absent_source_table_skips_metric_with_warning(self, mock_check, mock_neptune, mock_opensearch) -> None:
+        mock_check.return_value = "Source table 'no_such_table' not found in data source 'ds-abc123'"
+        neptune = MagicMock()
+        neptune.get_metric.return_value = None
+        mock_neptune.return_value = neptune
+        mock_opensearch.return_value = MagicMock()
+
+        response = handler(_make_event(OSI_WITH_BAD_SOURCE_TABLE), None)
+
+        assert response["statusCode"] == 200
+        body = json.loads(response["body"])
+        assert body["metricsCreated"] == 0
+        neptune.create_metric.assert_not_called()
+        assert "no_such_table" in self._warnings(response)
+
+    @patch("coa_metrics.api.import_osi._get_opensearch")
+    @patch("coa_metrics.api.import_osi._get_neptune")
+    @patch("coa_metrics.api.import_osi.check_source_table_exists")
+    def test_defaulted_source_table_is_checked(self, mock_check, mock_neptune, mock_opensearch) -> None:
+        """The metric-NAME default must be checked too — that is the exact path
+        an unchecked sourceTable slipped through."""
+        mock_check.return_value = "Source table 'no_such_table' not found in data source 'ds-abc123'"
+        neptune = MagicMock()
+        neptune.get_metric.return_value = None
+        mock_neptune.return_value = neptune
+        mock_opensearch.return_value = MagicMock()
+
+        response = handler(_make_event(OSI_DEFAULTED_SOURCE_TABLE), None)
+
+        assert response["statusCode"] == 200
+        assert json.loads(response["body"])["metricsCreated"] == 0
+        neptune.create_metric.assert_not_called()
+        mock_check.assert_called_once_with("test-ns", "ds-abc123", "no_such_table")
+
+    @patch("coa_metrics.api.import_osi._get_opensearch")
+    @patch("coa_metrics.api.import_osi._get_neptune")
+    @patch("coa_metrics.api.import_osi.check_source_table_exists")
+    def test_present_source_table_imports(self, mock_check, mock_neptune, mock_opensearch) -> None:
+        mock_check.return_value = None
+        neptune = MagicMock()
+        neptune.get_metric.return_value = None
+        mock_neptune.return_value = neptune
+        mock_opensearch.return_value = MagicMock()
+
+        response = handler(_make_event(OSI_WITH_BAD_SOURCE_TABLE), None)
+
+        assert response["statusCode"] == 200
+        assert json.loads(response["body"])["metricsCreated"] == 1
+
+    @patch("coa_metrics.api.import_osi._get_opensearch")
+    @patch("coa_metrics.api.import_osi._get_neptune")
+    @patch("coa_metrics.api.import_osi.check_source_table_exists")
+    def test_validation_unavailable_returns_503_not_500(self, mock_check, mock_neptune, mock_opensearch) -> None:
+        """A SourceValidationUnavailableError must not escape as a 500."""
+        from coa_metrics.source_status import SourceValidationUnavailableError
+
+        mock_check.side_effect = SourceValidationUnavailableError("catalog down")
+        neptune = MagicMock()
+        neptune.get_metric.return_value = None
+        mock_neptune.return_value = neptune
+        mock_opensearch.return_value = MagicMock()
+
+        response = handler(_make_event(OSI_WITH_BAD_SOURCE_TABLE), None)
+
+        assert response["statusCode"] == 503
+        neptune.create_metric.assert_not_called()
+
+
+class TestImportSourceApprovalEnforcement:
+    """check_source_approved is wired into create + update but was NOT wired into
+    import — so a metric bound to a PENDING/REJECTED/FAILED source could be
+    imported, the same #564 bypass class as the unchecked sourceTable above.
+    Approval is checked BEFORE the table so an unapproved source is rejected
+    regardless of whether its table happens to exist.
+    """
+
+    @staticmethod
+    def _warnings(response: dict) -> str:
+        return " ".join(json.loads(response["body"]).get("warnings", []))
+
+    @pytest.mark.parametrize("status", ["PENDING", "REJECTED", "FAILED"])
+    @patch("coa_metrics.api.import_osi._get_opensearch")
+    @patch("coa_metrics.api.import_osi._get_neptune")
+    @patch("coa_metrics.api.import_osi.check_source_table_exists")
+    @patch("coa_metrics.api.import_osi.check_source_approved")
+    def test_unapproved_source_skips_metric_with_warning(
+        self, mock_approved, mock_table, mock_neptune, mock_opensearch, status: str
+    ) -> None:
+        mock_approved.return_value = (
+            f"Data source 'ds-abc123' has status '{status}' — metrics can only reference APPROVED or COMPLETED sources"
+        )
+        mock_table.return_value = None
+        neptune = MagicMock()
+        neptune.get_metric.return_value = None
+        mock_neptune.return_value = neptune
+        mock_opensearch.return_value = MagicMock()
+
+        response = handler(_make_event(OSI_WITH_BAD_SOURCE_TABLE), None)
+
+        assert response["statusCode"] == 200
+        assert json.loads(response["body"])["metricsCreated"] == 0
+        neptune.create_metric.assert_not_called()
+        assert status in self._warnings(response)
+        # Approval short-circuits — an unapproved source is never table-checked.
+        mock_table.assert_not_called()
+
+    @patch("coa_metrics.api.import_osi._get_opensearch")
+    @patch("coa_metrics.api.import_osi._get_neptune")
+    @patch("coa_metrics.api.import_osi.check_source_table_exists")
+    @patch("coa_metrics.api.import_osi.check_source_approved")
+    def test_approved_source_imports(self, mock_approved, mock_table, mock_neptune, mock_opensearch) -> None:
+        mock_approved.return_value = None
+        mock_table.return_value = None
+        neptune = MagicMock()
+        neptune.get_metric.return_value = None
+        mock_neptune.return_value = neptune
+        mock_opensearch.return_value = MagicMock()
+
+        response = handler(_make_event(OSI_WITH_BAD_SOURCE_TABLE), None)
+
+        assert response["statusCode"] == 200
+        assert json.loads(response["body"])["metricsCreated"] == 1
+        mock_approved.assert_called_once_with("test-ns", "ds-abc123")
+
+    @patch("coa_metrics.api.import_osi._get_opensearch")
+    @patch("coa_metrics.api.import_osi._get_neptune")
+    @patch("coa_metrics.api.import_osi.check_source_approved")
+    def test_approval_unavailable_returns_503_not_500(self, mock_approved, mock_neptune, mock_opensearch) -> None:
+        """An unreadable sources table is a batch-level 503, not a 500."""
+        from coa_metrics.source_status import SourceValidationUnavailableError
+
+        mock_approved.side_effect = SourceValidationUnavailableError("sources table read failed")
+        neptune = MagicMock()
+        neptune.get_metric.return_value = None
+        mock_neptune.return_value = neptune
+        mock_opensearch.return_value = MagicMock()
+
+        response = handler(_make_event(OSI_WITH_BAD_SOURCE_TABLE), None)
+
+        assert response["statusCode"] == 503
+        neptune.create_metric.assert_not_called()
+
+
+# ── Fail-closed data source lookup (#564) ───────────────────────────────
 
 
 class TestGetLookupFailClosed:

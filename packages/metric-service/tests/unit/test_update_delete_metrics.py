@@ -167,6 +167,62 @@ class TestUpdateMetric:
         assert detail["namespace"] == "ns-alpha"
         assert detail["metricName"] == "revenue"
 
+    # ── #161 soft/hard validation split ──────────────────────────────────
+
+    @patch("coa_metrics.api.update_metric._get_eventbridge")
+    @patch("coa_metrics.api.update_metric._get_opensearch")
+    @patch("coa_metrics.api.update_metric._get_neptune")
+    def test_update_fragment_expression_publishes(
+        self, mock_neptune: MagicMock, mock_opensearch: MagicMock, mock_eventbridge: MagicMock
+    ) -> None:
+        """#161: a fragment is a soft warning on update too (was 400)."""
+        mock_neptune.return_value.get_metric.return_value = _existing_metric()
+        mock_eventbridge.return_value.put_events.return_value = {}
+        body = _valid_update_body()
+        body["expression"] = {"dialects": [{"dialect": "TRINO", "expression": "COUNT(*)"}]}
+
+        resp = update_handler(_make_update_event(body=body), None)
+
+        assert resp["statusCode"] == 200
+        mock_neptune.return_value.update_metric.assert_called_once()
+
+    @patch("coa_metrics.api.update_metric._get_neptune")
+    def test_update_data_modifying_expression_returns_400(self, mock_neptune: MagicMock) -> None:
+        mock_neptune.return_value.get_metric.return_value = _existing_metric()
+        body = _valid_update_body()
+        body["expression"] = {"dialects": [{"dialect": "POSTGRESQL", "expression": "DROP TABLE orders"}]}
+
+        resp = update_handler(_make_update_event(body=body), None)
+
+        assert resp["statusCode"] == 400
+        assert "data-modifying" in json.loads(resp["body"])["message"]
+        mock_neptune.return_value.update_metric.assert_not_called()
+
+    @patch("coa_metrics.api.update_metric.check_source_table_exists")
+    @patch("coa_metrics.api.update_metric._get_neptune")
+    def test_update_absent_source_table_returns_400(self, mock_neptune: MagicMock, mock_check: MagicMock) -> None:
+        mock_neptune.return_value.get_metric.return_value = _existing_metric()
+        mock_check.return_value = "Source table 'orders' not found in data source 'ds-abc123'"
+
+        resp = update_handler(_make_update_event(body=_valid_update_body()), None)
+
+        assert resp["statusCode"] == 400
+        assert "not found" in json.loads(resp["body"])["message"]
+        mock_neptune.return_value.update_metric.assert_not_called()
+
+    @patch("coa_metrics.api.update_metric.check_source_table_exists")
+    @patch("coa_metrics.api.update_metric._get_neptune")
+    def test_update_table_validation_unavailable_returns_503(
+        self, mock_neptune: MagicMock, mock_check: MagicMock
+    ) -> None:
+        mock_neptune.return_value.get_metric.return_value = _existing_metric()
+        mock_check.side_effect = SourceValidationUnavailableError("catalog unreachable")
+
+        resp = update_handler(_make_update_event(body=_valid_update_body()), None)
+
+        assert resp["statusCode"] == 503
+        mock_neptune.return_value.update_metric.assert_not_called()
+
 
 # ── APPROVED-source enforcement on update (#564) ────────────────────────
 

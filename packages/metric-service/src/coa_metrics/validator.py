@@ -21,8 +21,10 @@ Philosophy: "Author early, validate continuously"
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from enum import Enum
+from functools import cache
 from typing import Any
 
 import structlog
@@ -117,12 +119,185 @@ def _resolve_dialect(dialect: str) -> str | None:
     return _DIALECT_MAP.get(dialect.lower())
 
 
+_COMMENT_PATTERN = re.compile(r"/\*.*?\*/|--[^\n]*", re.DOTALL)
+
+# Pre-parse denylist — mirrors the serve firewall's ``_BLOCKED_STATEMENTS``
+# (``packages/context-manager/src/coa_serve/tier2/sql_firewall.py``)
+# so DML hidden in an otherwise-unparseable string (e.g.
+# ``DELETE FROM orders WHERE (((``) is still caught, plus the admin/DML verbs
+# the firewall covers via its allowlist stage. Keep the two in sync.
+#
+# Anchored at ``^\s*`` — it only ever sees the FIRST statement. Stacked forms
+# (``SELECT 1; TRUNCATE TABLE x``) are the AST walk's job when the SQL parses;
+# when it does not, ``_blocked_statement_segment`` re-applies this pattern to
+# each ``;``-segment so the stacked payload is still caught.
+_BLOCKED_STATEMENTS = re.compile(
+    r"^\s*("
+    r"MSCK\s+REPAIR|CREATE|DROP|ALTER|INSERT|DELETE|UPDATE|MERGE|UNLOAD|PREPARE|EXECUTE|EXPLAIN"
+    r"|TRUNCATE|GRANT|REVOKE|COPY|CALL|VACUUM|SET|ANALYZE|COMMENT|LOAD\s+DATA|RENAME|OPTIMIZE|PUT|REFRESH"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_DATA_MODIFYING_MESSAGE = (
+    "Expression contains a data-modifying operation ({detail}) — the serve-time "
+    "SQL firewall rejects these. Remove the data-modifying clause; metric "
+    "expressions must be read-only."
+)
+
+# AST denylist, by sqlglot node name. This is the load-bearing half of the DML
+# block: unlike the ``^\s*``-anchored regex it walks EVERY parsed statement, so
+# it is what catches stacked forms (``SELECT 1; TRUNCATE TABLE x``) and DML
+# nested in a CTE (``WITH d AS (DELETE ...) SELECT * FROM d``).
+#
+# ``Command`` is the high-leverage entry: sqlglot funnels every verb it has no
+# dedicated node for (CALL, VACUUM, OPTIMIZE, RENAME TABLE, ALTER SESSION, …)
+# into it, so one name covers an open-ended set of admin statements. It cannot
+# over-reach onto metric SQL — a read-only SELECT never parses to a Command.
+#
+# Aggregate fragments are deliberately absent: ``COUNT(*)``/``SUM(x)`` parse to
+# ``exp.Count``/``exp.Sum``, which are expressions, not statements, so they stay
+# on the soft path (#161).
+_DATA_MODIFYING_NODE_NAMES: tuple[str, ...] = (
+    "Command",
+    "Insert",
+    "Update",
+    "Delete",
+    "Merge",
+    "Into",
+    "Create",
+    "Drop",
+    "Alter",
+    "TruncateTable",
+    "Grant",
+    "Revoke",
+    "Copy",
+    "Set",
+    "Analyze",
+    "Comment",
+    "LoadData",
+    "AlterSession",
+)
+
+
+@cache
+def _data_modifying_nodes() -> tuple[type, ...]:
+    """Resolve ``_DATA_MODIFYING_NODE_NAMES`` to sqlglot node classes.
+
+    Resolved lazily (and memoized) so importing this module does not pull in
+    sqlglot — every caller here imports it inside the function for Lambda
+    cold-start reasons. Names absent from the installed sqlglot are skipped
+    rather than raising, so a version bump that renames a node degrades to a
+    narrower denylist instead of breaking every metric write.
+
+    Returns:
+        The tuple of node classes to use with ``isinstance``.
+    """
+    import sqlglot
+
+    return tuple(node for name in _DATA_MODIFYING_NODE_NAMES if (node := getattr(sqlglot.exp, name, None)))
+
+
+def _blocked_statement_segment(sql: str) -> bool:
+    r"""Check every ``;``-separated segment against ``_BLOCKED_STATEMENTS``.
+
+    Used only when ``sqlglot.parse`` FAILS. The AST walk is the authority for
+    parseable SQL, but an unparseable string gets no walk at all — and a
+    stacked payload is unparseable precisely because of its second statement
+    (``SELECT 1; MSCK REPAIR TABLE t`` → ParseError, ``'; DROP TABLE users; --``
+    → TokenError). Scanning each segment restores the block those cases would
+    otherwise slip past, since the ``^\s*`` anchor only ever sees the leading
+    SELECT.
+
+    Deliberately not applied on the parse-SUCCESS path: a segment scan cannot
+    tell a statement separator from a ``;`` inside a string literal, so running
+    it there would hard-block read-only SQL the AST walk correctly accepts.
+
+    Args:
+        sql: The metric SQL expression.
+
+    Returns:
+        True if any segment begins with a data-modifying verb.
+    """
+    return any(_BLOCKED_STATEMENTS.match(segment) for segment in _COMMENT_PATTERN.sub(" ", sql).split(";"))
+
+
+def check_data_modifying(sql: str, dialect: str = "") -> str | None:
+    """Reject a metric expression that modifies data (issue #161).
+
+    This is the ONLY hard block applied to a metric expression at
+    create/update/import time. Per #161 ("SQL parses → SOFT warning, never
+    blocks publish"), a parse error or a non-SELECT fragment is deliberately
+    allowed through and surfaced as a soft warning instead:
+
+    - A **fragment** (e.g. ``COUNT(*)``) simply fails to match Tier 1 at serve
+      time — the resolver does not wrap it, so nothing crashes.
+    - A **parse error** is likewise not a safety problem; the serve-time SQL
+      firewall independently rejects anything it cannot analyze (fail-closed).
+
+    DML/DDL stays hard-blocked because it is a security boundary, caught two
+    ways so neither path alone has to be complete:
+
+    1. A pre-parse regex (``_BLOCKED_STATEMENTS``, comments stripped first) —
+       catches DML that sqlglot cannot parse. Anchored at statement start, so
+       it only sees the first statement; when the parse FAILS it is re-run per
+       ``;``-segment (``_blocked_statement_segment``), which is what catches a
+       stacked payload whose second statement is what broke the parser.
+    2. A full-AST walk over every parsed statement against
+       ``_DATA_MODIFYING_NODE_NAMES`` — catches DML nested in a CTE
+       (``WITH d AS (DELETE ...) SELECT * FROM d``), trailing a safe one
+       (``SELECT 1; DROP TABLE x``), or using a verb the regex omits, none of
+       which the regex can see. This is the authoritative half.
+
+    Args:
+        sql: The metric SQL expression.
+        dialect: The metric dialect (e.g. POSTGRESQL); used for parsing.
+
+    Returns:
+        None if the expression is read-only (or merely unparseable), otherwise
+        a human-actionable error message.
+    """
+    import sqlglot
+
+    if _BLOCKED_STATEMENTS.match(_COMMENT_PATTERN.sub(" ", sql)):
+        return _DATA_MODIFYING_MESSAGE.format(detail="statement type")
+
+    try:
+        statements = sqlglot.parse(sql, read=_resolve_dialect(dialect))
+    except (sqlglot.errors.SqlglotError, RecursionError):
+        # No AST to walk, so the regex is the only line of defence left — and
+        # the leading-statement anchor is blind to exactly the payloads that
+        # broke the parse. Re-run it per ``;``-segment before conceding.
+        if _blocked_statement_segment(sql):
+            return _DATA_MODIFYING_MESSAGE.format(detail="statement type")
+        # Unparseable AND no segment looks data-modifying → not provably
+        # data-modifying. Allowed here; surfaced as a soft warning by
+        # validate_metric, and fail-closed at serve time by the firewall.
+        #
+        # SqlglotError (not just ParseError) because TokenError is a SIBLING of
+        # ParseError, not a subclass — ``'; DROP TABLE users; --`` raises it.
+        # RecursionError comes from the recursive-descent parser on deeply
+        # nested parens. Neither is a ValueError, so leaking either would reach
+        # create_metric/update_metric (which catch ValueError) as an unhandled
+        # 500 rather than this soft path.
+        return None
+
+    data_modifying_nodes = _data_modifying_nodes()
+    for statement in statements:
+        if statement is None:
+            continue
+        for node in statement.walk():
+            if isinstance(node, data_modifying_nodes):
+                return _DATA_MODIFYING_MESSAGE.format(detail=type(node).__name__)
+    return None
+
+
 def check_select_shape(sql: str, dialect: str = "") -> str | None:
     """Check that a metric expression is a full SELECT statement.
 
     Mirrors the serve-time SQL firewall's statement-shape rule
-    (``packages/context-manager/.../tier2/sql_firewall.py`` —
-    ``_SAFE_STATEMENT_TYPES``): only a top-level SELECT or set operation
+    (``packages/context-manager/src/coa_serve/tier2/sql_firewall.py``
+    — ``_SAFE_STATEMENT_TYPES``): only a top-level SELECT or set operation
     (UNION/INTERSECT/EXCEPT) is executable at Tier 1. Aggregate fragments
     like ``COUNT(*)`` or ``SUM(orders.total)`` parse fine but are rejected
     by the firewall at query time, so they must be rejected at onboarding —
@@ -154,7 +329,11 @@ def check_select_shape(sql: str, dialect: str = "") -> str | None:
 
     try:
         parsed = sqlglot.parse_one(sql, read=_resolve_dialect(dialect))
-    except sqlglot.errors.ParseError as exc:
+    except (sqlglot.errors.SqlglotError, RecursionError) as exc:
+        # SqlglotError, not ParseError: TokenError is a sibling of ParseError,
+        # and RecursionError comes from deeply nested parens. This is the soft
+        # advisory path, so every failure mode becomes the same warning message
+        # rather than escaping to the caller.
         return f"SQL expression could not be parsed ({dialect}): {exc}"
 
     if not isinstance(parsed, safe_statement_types):
@@ -166,20 +345,10 @@ def check_select_shape(sql: str, dialect: str = "") -> str | None:
         )
 
     # Deep scan: data-modifying nodes must not appear anywhere in the AST,
-    # even nested in CTEs/subqueries of an otherwise-safe SELECT. Keep in
-    # sync with sql_firewall.py's _DATA_MODIFYING_NODES.
-    data_modifying_nodes: tuple[type[sqlglot.exp.Expression], ...] = (
-        sqlglot.exp.Insert,
-        sqlglot.exp.Update,
-        sqlglot.exp.Delete,
-        sqlglot.exp.Merge,
-        sqlglot.exp.Into,
-        sqlglot.exp.Create,
-        sqlglot.exp.Drop,
-        sqlglot.exp.Alter,
-    )
+    # even nested in CTEs/subqueries of an otherwise-safe SELECT. Shares
+    # check_data_modifying's denylist so the two cannot drift apart.
     for node in parsed.walk():
-        if isinstance(node, data_modifying_nodes):
+        if isinstance(node, _data_modifying_nodes()):
             return (
                 f"Expression contains a data-modifying operation "
                 f"({type(node).__name__}) nested inside the statement — the "
@@ -341,13 +510,21 @@ def _check_table_references(
                     )
                 )
 
-    # Also verify the declared sourceTable exists
+    # Also verify the declared sourceTable exists. Its absence is an ERROR only
+    # when provable (#161): the catalog was read AND enumerates tables for this
+    # source. Otherwise "missing" is indistinguishable from an unreadable or
+    # not-yet-approved catalog, so it stays advisory. The loop above always stays
+    # WARNING — find_all(exp.Table) also matches CTE/subquery aliases, which are
+    # not catalog tables.
     if source_table and source_table.lower() not in tables_checked:
         exists = lookup.table_exists(data_source_id, source_table)
+        provable_absence = (
+            not exists and lookup.catalog_available(data_source_id) and bool(lookup.known_tables(data_source_id))
+        )
         checks.append(
             ValidationCheck(
                 check="table_reference",
-                severity=Severity.WARNING,
+                severity=Severity.ERROR if provable_absence else Severity.WARNING,
                 passed=exists,
                 message=(
                     f"Source table '{source_table}' exists in data source"

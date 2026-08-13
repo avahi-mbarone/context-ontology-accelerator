@@ -426,18 +426,31 @@ Per-environment shared resources (Structured Stack): a single Glue Data Catalog 
 
 Provisioning runs in a **dedicated `{prefix}sources-federation-provisioner` Lambda**, invoked as its own JDBC-only step in the scan pipeline (after discovery, before enrichment). It is intentionally separate from the discovery connector so the broad Lake Formation privilege stays isolated to a single-purpose role. The step is **fatal**: if provisioning fails, the pipeline's Catch marks the scan `FAILED` and the source `SCAN_FAILED`, since a source that isn't queryable is not a successful scan.
 
-**Required bootstrap (LF data-lake admin):** creating a federated catalog from a per-source connection requires `DATA_LOCATION_ACCESS` on that connection, which only a Lake Formation **data-lake admin** can grant (a non-admin cannot self-grant, and hybrid-access mode does not bypass it). The federation provisioner role must therefore be registered as an LF data-lake admin. This is now **automated** by the `LakeFormationAdmin` custom resource (`infra/lib/constructs/lakeformation-admin.ts`), which registers the role non-destructively (read `DataLakeAdmins` → append → write, preserving existing admins). The manual step below is only needed as a one-time **bootstrap for accounts that already have LF admins**: `PutDataLakeSettings` can only be called by an existing admin, so the custom resource's own Lambda role must be made an LF admin once, out-of-band, before the first deploy. Greenfield accounts (no admins yet) self-bootstrap. See `docs/getting-started.md` (Lake Formation bootstrap).
+**LF data-lake admin registration (automatic — no bootstrap step):** creating a federated catalog from a per-source connection requires `DATA_LOCATION_ACCESS` on that connection, which only a Lake Formation **data-lake admin** can grant (a non-admin cannot self-grant, and hybrid-access mode does not bypass it). The federation provisioner role therefore has to be a data-lake admin. The `LakeFormationAdmin` custom resource (`infra/lib/constructs/lakeformation-admin.ts`) registers it non-destructively on every deploy — read `DataLakeAdmins` → append if absent → write back, preserving existing admins and all other settings.
 
-**Troubleshooting — `CreateCatalog` fails with `Insufficient Lake Formation permission(s): Required Create Catalog on Catalog`:** the bootstrap above has not been applied in the target account. This is a Lake Formation authorization error, **not** IAM — adding `glue:CreateCatalog` / `lakeformation:*` to the role's IAM policy will not fix it. Register the provisioner role as an LF data-lake admin:
+This requires **no operator action on any account**, greenfield or otherwise. `PutDataLakeSettings` is authorized by the IAM permission `lakeformation:PutDataLakeSettings`, which the custom resource's Lambda role carries, *not* by the caller's own membership in `DataLakeAdmins`.
+
+Two roles are involved and they are easy to confuse:
+
+| Role | Purpose | Where it comes from |
+| --- | --- | --- |
+| Federation provisioner (`{prefix}sources-federation-provisioner`) | The **target** — registered as a data-lake admin, and needs that standing to grant `DATA_LOCATION_ACCESS` at scan time | Created by this stack; ARN published to `/{prefix}/sources/federation-provisioner-role-arn` |
+| LF-admin custom resource's onEvent Lambda role | The **caller** — invokes `PutDataLakeSettings`. Needs the IAM permission and nothing more | Auto-created by this stack |
+
+An `AccessDeniedException` from `PutDataLakeSettings` means the IAM action itself is denied — look for an SCP or a permission boundary blocking it, not a missing data-lake admin registration.
+
+**Troubleshooting — `CreateCatalog` fails with `Insufficient Lake Formation permission(s): Required Create Catalog on Catalog`:** the federation provisioner role is not a data-lake admin, i.e. the custom resource did not run or did not succeed. This is a Lake Formation authorization error, **not** IAM — adding `glue:CreateCatalog` / `lakeformation:*` to the role's IAM policy will not fix it. Confirm the provisioner ARN is in the admin list:
 
 ```bash
-ROLE_ARN=$(aws ssm get-parameter --name "/{prefix}/sources/federation-provisioner-role-arn" \
-  --query Parameter.Value --output text)
-# Merge $ROLE_ARN into the existing DataLakeAdmins, then write them back:
-aws lakeformation get-data-lake-settings
-aws lakeformation put-data-lake-settings --data-lake-settings '{ ...existing settings..., \
-  "DataLakeAdmins": [ ...existing admins..., {"DataLakePrincipalIdentifier": "'"$ROLE_ARN"'"} ] }'
+aws lakeformation get-data-lake-settings \
+  --query 'DataLakeSettings.DataLakeAdmins[].DataLakePrincipalIdentifier'
+aws ssm get-parameter --name "/{prefix}/sources/federation-provisioner-role-arn" \
+  --query Parameter.Value --output text
 ```
+
+If it is missing, re-deploy the sources stack — the custom resource re-registers it — then re-trigger the scan.
+
+**What COA changes about your LF settings:** exactly one principal is added to `DataLakeAdmins` (the federation provisioner role), and `cdk destroy` removes it again. Existing admins and every other setting — including the `IAM_ALLOWED_PRINCIPALS` defaults that make LF defer to IAM — are round-tripped untouched, so COA does not flip an account into strict LF mode. The read-modify-write has no compare-and-swap, so a governance tool reconciling LF settings concurrently could race with it.
 
 The provisioning step is fatal, so a failed run marks the scan `FAILED` and the source `SCAN_FAILED`. After granting admin, re-trigger a scan on the affected source to retry. A failed attempt may leave an orphaned Glue connection (`{prefix}ds_*`); on retry it is reused via the handled `AlreadyExistsException`, or it can be deleted manually once it leaves the in-progress state.
 

@@ -51,9 +51,11 @@ from coa_metrics.osi_parser import (
 )
 from coa_metrics.source_status import (
     SourceValidationUnavailableError,
+    check_source_approved,
+    check_source_table_exists,
     permissive_lookup_enabled,
 )
-from coa_metrics.validator import check_select_shape
+from coa_metrics.validator import check_data_modifying
 
 setup_logging(os.environ.get("LOG_LEVEL", "INFO"))
 logger = structlog.get_logger(__name__)
@@ -344,6 +346,26 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             warnings.append(f"Metric '{osi_metric.name}': skipped — {exc}")
             continue
 
+        # Enforce an APPROVED source (#564) and the declared sourceTable (#161)
+        # — create/update enforce both, so import must too or it is a bypass.
+        # Approval is checked first, matching create_metric: a metric bound to a
+        # PENDING/REJECTED/FAILED source must not land regardless of whether its
+        # table happens to exist. Note import defaults source_table to the
+        # metric NAME when custom_extensions omit it, which is exactly the path
+        # that carried unchecked tables. Per-metric skip-with-warning matches how
+        # the DML block above is handled; a validation outage is batch-level
+        # (503) since it affects every metric.
+        try:
+            source_error = check_source_approved(namespace, metric_def.data_source_id)
+            if source_error is None:
+                source_error = check_source_table_exists(namespace, metric_def.data_source_id, metric_def.source_table)
+        except SourceValidationUnavailableError as exc:
+            logger.error("source_validation_unavailable", namespace=namespace, error=str(exc))
+            return api_response(503, {"message": "Data source validation is unavailable — try again later"})
+        if source_error:
+            warnings.append(f"Metric '{metric_def.name}': skipped — {source_error}")
+            continue
+
         # Resolve ontology concept names to full URIs
         if metric_def.ontology_concepts:
             try:
@@ -428,11 +450,11 @@ def _osi_metric_to_definition(
         except ValueError:
             # Unknown dialect — use as-is (lowercase)
             internal_dialect = expr.dialect.lower()
-        # Structural check: fragments are rejected by the serve-time
-        # SQL firewall — skip them at import with an actionable message.
-        shape_error = check_select_shape(expr.expression, internal_dialect)
-        if shape_error:
-            raise ValueError(shape_error)
+        # Safety check: DML/DDL is the only hard block on import.
+        # Fragments and unparseable SQL import with a soft warning.
+        dml_error = check_data_modifying(expr.expression, internal_dialect)
+        if dml_error:
+            raise ValueError(dml_error)
         dialects.append(MetricDialect(dialect=internal_dialect, expression=expr.expression))
 
     if not dialects:
