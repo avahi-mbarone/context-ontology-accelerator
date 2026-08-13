@@ -180,6 +180,10 @@ _ASSESS_SYSTEM = (
     "partially answers the question, say what IS supported and state plainly what "
     "is still missing — do not fill gaps from memory. Answer the WHOLE question as "
     "asked (e.g. every period/segment requested), not just one sub-part.\n\n"
+    "LANGUAGE: Write your working_answer in the SAME language as the sub-question. The "
+    "gathered context may be in other languages; ignore their language and match the "
+    "sub-question's language (this answer is handed to the final synthesizer, so a "
+    "consistent language prevents it from drifting to the wrong one — work item #901).\n\n"
     "Respond with ONLY a JSON object of this exact shape, and no prose outside it:\n"
     '{"sufficient": <true|false>, "working_answer": "<your grounded best answer>"}'
 )

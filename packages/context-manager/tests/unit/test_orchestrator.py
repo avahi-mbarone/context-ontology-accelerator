@@ -447,6 +447,85 @@ class TestOrchestratorTier1:
         orch._query_executor.execute.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_contract_shape_dimensions_round_trip(self):
+        """Round-trip the CONTRACT's dimensions shape (a list of DimensionFilter)
+        through the orchestrator, not a hand-built dict — the gap that let issue
+        #53 through. Uses the REAL substitute_dimensions so the bound SQL is
+        asserted end to end."""
+        from coa_serve.tier1.metric_resolver import MetricResolver
+
+        orch = _make_orchestrator(metric_found=True)
+        orch._metric_resolver.substitute_dimensions = MetricResolver.substitute_dimensions
+        orch._metric_resolver.match.return_value = MetricMatch(
+            found=True,
+            metric_name="revenue",
+            sql_template="SELECT sum(amount) FROM orders WHERE region = :region",
+            columns=["total"],
+            data_source_id="ds-orders",
+            dimensions=["region"],
+            match_count=1,
+            match_confidence=1.0,
+        )
+        request = InvokeRequest(
+            query="What is revenue?",
+            namespace="demo",
+            options={"dimensions": [{"name": "region", "value": "EMEA", "operator": "="}]},
+        )
+
+        response = await orch.resolve(request)
+
+        assert response.result.tier == 1
+        # The caller's value is bound as a quoted SQL literal, not interpolated.
+        assert response.result.query_used == "SELECT sum(amount) FROM orders WHERE region = 'EMEA'"
+
+    @pytest.mark.asyncio
+    async def test_contract_shape_dimensions_no_placeholder_template(self):
+        """A filter the matched metric's SQL cannot apply falls through to a
+        richer tier rather than answering the WRONG question.
+
+        Two things are asserted at once. The shape no longer 500s (issue #53 —
+        ``.items()`` ran before placeholder matching, so every Tier-1 metric
+        raised AttributeError, not just parameterized ones). And the fix does not
+        trade that 500 for a silent wrong answer: the unfiltered GLOBAL total
+        must NOT be returned at Tier-1's confidence 1.0 just because the template
+        has nowhere to bind ``region``.
+        """
+        from coa_serve.tier1.metric_resolver import MetricResolver
+
+        orch = _make_orchestrator(metric_found=True)
+        orch._metric_resolver.substitute_dimensions = MetricResolver.substitute_dimensions
+        request = InvokeRequest(
+            query="What is revenue?",
+            namespace="demo",
+            options={"dimensions": [{"name": "region", "value": "EMEA"}]},
+        )
+
+        response = await orch.resolve(request)
+
+        assert response.result.tier == 2
+        # The unfiltered template must never be executed.
+        assert response.result.query_used != "SELECT sum(amount) FROM orders"
+        orch._query_executor.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_malformed_dimensions_falls_through_not_500(self):
+        """Defense in depth: a non-mapping reaching Tier-1 from an unvalidated
+        internal caller fails CLOSED to Tier-2/3 instead of raising
+        AttributeError → blanket 500."""
+        from coa_serve.tier1.metric_resolver import MetricResolver
+
+        orch = _make_orchestrator(metric_found=True)
+        orch._metric_resolver.substitute_dimensions = MetricResolver.substitute_dimensions
+        request = InvokeRequest(query="What is revenue?", namespace="demo")
+        # Bypass model normalization the way an internal caller would.
+        request.options["dimensions"] = [{"name": "region", "value": "EMEA"}]
+
+        response = await orch.resolve(request)
+
+        assert response.result.tier == 2
+        orch._query_executor.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_executor_error_raises_data_source_unavailable(self):
         """executor failure (e.g. table not found) must not crash with
         generic 500. Raises DataSourceUnavailableError (502) with trace."""

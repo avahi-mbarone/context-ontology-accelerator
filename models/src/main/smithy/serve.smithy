@@ -314,8 +314,30 @@ enum TraversalDirection {
 // ══════════════════════════════════════════════════════════════════════════════
 // Shared Shapes — Dimension Filters
 // ══════════════════════════════════════════════════════════════════════════════
+/// Comparison operator applied by a DimensionFilter.
+///
+/// Equality is the only supported comparison: Tier-1 binds the value as a bare
+/// SQL literal into a governed metric's template, which expresses `=` and nothing
+/// else. Declared as an enum rather than a free-form String so a client asking
+/// for an unsupported comparison is rejected by the contract instead of having it
+/// silently applied as equality — a wrong answer returned with a 200.
+enum DimensionOperator {
+    /// Match rows whose dimension equals the value.
+    EQUALS = "="
+}
+
 /// A filter constraining a query to rows matching a dimension value, with an
 /// optional comparison operator (defaults to equality).
+///
+/// Server-side invariants NOT expressible as Smithy traits, enforced at
+/// validation (a violation is a 400, see the Context Manager's InvokeRequest):
+///   - `name` must be non-blank, and is trimmed before use.
+///   - `name` is matched case-insensitively, and must be UNIQUE across the list —
+///     a mapping cannot express two values for one dimension. (`@uniqueItems`
+///     would not capture this: it compares whole structures, so two filters on
+///     the same name with different values would still pass.)
+///   - every filter must be applicable by the resolved metric; a filter the
+///     metric cannot apply fails closed rather than being dropped.
 structure DimensionFilter {
     /// Name of the dimension to filter on.
     @required
@@ -326,7 +348,7 @@ structure DimensionFilter {
     value: String
 
     /// Comparison operator to apply (defaults to equality).
-    operator: String
+    operator: DimensionOperator
 }
 
 list DimensionFilterList {

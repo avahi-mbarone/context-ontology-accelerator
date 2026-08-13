@@ -94,7 +94,7 @@ from coa_common.metadata_store import (
     SMUSClient,
 )
 from coa_common.namespace_resolver import resolve_namespace_id
-from coa_common.principal_keys import sanitize_principal_key
+from coa_common.principal_keys import build_principal_keys, sanitize_principal_key
 from coa_common.response import (
     CORS_HEADERS,
     api_response,
@@ -197,6 +197,7 @@ __all__ = [
     "validate_s3_prefix",
     "resolve_namespace_id",
     "sanitize_principal_key",
+    "build_principal_keys",
     "USER_AGENT_EXTRA",
     "install_user_agent",
     "async_boto_config",

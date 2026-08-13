@@ -57,14 +57,36 @@ class TestSynthesizerBasic:
 
 @pytest.mark.unit
 class TestSynthesizerLanguageDirective:
-    """Guards Change 3: the system prompt must instruct the model to answer in
-    the question's language, so a Japanese question yields a Japanese answer by
-    design rather than incidentally. Guards against accidental removal."""
+    """Guards the output-language directive: the assembled system instruction must
+    instruct the model to answer in the question's language, so a Japanese question
+    yields a Japanese answer by design rather than incidentally.
 
-    def test_system_instruction_contains_language_directive(self):
+    Work item #901: the directive was strengthened from a buried mid-list bullet to a
+    standalone `_LANGUAGE_DIRECTIVE` appended LAST by `_build_system_instruction`, after
+    the weak version drifted under sampling (intermittent wrong-language answers). This
+    test now guards the strong version and its position.
+    """
+
+    def test_language_directive_constant_is_strong_and_question_pinned(self):
+        from coa_serve.tier3.synthesizer import _LANGUAGE_DIRECTIVE
+
+        assert "OUTPUT LANGUAGE" in _LANGUAGE_DIRECTIVE
+        assert "language of the user's question" in _LANGUAGE_DIRECTIVE
+        # Pins to the QUESTION and tells the model to ignore the context's language.
+        assert "IGNORE their" in _LANGUAGE_DIRECTIVE
+
+    def test_weak_buried_bullet_removed_from_base(self):
         from coa_serve.tier3.synthesizer import _SYSTEM_INSTRUCTION_BASE
 
-        assert "Respond in the same language as the user's question" in _SYSTEM_INSTRUCTION_BASE
+        assert "- Respond in the same language as the user's question" not in _SYSTEM_INSTRUCTION_BASE
+
+    def test_build_system_instruction_appends_directive_last(self):
+        instruction = Synthesizer._build_system_instruction(
+            Synthesizer.__new__(Synthesizer), nonce="abc123", marker="MK"
+        )
+        assert "OUTPUT LANGUAGE" in instruction
+        # Must be the LAST section — after the anti-injection SECURITY clause.
+        assert instruction.index("OUTPUT LANGUAGE") > instruction.index("SECURITY:")
 
 
 @pytest.mark.unit

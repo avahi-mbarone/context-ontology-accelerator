@@ -52,6 +52,8 @@ from coa_control_plane_server.models.review_decision import ReviewDecision
 from coa_control_plane_server.models.review_status import ReviewStatus
 from coa_control_plane_server.models.source_status import SourceStatus
 
+from coa_sources.database.metrics import emit_metric
+
 logger = logging.getLogger(__name__)
 logger.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
 
@@ -479,9 +481,18 @@ def process_bulk_review(
     # libs/common/review_logic.py for the rules) and select assets that
     # need a write.
     to_write: list[dict[str, Any]] = []
+    # table_ids whose own review_status flipped on this call. Only these are
+    # human decisions for the acceptance-rate metric below — a table that was
+    # already APPROVED (repeat bulk run, or a mixed selection) still lands in
+    # to_write when its columns cascade, but it is not a new decision.
+    transitioned: list[str] = []
     for asset in assets:
-        if apply_decision_to_table(asset["table"], msg.decision, bulk=True):
+        table = asset["table"]
+        status_before = table.business_metadata.review_status
+        if apply_decision_to_table(table, msg.decision, bulk=True):
             to_write.append(asset)
+        if table.business_metadata.review_status != status_before:
+            transitioned.append(table.table_id)
 
     failed: list[str] = []
     if to_write:
@@ -492,6 +503,8 @@ def process_bulk_review(
                 if err_table_id:
                     failed.append(err_table_id)
 
+    # Absolute counter folded into the source record — every APPROVED table on
+    # this page, transitioned on this call or earlier.
     tables_approved_this_page = sum(
         1
         for a in assets
@@ -499,6 +512,17 @@ def process_bulk_review(
     )
     # Fold in the count accumulated by earlier pages in the chain.
     tables_approved = msg.tables_approved_so_far + tables_approved_this_page
+
+    # Enrichment acceptance rate: how much of what the enricher proposed a human
+    # kept. Emitted once per bulk decision (aggregate counts, not per table).
+    # Only transitions count, matching the single-table half in
+    # api/database_routes.py — a re-approve of an already-APPROVED table is not
+    # a new decision, so it must not inflate the rate.
+    decided = sum(1 for tid in transitioned if tid not in failed)
+    if msg.decision == ReviewDecision.APPROVED:
+        emit_metric("TablesApprovedByReview", decided, "Count", ReviewScope="Bulk")
+    else:
+        emit_metric("TablesRejectedByReview", decided, "Count", ReviewScope="Bulk")
 
     # Gate: refuse an approval that would ship a table whose PK/FK column is
     # REJECTED. See _rejected_key_column_reason for why this is the condition

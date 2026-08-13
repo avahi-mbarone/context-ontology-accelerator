@@ -117,3 +117,15 @@ export const DEFAULT_EVENT_BUS_NAME = "default";
  * use the same model, or vectors are cross-model incomparable.
  */
 export const DEFAULT_BEDROCK_MODEL_ID = "us.cohere.embed-v4:0";
+
+/**
+ * Default Bedrock chat/completion model ID — MUST match the Python single
+ * source of truth (coa_common.bedrock.DEFAULT_MODEL_ID). Claude Haiku 4.5 via
+ * an inference profile. Distinct from DEFAULT_BEDROCK_MODEL_ID, which is the
+ * embedding model; every LLM text path (source enrichment, constraint
+ * inference, translation) uses this one. Consumers that only observe the model
+ * (e.g. AWS/Bedrock ModelId dashboard dimensions) go dark if this drifts from
+ * the Python default, so the two must move together.
+ */
+export const DEFAULT_BEDROCK_CHAT_MODEL_ID =
+  "us.anthropic.claude-haiku-4-5-20251001-v1:0";

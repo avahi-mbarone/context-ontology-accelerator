@@ -786,6 +786,21 @@ class Orchestrator:
             # half-bound template.
             metric_sql = metric_match.sql_template
             dimensions = options.get("dimensions") or {}
+            # Defense in depth: the wire shape (a LIST of DimensionFilter objects)
+            # is converted to this name->value mapping by
+            # ``InvokeRequest._normalize_dimensions``, which is the only supported
+            # entry point. Anything else here means an unvalidated internal caller;
+            # fail CLOSED to Tier-2/3 rather than let substitute_dimensions raise
+            # AttributeError on .items() and surface as a blanket 500.
+            if not isinstance(dimensions, dict):
+                trace.record(
+                    StepId.T1_METRIC_MATCH,
+                    "dimension_substitution_failed",
+                    t1_ms,
+                    detail=f"dimensions must be a mapping, got {type(dimensions).__name__}",
+                )
+                logger.warning("tier1_dimensions_malformed", dimensions_type=type(dimensions).__name__)
+                return None
             if dimensions or "{" in metric_sql or ":" in metric_sql:
                 try:
                     metric_sql = self._metric_resolver.substitute_dimensions(

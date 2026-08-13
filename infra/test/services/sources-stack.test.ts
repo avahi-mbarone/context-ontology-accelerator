@@ -493,9 +493,9 @@ describe("SourcesStack", () => {
   });
 
   describe("Telemetry — CloudWatch Dashboard and Alarms", () => {
-    it("emits a facade OE dashboard and no legacy SourcesScanDashboard", () => {
-      // The facade creates exactly one env-prefixed dashboard for this stack.
-      template.resourceCountIs("AWS::CloudWatch::Dashboard", 1);
+    it("emits the facade OE dashboard plus the structured-scan dashboard, and no legacy SourcesScanDashboard", () => {
+      // One facade dashboard + the #116 structured-scan dashboard.
+      template.resourceCountIs("AWS::CloudWatch::Dashboard", 2);
       // Legacy dashboard name must be gone.
       const dashboards = template.findResources("AWS::CloudWatch::Dashboard", {
         Properties: { DashboardName: Match.stringLikeRegexp("sources-scan$") },
@@ -507,6 +507,79 @@ describe("SourcesStack", () => {
       // At least the pre-migration alarm count (8) survives the migration.
       const alarms = template.findResources("AWS::CloudWatch::Alarm");
       expect(Object.keys(alarms).length).toBeGreaterThanOrEqual(8);
+    });
+  });
+
+  describe("Structured Scan Dashboard (#116)", () => {
+    // The dashboard body is a JSON string, so charted metric names are asserted
+    // by substring. Each name is emitted by packages/sources — a rename on
+    // either side silently darkens a widget, which is what this guards.
+    const scanDashboardBody = (): string => {
+      const dashboards = template.findResources("AWS::CloudWatch::Dashboard", {
+        Properties: {
+          DashboardName: Match.stringLikeRegexp("sources-structured-scan$"),
+        },
+      });
+      const found = Object.values(dashboards);
+      expect(found).toHaveLength(1);
+      return JSON.stringify(found[0].Properties.DashboardBody);
+    };
+
+    it("names the dashboard <prefix>-sources-structured-scan", () => {
+      template.hasResourceProperties("AWS::CloudWatch::Dashboard", {
+        DashboardName: Match.stringLikeRegexp("sources-structured-scan$"),
+      });
+    });
+
+    it("SEARCHes the COA/Sources namespace the Python emitter publishes to", () => {
+      // The namespace is a contract between coa_sources.database.metrics
+      // NAMESPACE and every SEARCH() here. Renaming one side darkens every
+      // custom-metric widget silently, so pin the exact string.
+      expect(scanDashboardBody()).toContain("COA/Sources");
+    });
+
+    it.each([
+      "ScanDuration",
+      "TablesDiscovered",
+      "ConnectionValidation",
+      "CatalogAssetWrites",
+      "TablesApprovedByReview",
+      "TablesRejectedByReview",
+      "GlueApiThrottles",
+    ])("charts the %s custom metric", (metricName) => {
+      expect(scanDashboardBody()).toContain(metricName);
+    });
+
+    it("charts the acceptance-rate formula, not just the metric names", () => {
+      // A typo in the MathExpression (e.g. dropped parens) would still pass the
+      // metric-name substring checks above but render a broken widget. Pin the
+      // exact formula and its label.
+      const body = scanDashboardBody();
+      expect(body).toContain("approved / (approved + rejected)");
+      expect(body).toContain("Acceptance rate");
+    });
+
+    it("charts AWS/Bedrock latency and token metrics for the enrichment model", () => {
+      const body = scanDashboardBody();
+      expect(body).toContain("AWS/Bedrock");
+      expect(body).toContain("InvocationLatency");
+      expect(body).toContain("InputTokenCount");
+      expect(body).toContain("OutputTokenCount");
+    });
+
+    it("charts Step Functions execution outcomes", () => {
+      const body = scanDashboardBody();
+      expect(body).toContain("AWS/States");
+      expect(body).toContain("ExecutionsFailed");
+      expect(body).toContain("ExecutionTime");
+    });
+
+    it("declares overlay match rate as pending #114 instead of charting a metric", () => {
+      // Honest placeholder: no overlay code exists yet, so there is nothing to
+      // chart. If this ever becomes a real metric, this assertion should fail.
+      const body = scanDashboardBody();
+      expect(body).toContain("pending #114");
+      expect(body).not.toContain("OverlayMatch");
     });
   });
 
