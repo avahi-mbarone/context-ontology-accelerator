@@ -33,6 +33,7 @@ members = [
     "packages/sources",
     "libs/common",
     "smithy-generated/control-plane-python-server",
+    "smithy-generated/data-layer-python-server",
 ]
 
 [tool.pytest.ini_options]

@@ -401,6 +401,56 @@ structure QueryResult {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+// Shared Shapes — Schema (for DescribeSchema)
+// ══════════════════════════════════════════════════════════════════════════════
+/// A class in the namespace's queryable schema, with its IRI, label, optional
+/// description, properties, and parent class.
+structure SchemaClass {
+    /// IRI identifying the class.
+    @required
+    uri: String
+
+    /// Human-readable label for the class.
+    @required
+    label: String
+
+    /// Description of the class.
+    description: String
+
+    /// Properties defined on the class.
+    properties: SchemaPropertyList
+
+    /// IRI of the parent class, if any.
+    parentClass: String
+}
+
+/// A property of a schema class, with its IRI, label, value range (datatype or
+/// target class), and optional description.
+structure SchemaProperty {
+    /// IRI identifying the property.
+    @required
+    uri: String
+
+    /// Human-readable label for the property.
+    @required
+    label: String
+
+    /// Value range of the property (datatype or target class).
+    range: String
+
+    /// Description of the property.
+    description: String
+}
+
+list SchemaClassList {
+    member: SchemaClass
+}
+
+list SchemaPropertyList {
+    member: SchemaProperty
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 // Shared Shapes — Metrics (for ListMetrics)
 // ══════════════════════════════════════════════════════════════════════════════
 /// A queryable metric with its identifier, name, description, dimensions,
@@ -682,5 +732,44 @@ operation ServeListMetrics {
     errors: [
         ValidationError
         NamespaceNotFoundError
+    ]
+}
+
+// ── DescribeSchema ───────────────────────────────────────────────────────────
+/// Describe the namespace's queryable schema: classes and their properties
+/// across every ontology loaded into the namespace (induced, foundational,
+/// uploaded). Proxies to the ontology-engine ``/graph/schema`` route via the
+/// ontology-api-proxy Lambda — the same source the MCP ``describe_schema``
+/// tool reads, so an agent and a UI see the same schema.
+@readonly
+@http(method: "GET", uri: "/namespaces/{namespaceId}/schema")
+operation DescribeSchema {
+    input := {
+        @required
+        @httpLabel
+        namespaceId: Uuid
+
+        /// Whether to include class properties in the response.
+        @httpQuery("includeProperties")
+        includeProperties: Boolean
+
+        /// Maximum number of classes to return.
+        @httpQuery("maxResults")
+        maxResults: Integer
+    }
+
+    output := {
+        /// The classes in the namespace's schema.
+        @required
+        classes: SchemaClassList
+
+        /// Version of the ontology described.
+        ontologyVersion: String
+    }
+
+    errors: [
+        ValidationError
+        NamespaceNotFoundError
+        OntologyNotPublishedError
     ]
 }

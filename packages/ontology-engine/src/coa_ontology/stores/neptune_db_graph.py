@@ -1362,7 +1362,7 @@ class NeptuneDBGraphStore(GraphStore):
         SELECT ?p ?type ?label ?domain ?range WHERE {{
           GRAPH {gi} {{
             ?p rdf:type ?type .
-            VALUES ?type {{ owl:ObjectProperty owl:DatatypeProperty rdf:Property }}
+            VALUES ?type {{ owl:ObjectProperty owl:DatatypeProperty rdf:Property owl:AnnotationProperty }}
             OPTIONAL {{ ?p rdfs:label ?label }}
             OPTIONAL {{ ?p rdfs:domain ?domain }}
             OPTIONAL {{ ?p rdfs:range ?range }}
@@ -1389,9 +1389,21 @@ class NeptuneDBGraphStore(GraphStore):
         datatype_properties: list[dict] = []
         for entry in props.values():
             types = entry.pop("types")
+            is_object = OWL + "ObjectProperty" in types
+            is_datatype = OWL + "DatatypeProperty" in types
+            # Annotation properties (e.g. the grounding `matchConfidence` marker)
+            # are metadata, not relationships or attributes. An ingested
+            # annotation property carries both owl:AnnotationProperty and a
+            # generic rdf:Property stamp (store_property); with no range it would
+            # otherwise fall through to object_properties, overcounting the
+            # "Relationships" badge by one with an empty domain/range row (#33).
+            # Exclude it from BOTH buckets unless it is also explicitly declared
+            # an object or datatype property.
+            if OWL + "AnnotationProperty" in types and not is_object and not is_datatype:
+                continue
             rng = entry.get("range") or ""
             is_literal_range = rng.startswith(_XSD) or rng == RDFS + "Literal"
-            if OWL + "DatatypeProperty" in types or (OWL + "ObjectProperty" not in types and is_literal_range):
+            if is_datatype or (not is_object and is_literal_range):
                 datatype_properties.append(entry)
             else:
                 object_properties.append(entry)

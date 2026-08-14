@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError, URLError
 
 import pytest
+from botocore.exceptions import ClientError
 
 # The handler module reads env vars at import time.
 with patch.dict(
@@ -19,6 +20,7 @@ with patch.dict(
         "AGENTCORE_RUNTIME_ARN": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/test",
         "AWS_REGION": "us-east-1",
         "ALLOWED_ORIGIN": "https://app.example.com",
+        "ONTOLOGY_PROXY_LAMBDA_ARN": "arn:aws:lambda:us-east-1:123456789012:function:test-ontology-proxy",
     },
 ):
     from coa_data_layer import handler as handler_module
@@ -121,13 +123,26 @@ class TestCorsHeaders:
 
     def test_missing_allowed_origin_defaults_to_empty(self):
         """Missing ALLOWED_ORIGIN defaults to empty string (doesn't crash at import)."""
-        with patch.dict("os.environ", {"AGENTCORE_RUNTIME_ARN": "arn:test", "AWS_REGION": "us-east-1"}, clear=True):
+        env = {
+            "AGENTCORE_RUNTIME_ARN": "arn:test",
+            "AWS_REGION": "us-east-1",
+            "ONTOLOGY_PROXY_LAMBDA_ARN": "arn:aws:lambda:us-east-1:123456789012:function:test-ontology-proxy",
+        }
+        with patch.dict("os.environ", env, clear=True):
             import importlib
 
             from coa_data_layer import handler as h
 
             importlib.reload(h)
-            assert h.CORS_HEADERS["Access-Control-Allow-Origin"] == ""
+            try:
+                assert h.CORS_HEADERS["Access-Control-Allow-Origin"] == ""
+            finally:
+                # Reload again under the OUTER (module-scope) env so subsequent
+                # tests see the same constants they were imported with. Without
+                # this, ``ONTOLOGY_PROXY_LAMBDA_ARN`` (or any other constant
+                # captured at import time) would leak an empty value into the
+                # rest of the suite via ``handler_module``.
+                importlib.reload(h)
 
 
 def _fake_urlopen(response_body: dict):
@@ -389,3 +404,180 @@ class TestUpstreamErrorHandling:
             result = handler(event, None)
         assert result["statusCode"] == 502
         assert "ValueError" in result["body"]
+
+
+@pytest.mark.unit
+class TestDescribeSchema:
+    """GET /namespaces/{ns}/schema proxies to the ontology-api-proxy Lambda.
+
+    Regression scope: MR !911 removed the DescribeSchema operation entirely on
+    the assumption that it was unrouted. It is used by the UI/data-layer surface
+    (parallel to MCP's ``describe_schema``), so a subsequent revert of this fix
+    would break the surface again and must fail here.
+    """
+
+    def _fake_proxy_response(self, body: dict, status: int = 200) -> dict:
+        """Shape a synthetic Lambda invoke response with an API GW proxy body."""
+        return {
+            "StatusCode": 200,
+            "Payload": io.BytesIO(
+                json.dumps(
+                    {
+                        "statusCode": status,
+                        "body": json.dumps(body),
+                        "headers": {},
+                    }
+                ).encode("utf-8")
+            ),
+        }
+
+    def test_returns_classes_from_proxy(self):
+        proxy_body = {
+            "classes": [
+                {"uri": "urn:c:1", "label": "Policy", "properties": []},
+            ],
+            "ontologyVersion": "2026-08-12",
+        }
+        mock_client = MagicMock()
+        mock_client.invoke.return_value = self._fake_proxy_response(proxy_body)
+        with patch.object(handler_module, "_get_lambda_client", return_value=mock_client):
+            event = _api_event("GET", "/namespaces/{namespaceId}/schema", body=None)
+            result = handler(event, None)
+        assert result["statusCode"] == 200
+        body = json.loads(result["body"])
+        assert body["classes"] == proxy_body["classes"]
+        assert body["ontologyVersion"] == "2026-08-12"
+
+    def test_forwards_camelcase_query_params_verbatim(self):
+        """The ontology-api-proxy renames maxResults→max_results per path; the
+        data layer must pass the camelCase form through unchanged so the alias
+        is what runs."""
+        mock_client = MagicMock()
+        mock_client.invoke.return_value = self._fake_proxy_response({"classes": [], "ontologyVersion": ""})
+        with patch.object(handler_module, "_get_lambda_client", return_value=mock_client):
+            event = _api_event("GET", "/namespaces/{namespaceId}/schema", body=None)
+            event["queryStringParameters"] = {"maxResults": "50", "includeProperties": "false"}
+            handler(event, None)
+        forwarded = json.loads(mock_client.invoke.call_args.kwargs["Payload"].decode())
+        assert forwarded["queryStringParameters"] == {"maxResults": "50", "includeProperties": "false"}
+        assert forwarded["resource"] == "/namespaces/{namespaceId}/graph/schema"
+
+    def test_bearer_token_forwarded(self):
+        mock_client = MagicMock()
+        mock_client.invoke.return_value = self._fake_proxy_response({"classes": [], "ontologyVersion": ""})
+        with patch.object(handler_module, "_get_lambda_client", return_value=mock_client):
+            event = _api_event("GET", "/namespaces/{namespaceId}/schema", body=None)
+            event["headers"] = {"Authorization": "Bearer forwarded-token"}
+            handler(event, None)
+        forwarded = json.loads(mock_client.invoke.call_args.kwargs["Payload"].decode())
+        assert forwarded["headers"]["Authorization"] == "Bearer forwarded-token"
+
+    def test_proxy_error_status_propagates(self):
+        proxy_body = {"message": "namespace not found"}
+        mock_client = MagicMock()
+        mock_client.invoke.return_value = self._fake_proxy_response(proxy_body, status=404)
+        with patch.object(handler_module, "_get_lambda_client", return_value=mock_client):
+            event = _api_event("GET", "/namespaces/{namespaceId}/schema", body=None)
+            result = handler(event, None)
+        assert result["statusCode"] == 404
+        assert "namespace not found" in result["body"]
+
+    def test_function_error_maps_to_502(self):
+        mock_client = MagicMock()
+        mock_client.invoke.return_value = {
+            "StatusCode": 200,
+            "FunctionError": "Unhandled",
+            "Payload": io.BytesIO(b'"boom"'),
+        }
+        with patch.object(handler_module, "_get_lambda_client", return_value=mock_client):
+            event = _api_event("GET", "/namespaces/{namespaceId}/schema", body=None)
+            result = handler(event, None)
+        assert result["statusCode"] == 502
+        assert "Schema backend failed" in result["body"]
+
+    def test_missing_env_var_returns_501(self):
+        with patch.object(handler_module, "ONTOLOGY_PROXY_LAMBDA_ARN", ""):
+            event = _api_event("GET", "/namespaces/{namespaceId}/schema", body=None)
+            result = handler(event, None)
+        assert result["statusCode"] == 501
+        assert "ONTOLOGY_PROXY_LAMBDA_ARN" in result["body"]
+
+    def test_response_does_not_leak_extra_fields(self):
+        """The Smithy output is `classes` + `ontologyVersion` only. A future
+        backend change must not add fields to the customer response by accident."""
+        proxy_body = {
+            "classes": [],
+            "ontologyVersion": "v1",
+            "namespace": "9142f178-...",  # ontology-engine echoes this today
+            "internal_debug": "should never surface",
+        }
+        mock_client = MagicMock()
+        mock_client.invoke.return_value = self._fake_proxy_response(proxy_body)
+        with patch.object(handler_module, "_get_lambda_client", return_value=mock_client):
+            event = _api_event("GET", "/namespaces/{namespaceId}/schema", body=None)
+            result = handler(event, None)
+        body = json.loads(result["body"])
+        assert set(body.keys()) == {"classes", "ontologyVersion"}
+
+    # ── Error-handling regressions from the !921 code review ─────────────
+
+    def test_client_error_on_invoke_maps_to_502(self):
+        """boto3 ClientError from lambda:Invoke (throttle / permissions / timeout)
+        must produce a stable 502 with a schema-specific message. Unhandled it
+        would escape to the router's generic ``except Exception`` and come back
+        as ``Context Manager invocation failed`` — misleading, since CM was
+        never in the path."""
+        mock_client = MagicMock()
+        mock_client.invoke.side_effect = ClientError(
+            {"Error": {"Code": "ThrottlingException", "Message": "Rate exceeded"}},
+            "Invoke",
+        )
+        with patch.object(handler_module, "_get_lambda_client", return_value=mock_client):
+            event = _api_event("GET", "/namespaces/{namespaceId}/schema", body=None)
+            result = handler(event, None)
+        assert result["statusCode"] == 502
+        assert "Failed to invoke schema backend Lambda" in result["body"]
+        # And crucially not misdiagnosed as a CM failure.
+        assert "Context Manager" not in result["body"]
+
+    def test_malformed_envelope_json_returns_502(self):
+        """An invoke that succeeded at the control-plane level can still return
+        bytes that aren't valid JSON at the outer envelope (proxy crashed
+        inside its Lambda wrapper). Must produce a clear 502, not raise
+        through the router."""
+        mock_client = MagicMock()
+        mock_client.invoke.return_value = {
+            "StatusCode": 200,
+            "Payload": io.BytesIO(b"not-valid-json{{{"),
+        }
+        with patch.object(handler_module, "_get_lambda_client", return_value=mock_client):
+            event = _api_event("GET", "/namespaces/{namespaceId}/schema", body=None)
+            result = handler(event, None)
+        assert result["statusCode"] == 502
+        assert "Schema backend returned invalid JSON" in result["body"]
+
+    def test_function_error_does_not_leak_lambda_internals(self):
+        """The FunctionError payload can carry ARNs, request IDs, stack frames,
+        or model-supplied text. The response body MUST be a generic message;
+        the truncated preview is logged server-side, never returned."""
+        secret_payload = (
+            b'{"errorMessage": "Traceback... at /var/task/handler.py line 42: '
+            b'arn:aws:iam::123456789012:role/internal-role", "errorType": "RuntimeError"}'
+        )
+        mock_client = MagicMock()
+        mock_client.invoke.return_value = {
+            "StatusCode": 200,
+            "FunctionError": "Unhandled",
+            "Payload": io.BytesIO(secret_payload),
+        }
+        with patch.object(handler_module, "_get_lambda_client", return_value=mock_client):
+            event = _api_event("GET", "/namespaces/{namespaceId}/schema", body=None)
+            result = handler(event, None)
+        assert result["statusCode"] == 502
+        body_text = result["body"]
+        assert "Schema backend failed" in body_text
+        # Nothing from the Lambda error payload may reach the customer.
+        assert "Traceback" not in body_text
+        assert "arn:aws:iam" not in body_text
+        assert "handler.py" not in body_text
+        assert "RuntimeError" not in body_text

@@ -610,6 +610,12 @@ _PATH_MAPPING: dict[str, dict[str, tuple[str, str]]] = {
     "/namespaces/{namespaceId}/graph/traverse": {
         "POST": ("traverseGraph", "Namespace"),
     },
+    "/namespaces/{namespaceId}/schema": {
+        # DescribeSchema — read-only schema discovery, same authorization
+        # as viewing the namespace catalog. Matches MCP's ``describe_schema``
+        # which is also viewNamespace-gated.
+        "GET": ("viewNamespace", "Namespace"),
+    },
     # ── Ontology graph + catalog ────────────────────────────────────────
     # Reads are gated by viewNamespace; deleting an ontology is a write, gated
     # by manageOntology (same action as induce/accept). Without the DELETE entry
