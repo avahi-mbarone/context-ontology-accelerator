@@ -24,6 +24,7 @@ subject are pulled into that subject's sub-graph so embedded
 
 from __future__ import annotations
 
+from coa_common.constants import VOCAB_PREFIX, VOCAB_URI
 from rdflib import BNode, Graph, Namespace
 from rdflib.namespace import DCTERMS, OWL, RDF, RDFS, SKOS, XSD
 
@@ -32,6 +33,13 @@ from rdflib.namespace import DCTERMS, OWL, RDF, RDFS, SKOS, XSD
 # more compact.
 _WB = Namespace("https://ontology-workbench.local/vocab#")
 _NEPTUNE = Namespace("http://aws.amazon.com/neptune/vocab/v01/")
+# The engine's own vocabulary (isMapped, fkProvenance, distinctValues,
+# subClassProvenance, …). Neptune's GSP output is prefix-light, so this
+# namespace arrives unbound; without an explicit binding rdflib auto-mints a
+# throwaway prefix on each section sub-graph that the prefix-block rebuild then
+# discards, yielding an undeclared prefix and unparseable Turtle. Sourced from
+# the shared constant so it tracks any rebrand of the vocab base.
+_VOCAB = Namespace(VOCAB_URI)
 
 
 def format_grouped_turtle(raw_turtle: str) -> str:
@@ -64,6 +72,7 @@ def format_grouped_turtle(raw_turtle: str) -> str:
     g.bind("skos", SKOS, override=True, replace=True)
     g.bind("wb", _WB, override=True, replace=True)
     g.bind("neptune", _NEPTUNE, override=True, replace=True)
+    g.bind(VOCAB_PREFIX, _VOCAB, override=True, replace=True)
 
     # Bind the ontology's own namespace as the empty prefix so subjects
     # render as e.g. ``:Claim`` instead of ``<https://…/onto/ds-foo#Claim>``.
@@ -88,6 +97,18 @@ def format_grouped_turtle(raw_turtle: str) -> str:
         {s for s in g.subjects() if s not in classified and not isinstance(s, BNode)},
         key=str,
     )
+
+    # Structural guard against undeclared prefixes. The curated binds above cover
+    # today's vocabularies, but any namespace that reaches serialization unbound
+    # (a future predicate, a source that declared nothing) would be auto-assigned
+    # a throwaway prefix (ns1, ns2, …) on each section sub-graph — a binding that
+    # lives only on that sub-graph and is dropped when the body's @prefix lines
+    # are stripped, leaving the prefix block (rebuilt from ``g``) missing it and
+    # the output unparseable. Serializing the parent graph once forces rdflib to
+    # mint and RECORD those prefixes on ``g`` itself; ``_subgraph_for`` then copies
+    # the now-complete map into every sub-graph, so bodies and the prefix block
+    # reference the same declared prefixes. The result is discarded.
+    g.serialize(format="turtle")
 
     sections: list[str] = []
 
