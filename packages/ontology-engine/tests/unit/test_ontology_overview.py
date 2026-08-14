@@ -176,6 +176,56 @@ class TestGetOntologyOverview:
         assert prop["domain"] is None
         assert prop["range"] is None
 
+    def test_annotation_property_excluded_from_both_buckets(self):
+        # #33: an ingested annotation property (e.g. the grounding
+        # `matchConfidence` marker) carries BOTH owl:AnnotationProperty and a
+        # generic rdf:Property stamp, with no rdfs:range. It must NOT be
+        # classified as an object property (relationship) — it belongs in
+        # neither the object nor the datatype bucket.
+        prop_rows = _rows(
+            {
+                "p": _uri("https://ex.org/o#hasPolicy"),
+                "type": _uri(OWL + "ObjectProperty"),
+                "range": _uri("https://ex.org/o#Policy"),
+            },
+            # matchConfidence arrives as two rows (both types), no domain/range.
+            {"p": _uri("https://ex.org/o#matchConfidence"), "type": _uri(OWL + "AnnotationProperty")},
+            {"p": _uri("https://ex.org/o#matchConfidence"), "type": _uri(RDF + "Property")},
+        )
+        store = NeptuneDBGraphStore(namespace="ns")
+        with patch(
+            "coa_ontology.stores.neptune_db_graph._sparql_query",
+            side_effect=[_rows(), prop_rows],
+        ):
+            overview = store.get_ontology_overview("https://ex.org/o#", namespace="ns")
+        obj = {p["uri"] for p in overview["object_properties"]}
+        dat = {p["uri"] for p in overview["datatype_properties"]}
+        # Only the real relationship is counted; matchConfidence is dropped.
+        assert obj == {"https://ex.org/o#hasPolicy"}
+        assert "https://ex.org/o#matchConfidence" not in obj
+        assert "https://ex.org/o#matchConfidence" not in dat
+
+    def test_annotation_property_also_object_property_is_kept(self):
+        # Guard the exclusion's boundary: a property explicitly declared an
+        # owl:ObjectProperty is still a relationship even if it also carries an
+        # owl:AnnotationProperty type — only annotation-ONLY props are dropped.
+        prop_rows = _rows(
+            {
+                "p": _uri("https://ex.org/o#relatesTo"),
+                "type": _uri(OWL + "ObjectProperty"),
+                "range": _uri("https://ex.org/o#Policy"),
+            },
+            {"p": _uri("https://ex.org/o#relatesTo"), "type": _uri(OWL + "AnnotationProperty")},
+        )
+        store = NeptuneDBGraphStore(namespace="ns")
+        with patch(
+            "coa_ontology.stores.neptune_db_graph._sparql_query",
+            side_effect=[_rows(), prop_rows],
+        ):
+            overview = store.get_ontology_overview("https://ex.org/o#", namespace="ns")
+        obj = {p["uri"] for p in overview["object_properties"]}
+        assert obj == {"https://ex.org/o#relatesTo"}
+
 
 def _cls(uri: str, *parents: str) -> dict:
     row = {"c": _uri(uri)}
