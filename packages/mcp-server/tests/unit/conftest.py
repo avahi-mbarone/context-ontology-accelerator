@@ -53,6 +53,7 @@ def create_test_token(
     *,
     issuer: str = _TEST_ISSUER,
     audience: str = _TEST_AUDIENCE,
+    email: str | None = None,
 ) -> str:
     """Create a signed test JWT for local development/testing.
 
@@ -69,6 +70,9 @@ def create_test_token(
         exp_offset: Seconds from now until token expires (default 1 hour).
         issuer: ``iss`` claim. Override to test issuer-mismatch rejection.
         audience: ``aud`` claim. Override to test audience-mismatch rejection.
+        email: Optional ``email`` claim. Omitted from the payload when ``None``
+            (matches Cognito access tokens, which do not carry email); set to
+            an address to exercise the email-plumbing path.
 
     Returns:
         Encoded JWT string.
@@ -82,6 +86,8 @@ def create_test_token(
         "aud": audience,
         "exp": int(time.time()) + exp_offset,
     }
+    if email is not None:
+        payload["email"] = email
     return jwt.encode(payload, _private_key, algorithm="RS256", headers={"kid": _TEST_KID})
 
 

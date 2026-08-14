@@ -171,7 +171,15 @@ async def resolve_grant(
     Raises:
         GrantResolutionError: If the caller lacks access or grant cannot be resolved.
     """
-    # ── Namespace access check ────────────────────────────────────────
+    # ── Namespace pre-filter (advisory) ───────────────────────────────
+    # Only enforced if the JWT actually carried a ``custom:namespaces`` claim.
+    # An empty/absent list is NOT a denial signal: the vast majority of tokens
+    # (Cognito access tokens, generic OIDC tokens) never populate that claim,
+    # and denying pre-lookup here would reject every non-admin caller before
+    # the RRM grant table gets a chance to speak. The authoritative access
+    # check is the resolve_profile → RRM lookup below, plus the
+    # namespace-scoped emptiness check further down, followed by Cedar policy
+    # evaluation.
     if caller.namespaces and namespace_id not in caller.namespaces:
         logger.warning(
             "namespace_access_denied",
@@ -184,19 +192,12 @@ async def resolve_grant(
         )
         raise GrantResolutionError(f"User '{caller.user_id}' does not have access to namespace '{namespace_id}'")
 
-    # Fail closed: if namespaces list is empty and caller is not an admin,
-    # deny access.
-    if not caller.namespaces and "admin" not in [r.lower() for r in caller.roles]:
-        logger.warning(
-            "namespace_access_denied_empty",
-            user_id=caller.user_id,
-            agent_id=caller.agent_id,
-            requested_namespace=namespace_id,
-            roles=caller.roles,
-        )
-        raise GrantResolutionError(f"User '{caller.user_id}' has no namespace grants and is not an admin")
-
     # ── Resolve data-access profile via shared role resolver ──────────
+    # Pass ``email`` so grants written under the caller's email address (the
+    # default when granting through the UI — Cognito's ``sub`` is a UUID users
+    # never see) resolve for a caller whose JWT surfaces both ``sub`` and
+    # ``email``. Skipping ``email`` here silently hides those grants and
+    # denies every human user with the misleading "No grants found" error.
     try:
         from coa_serve.role_resolver import resolve_profile
 
@@ -204,6 +205,7 @@ async def resolve_grant(
             user_id=caller.user_id,
             groups=caller.roles,
             namespace=namespace_id,
+            email=caller.email,
         )
     except Exception as e:
         # Fail closed for EVERY caller, admins included.
@@ -231,6 +233,36 @@ async def resolve_grant(
             error=str(e),
         )
         raise GrantResolutionError(f"Failed to resolve grant for user '{caller.user_id}': {e}") from e
+
+    # ── Fail closed on empty grants for THIS namespace ────────────────
+    # ``resolved.resource_roles`` accumulates grants across every namespace
+    # this caller holds — ``resolve_profile`` only uses ``namespace=`` to
+    # scope the data-restrictions merge, not the roles list. So the check
+    # here must filter by ``resourceUID`` before the emptiness test:
+    # a caller who holds ``namespace-owner`` on ``sales`` and requests ``hr``
+    # would otherwise pass an "any grants at all" test with the sales grant
+    # and hit Cedar with a profile that has no bearing on hr. Cedar catches
+    # it today (all six MCP tools pass ``cedar_action`` and ``ROLES_TABLE_NAME``
+    # is set in this deployment), but ``cedar_action`` defaults to ``None`` and
+    # unset ``ROLES_TABLE_NAME`` skips Cedar entirely — this fail-closed check
+    # is the last line of defense and must be namespace-scoped.
+    #
+    # Global roles (``GLOBAL`` resource in RRM — platform-admin, platform-viewer)
+    # still pass because they grant cross-namespace access by design; the admin
+    # IdP group bypass is unchanged.
+    namespace_resource_roles = [r for r in resolved.resource_roles if r.get("resourceUID") == namespace_id]
+    is_admin_group_member = any(r.lower() == "admin" for r in caller.roles)
+    if not namespace_resource_roles and not resolved.global_roles and not is_admin_group_member:
+        logger.warning(
+            "grant_lookup_empty",
+            user_id=caller.user_id,
+            agent_id=caller.agent_id,
+            requested_namespace=namespace_id,
+            cross_namespace_role_count=len(resolved.resource_roles),
+        )
+        raise GrantResolutionError(
+            f"User '{caller.user_id}' has no grants on namespace '{namespace_id}' and is not an admin"
+        )
 
     # ── Cedar policy evaluation (OUTSIDE try/except, never bypassed) ──
     if cedar_action and _ROLES_TABLE:

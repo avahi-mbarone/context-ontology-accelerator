@@ -206,6 +206,26 @@ def test_add_alignment_novel_emits_nothing() -> None:
     assert len(g) == 0
 
 
+@pytest.mark.parametrize("is_class", [True, False])
+@pytest.mark.parametrize("match_type", ["exact", "high_confidence", "ambiguous"])
+def test_add_alignment_self_match_emits_nothing(match_type, is_class) -> None:
+    """A self-match (target IRI == subject IRI) must emit no alignment triple:
+    a reflexive rdfs:subClassOf is a Tier-1 taxonomy-cycle self-loop and a self
+    skos:* / owl:equivalentProperty is vacuous."""
+    g = Graph()
+    uri = URIRef("http://ex.org/Agreement")
+    m = ConceptMatch(
+        source_column="" if is_class else "Agreement",
+        source_table="Agreement",
+        matched_class_uri=str(uri),  # self-match
+        matched_ontology_id="fibo",
+        similarity=0.99,
+        match_type=match_type,
+    )
+    _add_alignment(g, uri, m, _conf_prop(), is_class=is_class)
+    assert len(g) == 0
+
+
 # ── DocumentPipeline.extract_concepts ────────────────────────────────
 
 

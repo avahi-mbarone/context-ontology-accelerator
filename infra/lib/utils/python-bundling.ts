@@ -7,7 +7,8 @@
  * Handles:
  *   - Flattening `src/` layout so modules are importable at the Lambda root
  *   - Merging multiple source directories (e.g. package + shared lib)
- *   - Installing pip dependencies into the asset
+ *   - Installing pip dependencies into the asset (locally via uv — independent
+ *     of the host `python3` symlink; in the Docker fallback via the image `pip`)
  *   - Local bundling first (no Docker needed), with Docker fallback
  */
 import { execSync } from "child_process";
@@ -38,22 +39,42 @@ export interface PythonBundlingOptions {
 }
 
 /**
- * Resolve the local pip command. macOS often has `pip3` but not `pip` (or
- * has an Xcode stub at /usr/local/bin/pip that fails with xcode-select).
- * Docker bundling always uses `pip` (available in the Python container).
+ * Build the local `uv pip install` command for the bundle, or `null` when there
+ * are no dependencies to install.
+ *
+ * Why uv and not the host `pip`: installing a newer Python on many Linux
+ * distributions does NOT repoint the default `python3`/`pip` symlink. Amazon
+ * Linux 2023 ships Python 3.9 and keeps `/usr/bin/python3` on it because `dnf`
+ * itself depends on that exact version, so `dnf install python3.12` adds
+ * `/usr/bin/python3.12` but leaves `python3` (and therefore the `pip`/`pip3` on
+ * PATH) bound to 3.9. A `pip`/`pip3` probe then finds the wrong interpreter and
+ * the bundle either fails outright or targets the wrong runtime.
+ *
+ * uv sidesteps the symlink entirely: it is a standalone binary that does not use
+ * the system Python to run. `--python-platform` + `--python-version` cross-resolve
+ * wheels for the Lambda target from any host (macOS or an older-Python Linux)
+ * without executing a 3.12 interpreter, and `--only-binary :all:` forces wheels
+ * so a native sdist can never silently build against the host toolchain.
+ *
+ * The `--target` is `/asset-output`; the caller rewrites it to the real output
+ * dir for local bundling (and the requirements path stays an absolute host path,
+ * since the local step runs on the host and reads the real file).
  */
-function resolvePipCommand(): string {
-  try {
-    execSync("pip --version", { stdio: "pipe" });
-    return "pip";
-  } catch {
-    try {
-      execSync("pip3 --version", { stdio: "pipe" });
-      return "pip3";
-    } catch {
-      return "pip";
-    }
+export function _uvInstallCommand(opts: PythonBundlingOptions): string | null {
+  const uvPlatform =
+    opts.architecture === "arm64"
+      ? "aarch64-manylinux2014"
+      : "x86_64-manylinux2014";
+  const flags = `--target /asset-output --python-platform ${uvPlatform} --python-version 3.12 --only-binary :all: -q --no-cache`;
+  if (opts.requirementsFile) {
+    const reqFile = opts.requirementsFile.replace(/\\/g, "/");
+    return `uv pip install ${flags} -r ${reqFile}`;
   }
+  if (opts.pipDeps?.length) {
+    const deps = opts.pipDeps.map((d) => `'${d}'`).join(" ");
+    return `uv pip install ${flags} ${deps}`;
+  }
+  return null;
 }
 
 /**
@@ -109,18 +130,23 @@ export function bundlePython(opts: PythonBundlingOptions): lambda.Code {
     )
     .join(" && ");
 
-  const localPip = resolvePipCommand();
+  // Docker path installs inside the 3.12 bundling image, whose `pip` IS the
+  // target interpreter, so it keeps the classic pip cross-flags.
   const pipFlags = `--target /asset-output --platform ${platform} --only-binary=:all: --python-version 3.12 -q --no-cache-dir --disable-pip-version-check`;
+  // Local path uses uv, which does not depend on the host `python3` symlink and
+  // so bundles for 3.12 even where the distro default Python is older and cannot
+  // be repointed. See _uvInstallCommand.
+  const localInstall = _uvInstallCommand(opts);
 
   let localPipSteps: string[] = [];
   let dockerPipSteps: string[] = [];
   if (opts.requirementsFile) {
     const reqFile = opts.requirementsFile.replace(/\\/g, "/");
-    localPipSteps = [`${localPip} install -r ${reqFile} ${pipFlags}`, cleanup];
+    localPipSteps = localInstall ? [localInstall, cleanup] : [];
     dockerPipSteps = [`pip install -r ${reqFile} ${pipFlags}`, cleanup];
   } else if (opts.pipDeps?.length) {
     const deps = opts.pipDeps.map((d) => `'${d}'`).join(" ");
-    localPipSteps = [`${localPip} install ${pipFlags} ${deps}`, cleanup];
+    localPipSteps = localInstall ? [localInstall, cleanup] : [];
     dockerPipSteps = [`pip install ${pipFlags} ${deps}`, cleanup];
   }
 

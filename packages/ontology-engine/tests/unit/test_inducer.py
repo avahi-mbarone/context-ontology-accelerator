@@ -297,6 +297,49 @@ def test_production_strategy_grounded_table_emits_grounding_axioms():
     assert not list(g.triples((None, PROV.wasDerivedFrom, None)))
 
 
+@pytest.mark.parametrize("match_type", ["exact", "high_confidence", "ambiguous"])
+def test_production_strategy_self_match_emits_no_reflexive_grounding_axioms(match_type):
+    """Regression: if a class's grounding match resolves to its own IRI
+    (``matched_class_uri`` equals the class's own IRI), the builder must emit NO
+    reflexive grounding axiom — ``X rdfs:subClassOf X`` is a self-loop the Tier-1
+    TaxonomyCycleValidator reports as TAXONOMY_CYCLE, and a self
+    ``skos:exactMatch``/``closeMatch``/``relatedMatch`` is semantically vacuous.
+    It must also record no ``matchConfidence`` for the vacuous self-match. The
+    class itself is still declared. The genuine cross-namespace match (guard does
+    not over-fire) is covered by
+    test_production_strategy_grounded_table_emits_grounding_axioms and the
+    exact-match test above."""
+    from coa_ontology.inducer.strategies.table_to_ontology import TableToOntologyStrategy
+
+    table = _make_table()
+    orders_cls = URIRef("http://ex.org/induced#Orders")
+    match_confidence = Namespace("http://ex.org/induced#")["matchConfidence"]
+
+    matches = [
+        ConceptMatch(
+            source_table=table.name,
+            source_column="",
+            matched_class_uri=str(orders_cls),  # self-match: the class's own IRI
+            matched_ontology_id="http://ex.org/induced#",
+            similarity=0.99,
+            match_type=match_type,
+            scoring_strategy="lexical",
+        ),
+    ]
+
+    g, _novel = TableToOntologyStrategy()._build_proposal_ontology("http://ex.org/induced#", [table], matches)
+
+    # The class is still declared...
+    assert (orders_cls, RDF.type, OWL.Class) in g
+    # ...but carries no reflexive grounding axioms.
+    assert (orders_cls, RDFS.subClassOf, orders_cls) not in g
+    assert (orders_cls, SKOS.exactMatch, orders_cls) not in g
+    assert (orders_cls, SKOS.closeMatch, orders_cls) not in g
+    assert (orders_cls, SKOS.relatedMatch, orders_cls) not in g
+    # ...and no vacuous self matchConfidence.
+    assert list(g.triples((orders_cls, match_confidence, None))) == []
+
+
 def test_build_ontology_fk():
     """Foreign key columns become ObjectProperties."""
     pipeline = InductionPipeline(None, None, None)
@@ -347,6 +390,34 @@ def test_build_ontology_fk():
     fk_prop = URIRef("http://ex.org/induced#orders_customerId")
     assert (fk_prop, RDF.type, OWL.ObjectProperty) in g
     assert (fk_prop, RDFS.range, URIRef("http://ex.org/induced#Customers")) in g
+
+
+def test_build_ontology_self_match_emits_no_reflexive_axioms():
+    """The retired InductionPipeline.build_ontology reference path must also skip
+    a self-match (matched_class_uri == the table's own class IRI): no reflexive
+    rdfs:subClassOf / skos:exactMatch / closeMatch. Guards the latent copy of the
+    induction self-loop bug even though this path is not mounted in production."""
+    pipeline = InductionPipeline(None, None, None)
+    table = _make_table()  # 'orders' → http://ex.org/induced#Orders
+    orders_cls = URIRef("http://ex.org/induced#Orders")
+    matches = [
+        ConceptMatch(
+            source_table=table.name,
+            source_column="",
+            matched_class_uri=str(orders_cls),  # self-match
+            matched_ontology_id="http://ex.org/induced#",
+            similarity=0.99,
+            match_type="exact",
+            scoring_strategy="lexical",
+        ),
+    ]
+
+    g = pipeline.build_ontology("http://ex.org/induced#", [table], pipeline.extract_concepts([table]), matches)
+
+    assert (orders_cls, RDF.type, OWL.Class) in g
+    assert (orders_cls, RDFS.subClassOf, orders_cls) not in g
+    assert (orders_cls, SKOS.exactMatch, orders_cls) not in g
+    assert (orders_cls, SKOS.closeMatch, orders_cls) not in g
 
 
 def _haskey_members(g) -> list[URIRef]:

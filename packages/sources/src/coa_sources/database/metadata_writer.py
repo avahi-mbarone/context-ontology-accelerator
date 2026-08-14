@@ -33,6 +33,8 @@ from coa_common.domain_models import DiscoveredMetadata
 from coa_common.metadata_store import SMUSClient
 from coa_common.metadata_store.exceptions import MetadataStoreError
 
+from coa_sources.database.metrics import emit_metric
+
 logger = logging.getLogger(__name__)
 
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
@@ -187,6 +189,12 @@ def write_to_datazone(
         len(failures),
         data_source_id,
     )
+
+    # Aggregate counts, emitted once per discovery — NOT per asset. A 1k-table
+    # scan would otherwise write 1k EMF lines for the same two numbers.
+    # Create/Update only: the writer has no delete path.
+    emit_metric("CatalogAssetWrites", assets_created, "Count", Operation="Create")
+    emit_metric("CatalogAssetWrites", assets_revised, "Count", Operation="Update")
 
     if failures:
         raise RuntimeError(f"Failed to write {len(failures)} asset(s): {failures}")

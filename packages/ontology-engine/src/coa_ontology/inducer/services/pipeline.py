@@ -697,20 +697,26 @@ class InductionPipeline:
             if table_match and table_match.matched_class_uri:
                 grounding_cls = URIRef(table_match.matched_class_uri)
                 conf = Literal(table_match.similarity, datatype=XSD.float)
-                g.add((grounding_cls, RDF.type, OWL.Class))
-                g.add((grounding_cls, RDFS.label, Literal(_label_from_uri(str(grounding_cls)))))
+                # Skip a self-match (grounding_cls == table_cls): a reflexive
+                # rdfs:subClassOf is a Tier-1 taxonomy-cycle self-loop and a self
+                # skos:* match is vacuous. (build_ontology is the retired
+                # reference path — not the active TableToOntologyStrategy — but
+                # the guard mirrors it defensively.)
+                if grounding_cls != table_cls:
+                    g.add((grounding_cls, RDF.type, OWL.Class))
+                    g.add((grounding_cls, RDFS.label, Literal(_label_from_uri(str(grounding_cls)))))
 
-                if table_match.match_type == "exact":
-                    g.add((table_cls, RDFS.subClassOf, grounding_cls))
-                    g.add((table_cls, SKOS.exactMatch, grounding_cls))
-                    g.add((table_cls, match_confidence, conf))
-                elif table_match.match_type == "high_confidence":
-                    g.add((table_cls, RDFS.subClassOf, grounding_cls))
-                    g.add((table_cls, SKOS.closeMatch, grounding_cls))
-                    g.add((table_cls, match_confidence, conf))
-                elif table_match.match_type == "ambiguous":
-                    g.add((table_cls, SKOS.relatedMatch, grounding_cls))
-                    g.add((table_cls, match_confidence, conf))
+                    if table_match.match_type == "exact":
+                        g.add((table_cls, RDFS.subClassOf, grounding_cls))
+                        g.add((table_cls, SKOS.exactMatch, grounding_cls))
+                        g.add((table_cls, match_confidence, conf))
+                    elif table_match.match_type == "high_confidence":
+                        g.add((table_cls, RDFS.subClassOf, grounding_cls))
+                        g.add((table_cls, SKOS.closeMatch, grounding_cls))
+                        g.add((table_cls, match_confidence, conf))
+                    elif table_match.match_type == "ambiguous":
+                        g.add((table_cls, SKOS.relatedMatch, grounding_cls))
+                        g.add((table_cls, match_confidence, conf))
 
             if table.description:
                 g.add((table_cls, RDFS.comment, Literal(table.description)))
@@ -795,17 +801,21 @@ class InductionPipeline:
                         xsd_type = _SQL_TO_XSD.get(col.dataType.upper(), XSD.string)
                         g.add((matched_uri, RDFS.range, xsd_type))
 
-                    if col_match.match_type == "exact":
-                        g.add((prop_uri, OWL.equivalentProperty, matched_uri))
-                        g.add((prop_uri, SKOS.exactMatch, matched_uri))
-                        g.add((prop_uri, match_confidence, conf))
-                    elif col_match.match_type == "high_confidence":
-                        g.add((prop_uri, OWL.equivalentProperty, matched_uri))
-                        g.add((prop_uri, SKOS.closeMatch, matched_uri))
-                        g.add((prop_uri, match_confidence, conf))
-                    elif col_match.match_type == "ambiguous":
-                        g.add((prop_uri, SKOS.relatedMatch, matched_uri))
-                        g.add((prop_uri, match_confidence, conf))
+                    # Skip a self-match (prop_uri == matched_uri): a reflexive
+                    # owl:equivalentProperty / skos:* link is vacuous. (Retired
+                    # reference path; guarded defensively.)
+                    if prop_uri != matched_uri:
+                        if col_match.match_type == "exact":
+                            g.add((prop_uri, OWL.equivalentProperty, matched_uri))
+                            g.add((prop_uri, SKOS.exactMatch, matched_uri))
+                            g.add((prop_uri, match_confidence, conf))
+                        elif col_match.match_type == "high_confidence":
+                            g.add((prop_uri, OWL.equivalentProperty, matched_uri))
+                            g.add((prop_uri, SKOS.closeMatch, matched_uri))
+                            g.add((prop_uri, match_confidence, conf))
+                        elif col_match.match_type == "ambiguous":
+                            g.add((prop_uri, SKOS.relatedMatch, matched_uri))
+                            g.add((prop_uri, match_confidence, conf))
 
         # NOTE: deliberately do NOT emit owl:imports for grounding ontologies — a
         # live import of a non-dereferenceable foundational URI makes Ontop/OWLAPI

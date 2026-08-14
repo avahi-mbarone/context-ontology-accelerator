@@ -19,8 +19,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import structlog
-from coa_common import resolve_region, sanitize_principal_key
+from coa_common import build_principal_keys, resolve_region
 from coa_common.dao import DynamoDBDAO, QueryParams
+
+# Re-export for callers that historically imported this from coa_serve. The
+# canonical location is ``coa_common.principal_keys``; keeping the alias here
+# avoids churn in packages that already ``from coa_serve.role_resolver import
+# build_principal_keys``.
+__all__ = ["ResolvedProfile", "build_principal_keys", "resolve_profile"]
 
 logger = structlog.get_logger(__name__)
 
@@ -63,43 +69,6 @@ class ResolvedProfile:
             profile["columnDenylist"] = self.column_denylist
         if self.allowed_metrics is not None:
             profile["allowedMetrics"] = self.allowed_metrics
-
-
-def build_principal_keys(
-    *,
-    user_id: str,
-    email: str,
-    groups: list[str],
-) -> list[str]:
-    """Build the PrincipalIndex GSI lookup keys for a caller.
-
-    Grants can be written under any identifier the caller presents at query
-    time (sub, email, group membership). Every known identifier is included
-    so a grant written under one form resolves regardless of which identifier
-    the JWT primarily surfaces. Duplicates (e.g. sub == email post-encoding)
-    are collapsed to keep the DDB query count at the minimum.
-
-    Args:
-        user_id: The JWT sub (or upstream fallback identifier).
-        email: The JWT email claim; empty when the token has none.
-        groups: The caller's group memberships from the JWT.
-
-    Returns:
-        Ordered list of ``User::…`` and ``Group::…`` keys, deduplicated.
-        Order matters only for readability of downstream logs — grants under
-        every key are merged equally.
-    """
-    seen: set[str] = set()
-    keys: list[str] = []
-    for identifier in (user_id, email):
-        if not identifier:
-            continue
-        key = f"User::{sanitize_principal_key(identifier)}"
-        if key not in seen:
-            seen.add(key)
-            keys.append(key)
-    keys.extend(f"Group::{sanitize_principal_key(g)}" for g in groups)
-    return keys
 
 
 def resolve_profile(

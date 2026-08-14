@@ -5,7 +5,10 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 
-import { _computeSourceHash } from "../../lib/utils/python-bundling";
+import {
+  _computeSourceHash,
+  _uvInstallCommand,
+} from "../../lib/utils/python-bundling";
 
 /**
  * The asset hash is what CDK uses to decide whether to re-bundle. Any input that
@@ -295,5 +298,63 @@ describe("bundlePython asset hash", () => {
         }),
       ).not.toEqual(_computeSourceHash({ srcDirs: [dir] }));
     });
+  });
+});
+
+/**
+ * The local bundle path must NOT use the host `pip`/`pip3`: installing a newer
+ * Python on distros like Amazon Linux 2023 does not repoint the default
+ * `python3` symlink, so the host pip targets the wrong interpreter.
+ * uv is a standalone binary that cross-resolves for the 3.12 Lambda target
+ * regardless of the host Python.
+ */
+describe("_uvInstallCommand (local install uses uv, not host pip)", () => {
+  it("uses uv and never the host pip/pip3", () => {
+    const cmd = _uvInstallCommand({ srcDirs: [], pipDeps: ["structlog"] });
+    expect(cmd).not.toBeNull();
+    expect(cmd!).toMatch(/^uv pip install /);
+    // Guard against a regression to a bare pip/pip3 at a command boundary
+    // (start of string or after `&&`). The `pip` inside `uv pip install` is
+    // fine — it is preceded by `uv `, not a boundary.
+    expect(cmd!).not.toMatch(/(^|&&\s*)pip3? install/);
+  });
+
+  it("cross-targets the 3.12 Lambda runtime with wheels only", () => {
+    const cmd = _uvInstallCommand({ srcDirs: [], pipDeps: ["structlog"] })!;
+    expect(cmd).toContain("--python-version 3.12");
+    expect(cmd).toContain("--python-platform x86_64-manylinux2014");
+    expect(cmd).toContain("--only-binary :all:");
+    expect(cmd).toContain("--target /asset-output");
+  });
+
+  it("selects the aarch64 platform tag for arm64", () => {
+    const cmd = _uvInstallCommand({
+      srcDirs: [],
+      pipDeps: ["structlog"],
+      architecture: "arm64",
+    })!;
+    expect(cmd).toContain("--python-platform aarch64-manylinux2014");
+    expect(cmd).not.toContain("x86_64-manylinux2014");
+  });
+
+  it("installs from a requirements file when provided", () => {
+    const cmd = _uvInstallCommand({
+      srcDirs: [],
+      requirementsFile: "/repo/packages/x/requirements.txt",
+    })!;
+    expect(cmd).toContain("-r /repo/packages/x/requirements.txt");
+  });
+
+  it("quotes each explicit dependency (version specifiers are shell-safe)", () => {
+    const cmd = _uvInstallCommand({
+      srcDirs: [],
+      pipDeps: ["pydantic>=2", "structlog"],
+    })!;
+    expect(cmd).toContain("'pydantic>=2'");
+    expect(cmd).toContain("'structlog'");
+  });
+
+  it("returns null when there are no dependencies to install", () => {
+    expect(_uvInstallCommand({ srcDirs: [] })).toBeNull();
   });
 });

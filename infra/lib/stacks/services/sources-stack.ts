@@ -18,6 +18,7 @@ import * as tasks from "aws-cdk-lib/aws-stepfunctions-tasks";
 import * as sqs from "aws-cdk-lib/aws-sqs";
 import * as ssm from "aws-cdk-lib/aws-ssm";
 import * as opensearchserverless from "aws-cdk-lib/aws-opensearchserverless";
+import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
 import { Construct } from "constructs";
 
 import { SCLStack } from "../../constructs/scl-stack";
@@ -34,7 +35,11 @@ import { bundlePython } from "../../utils/python-bundling";
 import { NetworkStack } from "../foundation/network-stack";
 import { StorageStack } from "../foundation/storage-stack";
 import { TABLE_NAMES } from "@coa/shared";
-import { SourceStatus, DEFAULT_MAX_FILE_SIZE_MB } from "../../constants";
+import {
+  SourceStatus,
+  DEFAULT_MAX_FILE_SIZE_MB,
+  DEFAULT_BEDROCK_CHAT_MODEL_ID,
+} from "../../constants";
 import type { IAlarmActionStrategy } from "cdk-monitoring-constructs/lib/common/alarm/action";
 
 export interface SourcesStackProps extends cdk.StackProps {
@@ -2253,6 +2258,331 @@ export class SourcesStack extends SCLStack {
       .monitorQueueWithDlq(dbScanQueue, dbScanDlq)
       .monitorQueueWithDlq(bulkReviewQueue, bulkReviewDlq)
       .monitorQueueWithDlq(docIngestionQueue, docIngestionDlq);
+
+    // ================================================================
+    // CloudWatch Dashboard — Structured Scan & Enrichment Pipeline
+    // ================================================================
+    // Custom metrics come from the sources Lambdas via EMF-stdout (see
+    // packages/sources/.../database/metrics.py), which the Lambda log pipeline
+    // auto-extracts into `COA/Sources`. The enrichment ECS task
+    // uses a plain awsLogs driver with no PutMetricData grant, so EMF is NOT
+    // extracted there — LLM-side visibility therefore comes from the
+    // account-wide AWS/Bedrock namespace rather than per-task custom metrics.
+    // SourceType is a fixed low-cardinality dimension (GLUE_DATABASE /
+    // JDBC_DATABASE...), but new subtypes appear without a stack change, so
+    // every custom-metric widget uses a SEARCH() MathExpression that
+    // auto-discovers the live dimensions. `usingMetrics` is intentionally
+    // empty for SEARCH exprs.
+    const sourcesNamespace = "COA/Sources";
+    const sourcesPeriod = cdk.Duration.minutes(5);
+    const sourcesRegion = cdk.Aws.REGION;
+
+    /** A SEARCH-based series across all values of `dimensions` for one metric. */
+    const sourcesSearch = (
+      metricName: string,
+      stat: string,
+      label: string,
+      dimensions = "SourceType",
+    ): cloudwatch.MathExpression =>
+      new cloudwatch.MathExpression({
+        expression: `SEARCH('{${sourcesNamespace},${dimensions}} MetricName="${metricName}"', '${stat}', ${sourcesPeriod.toSeconds()})`,
+        label,
+        usingMetrics: {},
+        period: sourcesPeriod,
+        searchRegion: sourcesRegion,
+      });
+
+    /** AWS/Bedrock per-model metric — account-wide, NOT pipeline-scoped. */
+    const bedrockMetric = (
+      metricName: string,
+      modelId: string,
+      stat = "Sum",
+      label = `${modelId} ${metricName}`,
+    ): cloudwatch.Metric =>
+      new cloudwatch.Metric({
+        namespace: "AWS/Bedrock",
+        metricName,
+        dimensionsMap: { ModelId: modelId },
+        statistic: stat,
+        period: sourcesPeriod,
+        region: sourcesRegion,
+        label,
+      });
+
+    // ponytail: the model the enrichment task is ASSUMED to call. The container
+    // sets no model-id env var (see addContainer above), so this tracks the
+    // Python-side default rather than being stack-controlled — if that default
+    // moves, these widgets go dark until the shared constant is updated.
+    // DEFAULT_BEDROCK_CHAT_MODEL_ID, not DEFAULT_BEDROCK_MODEL_ID: the latter
+    // is the embedding model, which enrichment never calls.
+    const enrichmentModelId = DEFAULT_BEDROCK_CHAT_MODEL_ID;
+
+    const scanDashboard = new cloudwatch.Dashboard(this, "ScanDashboard", {
+      dashboardName: this.prefixed("sources-structured-scan"),
+      defaultInterval: cdk.Duration.days(1),
+    });
+
+    scanDashboard.addWidgets(
+      new cloudwatch.TextWidget({
+        markdown: [
+          "# Structured Scan & Enrichment Pipeline",
+          "",
+          `Custom metrics publish to \`${sourcesNamespace}\` from the sources **Lambdas** via EMF-stdout, dimensioned by \`SourceType\`.`,
+          "Widgets use CloudWatch SEARCH() so a new source subtype appears without a stack change.",
+          "The enrichment **ECS task** has no PutMetricData grant and a plain awsLogs driver, so it emits no custom metrics —",
+          "LLM latency/token/error visibility below comes from the AWS/Bedrock namespace instead.",
+        ].join("\n"),
+        width: 24,
+        height: 4,
+      }),
+    );
+
+    scanDashboard.addWidgets(
+      new cloudwatch.GraphWidget({
+        title: "Scan duration by SourceType (p50 / p90 / p99, ms)",
+        left: [
+          sourcesSearch("ScanDuration", "p50", "ScanDuration p50"),
+          sourcesSearch("ScanDuration", "p90", "ScanDuration p90"),
+          sourcesSearch("ScanDuration", "p99", "ScanDuration p99"),
+        ],
+        leftYAxis: { label: "ms", showUnits: false },
+        width: 12,
+        height: 6,
+      }),
+      new cloudwatch.GraphWidget({
+        title: "Scan stage durations (Average, ms)",
+        left: [
+          sourcesSearch("ValidationLatency", "Average", "Validation"),
+          sourcesSearch("DiscoveryDuration", "Average", "Discovery"),
+          sourcesSearch("ScanDuration", "Average", "Scan wallclock"),
+        ],
+        leftYAxis: { label: "ms", showUnits: false },
+        width: 12,
+        height: 6,
+      }),
+    );
+
+    scanDashboard.addWidgets(
+      new cloudwatch.GraphWidget({
+        title: "Tables discovered by SourceType (Sum)",
+        left: [sourcesSearch("TablesDiscovered", "Sum", "TablesDiscovered")],
+        leftYAxis: { label: "tables", showUnits: false },
+        width: 12,
+        height: 6,
+      }),
+      new cloudwatch.GraphWidget({
+        title: "Catalog asset writes — Create / Update (Sum)",
+        // No delete path exists in the metadata writer, so this is Create/Update
+        // only, NOT full CRUD.
+        left: [
+          sourcesSearch(
+            "CatalogAssetWrites",
+            "Sum",
+            "Asset writes by Operation",
+            "Operation",
+          ),
+        ],
+        leftYAxis: { label: "assets", showUnits: false },
+        width: 12,
+        height: 6,
+      }),
+    );
+
+    scanDashboard.addWidgets(
+      new cloudwatch.GraphWidget({
+        title: "Connection validation — Success / Failure (Sum)",
+        left: [
+          sourcesSearch(
+            "ConnectionValidation",
+            "Sum",
+            "Validation by SourceType/Result",
+            "SourceType,Result",
+          ),
+        ],
+        leftYAxis: { label: "count", showUnits: false },
+        width: 12,
+        height: 6,
+      }),
+      new cloudwatch.GraphWidget({
+        title: "Enrichment review — approved / rejected + acceptance rate",
+        left: [
+          sourcesSearch(
+            "TablesApprovedByReview",
+            "Sum",
+            "Approved",
+            "ReviewScope",
+          ),
+          sourcesSearch(
+            "TablesRejectedByReview",
+            "Sum",
+            "Rejected",
+            "ReviewScope",
+          ),
+        ],
+        right: [
+          new cloudwatch.MathExpression({
+            // acceptance rate = approved / (approved + rejected). SUM() collapses
+            // each SEARCH array to a single series so the division is valid.
+            expression: "approved / (approved + rejected)",
+            label: "Acceptance rate",
+            usingMetrics: {
+              approved: new cloudwatch.MathExpression({
+                expression: `SUM(SEARCH('{${sourcesNamespace},ReviewScope} MetricName="TablesApprovedByReview"', 'Sum', ${sourcesPeriod.toSeconds()}))`,
+                label: "approved",
+                usingMetrics: {},
+                period: sourcesPeriod,
+                searchRegion: sourcesRegion,
+              }),
+              rejected: new cloudwatch.MathExpression({
+                expression: `SUM(SEARCH('{${sourcesNamespace},ReviewScope} MetricName="TablesRejectedByReview"', 'Sum', ${sourcesPeriod.toSeconds()}))`,
+                label: "rejected",
+                usingMetrics: {},
+                period: sourcesPeriod,
+                searchRegion: sourcesRegion,
+              }),
+            },
+            period: sourcesPeriod,
+          }),
+        ],
+        leftYAxis: { label: "tables", showUnits: false },
+        rightYAxis: { label: "rate", min: 0, max: 1, showUnits: false },
+        width: 12,
+        height: 6,
+      }),
+    );
+
+    scanDashboard.addWidgets(
+      new cloudwatch.TextWidget({
+        markdown: [
+          "## Bedrock (enrichment LLM) — account-wide, not pipeline-isolated",
+          "",
+          `\`AWS/Bedrock\` metrics are per **ModelId** across the whole account. Sources enrichment and ontology induction`,
+          `both invoke \`${enrichmentModelId}\`, so these series are a **sum of both pipelines**, not sources alone.`,
+          "Per-pipeline LLM attribution would require PutMetricData from the enrichment ECS task (an IAM grant it does not have).",
+        ].join("\n"),
+        width: 24,
+        height: 3,
+      }),
+    );
+
+    scanDashboard.addWidgets(
+      new cloudwatch.GraphWidget({
+        title: "Bedrock latency + errors (account-wide)",
+        left: [
+          bedrockMetric(
+            "InvocationLatency",
+            enrichmentModelId,
+            "Average",
+            "InvocationLatency avg",
+          ),
+          bedrockMetric(
+            "InvocationLatency",
+            enrichmentModelId,
+            "p90",
+            "InvocationLatency p90",
+          ),
+        ],
+        right: [
+          bedrockMetric("InvocationClientErrors", enrichmentModelId),
+          bedrockMetric("InvocationServerErrors", enrichmentModelId),
+          bedrockMetric("InvocationThrottles", enrichmentModelId),
+        ],
+        leftYAxis: { label: "ms", showUnits: false },
+        rightYAxis: { label: "errors", showUnits: false },
+        width: 12,
+        height: 6,
+      }),
+      new cloudwatch.GraphWidget({
+        title: "Bedrock token usage (account-wide)",
+        left: [
+          bedrockMetric("InputTokenCount", enrichmentModelId),
+          bedrockMetric("OutputTokenCount", enrichmentModelId),
+        ],
+        leftYAxis: { label: "tokens", showUnits: false },
+        width: 12,
+        height: 6,
+      }),
+    );
+
+    scanDashboard.addWidgets(
+      new cloudwatch.GraphWidget({
+        title: "Scan state machine — execution outcomes (Sum)",
+        left: [
+          dbScanStateMachine.metricSucceeded({
+            period: sourcesPeriod,
+            label: "Succeeded",
+          }),
+          dbScanStateMachine.metricFailed({
+            period: sourcesPeriod,
+            label: "Failed",
+          }),
+          dbScanStateMachine.metricTimedOut({
+            period: sourcesPeriod,
+            label: "TimedOut",
+          }),
+          dbScanStateMachine.metricAborted({
+            period: sourcesPeriod,
+            label: "Aborted",
+          }),
+        ],
+        leftYAxis: { label: "executions", showUnits: false },
+        width: 12,
+        height: 6,
+      }),
+      new cloudwatch.GraphWidget({
+        title: "Scan state machine — execution time (ms)",
+        left: [
+          dbScanStateMachine.metricTime({
+            period: sourcesPeriod,
+            statistic: "Average",
+            label: "ExecutionTime avg",
+          }),
+          dbScanStateMachine.metricTime({
+            period: sourcesPeriod,
+            statistic: "p90",
+            label: "ExecutionTime p90",
+          }),
+        ],
+        leftYAxis: { label: "ms", showUnits: false },
+        width: 12,
+        height: 6,
+      }),
+    );
+
+    scanDashboard.addWidgets(
+      new cloudwatch.SingleValueWidget({
+        title: "Failed executions (drill down via the console link)",
+        metrics: [
+          dbScanStateMachine.metricFailed({
+            period: sourcesPeriod,
+            label: "Failed",
+          }),
+          dbScanStateMachine.metricTimedOut({
+            period: sourcesPeriod,
+            label: "TimedOut",
+          }),
+          // botocore's standard retry mode swallows retried throttles; only the
+          // terminal ClientError is counted (see glue_connection_provisioner).
+          sourcesSearch("GlueApiThrottles", "Sum", "Glue throttles", "Api"),
+        ],
+        setPeriodToTimeRange: true,
+        width: 12,
+        height: 6,
+      }),
+      new cloudwatch.TextWidget({
+        markdown: [
+          "## Drill-downs",
+          "",
+          `**Failed scan executions** — [Step Functions console](https://${sourcesRegion}.console.aws.amazon.com/states/home?region=${sourcesRegion}#/statemachines/view/${dbScanStateMachine.stateMachineArn})`,
+          "(filter Executions by status = Failed, then open the failing state's input/output).",
+          "",
+          "**Overlay match rate** — pending #114 (SageMaker Catalog Overlay, M2).",
+          "No overlay code exists yet, so there is no metric to chart; this widget is a placeholder, not a broken query.",
+        ].join("\n"),
+        width: 12,
+        height: 6,
+      }),
+    );
 
     // ================================================================
     // SSM Parameters

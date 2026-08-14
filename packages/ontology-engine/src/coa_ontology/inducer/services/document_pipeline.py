@@ -501,6 +501,13 @@ def _add_alignment(g, uri, match, conf_prop, is_class):
     if not match.matched_class_uri:
         return
     target = URIRef(match.matched_class_uri)
+    # Skip a self-match (uri == target): a reflexive rdfs:subClassOf is a Tier-1
+    # taxonomy-cycle self-loop, and a self skos:* / owl:equivalentProperty is
+    # vacuous. (This document builder is a retired reference path — not mounted
+    # by main.py — but the guard mirrors the active induction strategy so the
+    # bug can't reappear if it is ever revived with a grounding pool.)
+    if str(uri).rstrip("/") == str(target).rstrip("/"):
+        return
     conf = Literal(match.similarity, datatype=XSD.float)
     if match.match_type == "exact":
         if is_class:

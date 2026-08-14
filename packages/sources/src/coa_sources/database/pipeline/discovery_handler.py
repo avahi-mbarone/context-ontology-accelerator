@@ -273,6 +273,13 @@ def _discover(
     validate_start = time.monotonic()
     test_result = connector.test_connection(connector_config)
     emit_metric("ValidationLatency", (time.monotonic() - validate_start) * 1000, "Milliseconds", SourceType=source_type)
+    emit_metric(
+        "ConnectionValidation",
+        1,
+        "Count",
+        SourceType=source_type,
+        Result="Success" if test_result.success else "Failure",
+    )
     if not test_result.success:
         raise RuntimeError(
             f"Connection test failed: {test_result.message} "

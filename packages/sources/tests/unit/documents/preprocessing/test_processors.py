@@ -5,6 +5,7 @@
 
 import logging
 import sys
+import time
 from types import ModuleType
 from unittest.mock import MagicMock, patch
 
@@ -211,10 +212,11 @@ class TestProcessPdfTextract:
     @patch("fitz.open")
     def test_multi_page_joins_with_double_newline(self, mock_fitz_open):
         pages = []
-        for _ in range(3):
+        for i in range(3):
             page = MagicMock()
             pix = MagicMock()
-            pix.tobytes.return_value = b"png"
+            # Distinct bytes per page so the Textract stub can tell them apart.
+            pix.tobytes.return_value = f"png-{i}".encode()
             page.get_pixmap.return_value = pix
             pages.append(page)
 
@@ -224,12 +226,20 @@ class TestProcessPdfTextract:
         doc.close = MagicMock()
         mock_fitz_open.return_value = doc
 
+        # process_pdf_textract OCRs pages concurrently, so the stub must key off
+        # the page bytes, not call order: a side_effect *list* is consumed in the
+        # order threads happen to call, which makes the assertion below flaky.
+        # Do not "simplify" this back into a list.
+        # The descending sleep makes pages finish in reverse order, so the
+        # assertion deterministically catches a reassembly that appends in
+        # completion order instead of indexing by page.
+        def _detect(Document):  # noqa: N803 - matches the boto3 kwarg name
+            idx = int(Document["Bytes"].decode().removeprefix("png-"))
+            time.sleep(0.05 * (3 - idx))
+            return {"Blocks": [{"BlockType": "LINE", "Text": f"Page {idx + 1}"}]}
+
         textract = MagicMock()
-        textract.detect_document_text.side_effect = [
-            {"Blocks": [{"BlockType": "LINE", "Text": "Page 1"}]},
-            {"Blocks": [{"BlockType": "LINE", "Text": "Page 2"}]},
-            {"Blocks": [{"BlockType": "LINE", "Text": "Page 3"}]},
-        ]
+        textract.detect_document_text.side_effect = _detect
 
         result = process_pdf_textract(b"pdf", "multi.pdf", textract)
         assert result == "Page 1\n\nPage 2\n\nPage 3"

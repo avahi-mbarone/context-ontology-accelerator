@@ -19,9 +19,12 @@ Tests cover:
 
 from __future__ import annotations
 
+import string
+
 import pytest
 from coa_common.constants import URN_PREFIX
 from coa_serve.tier1.metric_resolver import (
+    _PLACEHOLDER_RE,
     MetricDefinition,
     MetricResolver,
 )
@@ -513,6 +516,68 @@ class TestDimensionSubstitution:
         sql = "SELECT amount::text FROM revenue"
         # No placeholder → unchanged even though '::' is present.
         assert MetricResolver.substitute_dimensions(sql, {}, []) == sql
+
+    def test_supplied_dimension_with_no_placeholder_raises(self):
+        # Fail CLOSED (issue #53): a filter the template cannot bind must not be
+        # dropped, or the caller gets the unfiltered GLOBAL total presented as the
+        # answer to their filtered question — a wrong answer with a 200.
+        sql = "SELECT SUM(amount) FROM revenue"
+        with pytest.raises(ValueError, match="no placeholder for supplied dimensions"):
+            MetricResolver.substitute_dimensions(sql, {"region": "EMEA"}, ["region"])
+
+    def test_partially_applied_dimensions_raise(self):
+        # :region binds, but 'year' has nowhere to go — the result would silently
+        # aggregate across all years.
+        sql = "SELECT SUM(amount) FROM revenue WHERE region = :region"
+        with pytest.raises(ValueError, match="no placeholder for supplied dimensions"):
+            MetricResolver.substitute_dimensions(sql, {"region": "EMEA", "year": 2024}, ["region", "year"])
+
+    def test_all_supplied_dimensions_applied_succeeds(self):
+        # The positive counterpart: every supplied filter binds, so no error.
+        sql = "SELECT SUM(amount) FROM revenue WHERE region = :region AND year = :year"
+        out = MetricResolver.substitute_dimensions(sql, {"region": "EMEA", "year": 2024}, ["region", "year"])
+        assert "'EMEA'" in out
+        assert "2024" in out
+        assert ":" not in out
+
+    def test_repeated_placeholder_for_one_dimension_is_applied(self):
+        # A dimension bound TWICE is fully applied — the unapplied-check must not
+        # mistake the second occurrence for anything unbound.
+        sql = "SELECT * FROM revenue WHERE region = :region OR parent_region = :region"
+        out = MetricResolver.substitute_dimensions(sql, {"region": "EMEA"}, ["region"])
+        assert out.count("'EMEA'") == 2
+
+    def test_placeholder_names_are_ascii_only(self):
+        """A non-ASCII placeholder name must not match ``_PLACEHOLDER_RE``.
+
+        Load-bearing, not cosmetic: ``substitute_dimensions`` keys its lookup with
+        ``lower()`` while ``InvokeRequest._normalize_dimensions`` dedups with
+        ``casefold()``. Those agree only over ASCII. If this regex were widened to
+        accept non-ASCII names — ``\\w+`` is Unicode-aware in Python 3 — the two
+        would silently disagree: a pair of names distinct under ``lower()`` but
+        equal under ``casefold()`` would pass dedup and then collapse during
+        binding, dropping a filter and answering a different question at
+        confidence 1.0.
+        """
+        # "maße"/"MASSE" is a real divergence: equal under casefold, not under lower.
+        for template in (":maße", "{maße}", "WHERE x = :maße"):
+            names = {(m.group(1) or m.group(2)) for m in _PLACEHOLDER_RE.finditer(template)}
+            assert "maße" not in names, f"non-ASCII placeholder matched in {template!r}"
+
+    def test_ascii_placeholder_chars_have_identical_lower_and_casefold(self):
+        """Every character the placeholder regex admits must satisfy ``lower() == casefold()``.
+
+        This is the property that makes the ``lower()``/``casefold()`` split
+        between ``substitute_dimensions`` and ``_normalize_dimensions`` safe. It
+        holds for ASCII and nothing else, so it is asserted over the admitted set
+        rather than over hand-picked examples: 297 code points in Unicode differ
+        between the two functions, and none of them are ASCII.
+        """
+        for char in string.ascii_letters + string.digits + "_":
+            assert char.lower() == char.casefold()
+            # And the regex really does admit it, so the set above cannot drift
+            # away from what the pattern accepts without failing here.
+            assert _PLACEHOLDER_RE.fullmatch(f"{{{'x' + char}}}") is not None
 
 
 @pytest.mark.unit

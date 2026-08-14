@@ -18,7 +18,7 @@ from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from decimal import Decimal
 from threading import Event, Thread
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 from coa_common.bedrock_metrics import (
@@ -31,6 +31,11 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from coa_ontology import dynamo_store
 from coa_ontology.inducer.strategies import get_strategy
+
+if TYPE_CHECKING:
+    # Type-only: ``inducer.schemas`` is deliberately NOT imported at runtime here
+    # (see ``_schemas_mod``, injected by main.py) to avoid an import-time cycle.
+    from coa_ontology.inducer.schemas import JobResponse
 
 router = APIRouter()
 _log = logging.getLogger(__name__)
@@ -1307,8 +1312,50 @@ def _sweep_job_if_stale(item: dict, namespace: str) -> dict:
     return item
 
 
+# A status poll never needs per-match detail — matches are persisted to the
+# proposal and fetched via the proposal read path. Values that opt back into the
+# full ``report.matches[]`` on ``?include=``. Anything else is a plain poll.
+_INCLUDE_FULL_REPORT = {"report", "full"}
+
+
+def _poll_shape(job: "JobResponse | dict[str, Any]", include: str | None) -> "JobResponse | dict[str, Any]":
+    """Return a poll-shaped job: ``report.matches[]`` dropped unless opted in (#807).
+
+    At 50k tables ``report.matches`` holds ~836k entries → multi-MB, which blows
+    the API-proxy Lambda's 6MB response cap (413 ``RequestEntityTooLarge``) and
+    makes the completed job unpollable. A status poll only needs scalar counts +
+    terminal state, so by default we empty ``matches`` (a contract-compatible
+    empty list — the Smithy ``matches`` member stays present) while keeping every
+    scalar count, ``status``, ``proposal_id``/``duplicate_of`` and ``error``.
+
+    ``include`` in ``{"report", "full"}`` returns the full body incl. matches
+    (opt-in for the rare debugging caller; accepts it may 413 at huge scale).
+
+    Handles BOTH poll shapes without mutating the caller's object:
+      - in-memory ``JobResponse`` (pydantic) → ``model_copy`` with an emptied
+        report copy (the canonical ``_jobs`` entry is never touched, so an
+        ``include=report`` re-poll still sees all matches);
+      - DynamoDB item (``dict``) → shallow-copied dict with ``report.matches`` emptied.
+    """
+    if include in _INCLUDE_FULL_REPORT:
+        return job
+    # DynamoDB item (dict) first — it also narrows ``job`` to JobResponse below.
+    # Structured rows are scalar-only today, but any fat report reaching this
+    # path (hydrated / unstructured / future) is slimmed too.
+    if isinstance(job, dict):
+        rpt = job.get("report")
+        if isinstance(rpt, dict) and rpt.get("matches"):
+            return {**job, "report": {**rpt, "matches": []}}
+        return job
+    # In-memory JobResponse (pydantic model).
+    report = job.report
+    if report is not None and report.matches:
+        return job.model_copy(update={"report": report.model_copy(update={"matches": []})})
+    return job
+
+
 @router.get("/jobs/{job_id}")
-def get_job(job_id: str, namespace: str):
+def get_job(job_id: str, namespace: str, include: str | None = None):
     """Return an induction job's status, sweeping stale orphans to failed.
 
     Prefers the in-memory job for this container; otherwise reads from
@@ -1316,12 +1363,22 @@ def get_job(job_id: str, namespace: str):
     DynamoDB row with no live worker that has exceeded the stale threshold is
     marked ``failed`` so the client poll can terminate.
 
+    Poll-shaped by default (#807): ``report.matches[]`` is dropped so the
+    response stays under the API-proxy Lambda's 6MB cap at scale. Scalar counts,
+    ``status``, ``proposal_id``/``duplicate_of`` and ``error`` are preserved so a
+    client can still detect terminal state and read the counts. Pass
+    ``?include=report`` (``full`` accepted as a synonym) to get the full report
+    including every match — the opt-in path for debugging.
+
     Args:
         job_id: ID of the job to fetch.
         namespace: Namespace the job must belong to.
+        include: ``"report"``/``"full"`` returns the full report incl. matches;
+            omitted (default) returns the slim poll shape.
 
     Returns:
-        The job (in-memory JobResponse or the DynamoDB item).
+        The job (in-memory JobResponse or the DynamoDB item), poll-shaped
+        unless ``include`` opts into the full report.
 
     Raises:
         HTTPException: 404 if the job is unknown or belongs to another namespace.
@@ -1331,7 +1388,7 @@ def get_job(job_id: str, namespace: str):
         job_ns = _job_namespaces.get(job_id)
         if job_ns != namespace:
             raise HTTPException(404, "Job not found")
-        return job
+        return _poll_shape(job, include)
     # Fall back to DynamoDB (covers unstructured jobs and post-restart).
     item = dynamo_store.get_job(job_id, namespace=namespace)
     if not item:
@@ -1339,7 +1396,7 @@ def get_job(job_id: str, namespace: str):
     # If the row is non-terminal but there is no live worker thread on this task
     # (item not in _jobs) and it has gone stale, the worker died on a restart —
     # sweep it to ``failed`` so the client poll terminates.
-    return _sweep_job_if_stale(item, namespace)
+    return _poll_shape(_sweep_job_if_stale(item, namespace), include)
 
 
 @router.get("/jobs")
