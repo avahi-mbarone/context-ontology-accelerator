@@ -434,6 +434,11 @@ operation GetProposal {
         /// Presigned S3 GET URL for the R2RML Turtle when served out-of-band.
         r2rmlUrl: String
 
+        /// Presigned S3 GET URL for the grounding-match list (`matches.json`)
+        /// when it is served out-of-band. Null when the match list is small
+        /// enough to be returned inline.
+        matchesUrl: String
+
         /// Proposal metadata (tables processed, classes created, etc.).
         metadata: ProposalMetadata
 

@@ -339,6 +339,8 @@ async function deploy(): Promise<void> {
       "/namespaces/{namespaceId}/translate": `/${prefix}/data-layer/api-fn-arn`,
       "/namespaces/{namespaceId}/kb/search": `/${prefix}/data-layer/api-fn-arn`,
       "/namespaces/{namespaceId}/graph/traverse": `/${prefix}/data-layer/api-fn-arn`,
+      // ── Data Layer — schema discovery (mirrors MCP describe_schema) ─
+      "/namespaces/{namespaceId}/schema": `/${prefix}/data-layer/api-fn-arn`,
     },
   });
 

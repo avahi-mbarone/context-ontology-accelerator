@@ -93,7 +93,7 @@ export function ConstraintPanel({
   onCustomTurtleChange,
   compiledShapes,
   proposalName,
-  isTerminal,
+  isReadOnly,
 }: {
   config: ConstraintConfig | null;
   onConfigChange: (config: ConstraintConfig) => void;
@@ -114,7 +114,7 @@ export function ConstraintPanel({
   // Accepted/rejected/cancelled proposals are read-only: constraint editing,
   // custom-rule add, and custom-SHACL input are disabled (mirrors the other
   // editable panels in ProposalDetail).
-  isTerminal?: boolean;
+  isReadOnly?: boolean;
 }) {
   const [newRule, setNewRule] = useState("");
 
@@ -229,7 +229,7 @@ export function ConstraintPanel({
             hint="Uses an AI model to suggest domain rules the schema can't capture (value ranges, date ordering, allowed status values). Suggestions are tagged LLM to keep or remove."
             onClick={onInfer}
             loading={inferring}
-            disabled={isTerminal}
+            disabled={isReadOnly}
             iconName="gen-ai"
           >
             Infer constraints
@@ -388,7 +388,7 @@ export function ConstraintPanel({
                   >
                     <Checkbox
                       checked={constraint.enabled}
-                      disabled={isTerminal}
+                      disabled={isReadOnly}
                       ariaLabel={`Enable constraint ${constraint.property_name || constraint.constraint_type}`}
                       onChange={({ detail }) =>
                         toggleConstraint(
@@ -428,7 +428,7 @@ export function ConstraintPanel({
               <div style={{ flex: 1 }}>
                 <Input
                   value={newRule}
-                  disabled={isTerminal}
+                  disabled={isReadOnly}
                   ariaLabel="Natural-language constraint rule"
                   onChange={({ detail }) => setNewRule(detail.value)}
                   placeholder="e.g., Every policy must have a premium amount greater than zero"
@@ -436,7 +436,7 @@ export function ConstraintPanel({
               </div>
               <Button
                 onClick={addCustomRule}
-                disabled={isTerminal || !newRule.trim()}
+                disabled={isReadOnly || !newRule.trim()}
               >
                 Add
               </Button>
@@ -455,7 +455,7 @@ export function ConstraintPanel({
             </Box>
             <Textarea
               value={customTurtle}
-              disabled={isTerminal}
+              disabled={isReadOnly}
               ariaLabel="Custom SHACL shapes (Turtle)"
               onChange={({ detail }) => onCustomTurtleChange(detail.value)}
               placeholder="@prefix sh: <http://www.w3.org/ns/shacl#> ."

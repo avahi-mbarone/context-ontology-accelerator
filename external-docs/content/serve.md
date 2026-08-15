@@ -174,6 +174,9 @@ In addition to full query resolution:
 - `POST /namespaces/{namespaceId}/translate` — translate NL to SPARQL without executing (**TranslateSPARQL**)
 - `POST /namespaces/{namespaceId}/kb/search` — semantic search across the knowledge base (**KBSearch**)
 - `POST /namespaces/{namespaceId}/graph/traverse` — traverse the knowledge graph (**GraphTraverse**)
+- `GET /namespaces/{namespaceId}/schema` — discover the queryable schema (**DescribeSchema**)
+
+`DescribeSchema` returns the classes and properties currently loaded into the namespace's ontologies, so a caller can find the entities available before writing a query. Optional query params: `includeProperties` (default `true`) to include class properties, and `maxResults` to cap the class count. The same schema is what the MCP `describe_schema` tool exposes — REST and MCP read from one source.
 
 See these operations in the [API Reference](#/api-reference) for their full request/response schemas.
 

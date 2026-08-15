@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useState, useEffect, useCallback } from "react";
+import { slugify } from "../utils/slugify";
 
 type NavItem = {
   id: string;
@@ -40,15 +41,6 @@ const SECTIONS: NavSection[] = [
 ];
 
 const ALL_IDS = SECTIONS.flatMap((s) => s.items.map((i) => i.id));
-
-function slugify(text: string): string {
-  return text
-    .toLowerCase()
-    .replace(/[^\w\s-]/g, "")
-    .replace(/\s+/g, "-")
-    .replace(/-+/g, "-")
-    .trim();
-}
 
 export function DeployingSidebar(): React.JSX.Element {
   const [activeId, setActiveId] = useState<string>(ALL_IDS[0]!);
