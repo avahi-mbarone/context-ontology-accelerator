@@ -44,6 +44,13 @@ export class DataLayerStack extends SCLStack {
       `${ssmPrefix}/serve/runtime-arn`,
     );
 
+    // Ontology-api-proxy Lambda ARN for DescribeSchema — the same Lambda MCP's
+    // describe_schema tool invokes, so both surfaces read one source of truth.
+    const ontologyProxyLambdaArn = ssm.StringParameter.valueForStringParameter(
+      this,
+      `${ssmPrefix}/ontology-engine/api-fn-arn`,
+    );
+
     // ── Lambda code bundle ─────────────────────────────────────────
     const lambdaCode = bundlePython({
       srcDirs: [fromRoot("packages/data-layer/src"), Paths.commonLib],
@@ -62,6 +69,7 @@ export class DataLayerStack extends SCLStack {
       securityGroups: [props.lambdaSecurityGroup],
       environment: {
         AGENTCORE_RUNTIME_ARN: runtimeArn,
+        ONTOLOGY_PROXY_LAMBDA_ARN: ontologyProxyLambdaArn,
         ALLOWED_ORIGIN: props.allowedOrigin ?? "*",
       },
     });
@@ -73,6 +81,14 @@ export class DataLayerStack extends SCLStack {
       new iam.PolicyStatement({
         actions: ["bedrock-agentcore:InvokeAgentRuntime"],
         resources: [`${runtimeArn}`, `${runtimeArn}/*`],
+      }),
+    );
+
+    // ── IAM: invoke the ontology-api-proxy Lambda for DescribeSchema ──
+    this.apiFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["lambda:InvokeFunction"],
+        resources: [ontologyProxyLambdaArn],
       }),
     );
 

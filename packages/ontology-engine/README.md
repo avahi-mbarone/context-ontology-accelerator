@@ -13,6 +13,11 @@ rigor-style generate/judge induction. Persists ontologies and
 embeddings in Amazon Neptune Analytics (graph + HNSW vector index) or
 Neptune Database + OpenSearch Serverless.
 
+**Data model:** see [`docs/ontology-data-model.md`](docs/ontology-data-model.md)
+for the RDF/OWL terminology (including reification and RDF-star), how a
+relational schema is represented, where metadata lives, and the tradeoffs of
+that design.
+
 ## Layout
 
     packages/ontology-engine/

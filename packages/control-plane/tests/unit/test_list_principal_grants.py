@@ -96,8 +96,12 @@ class TestListPrincipalGrants:
         resp = handler(_event_me("alice@co.com", "admins,viewers"), None)
         assert resp["statusCode"] == 200
 
-        # Should query 3 times: User + 2 groups
-        assert mock_dao.query_all.call_count == 3
+        # Should query 3 times: User + 2 groups. Count via ``call_args_list``,
+        # not ``call_count``: the handler fans out over a ``ThreadPoolExecutor``
+        # and ``MagicMock.call_count`` uses a non-atomic ``+= 1`` that can lose
+        # increments under concurrent access. ``call_args_list.append`` is
+        # GIL-atomic and reflects the true count.
+        assert len(mock_dao.query_all.call_args_list) == 3
         keys_queried = [call[0][0].expression_values[":pk"] for call in mock_dao.query_all.call_args_list]
         assert "User::alice@co.com" in keys_queried
         assert "Group::admins" in keys_queried
@@ -153,8 +157,9 @@ class TestListPrincipalGrants:
         many_groups = ",".join(f"group{i}" for i in range(140))
         resp = handler(_event_me("a@b.com", many_groups), None)
         assert resp["statusCode"] == 200
-        # 1 user + all 140 groups queried — nothing truncated below _MAX_GROUPS
-        assert mock_dao.query_all.call_count == 141
+        # 1 user + all 140 groups queried — nothing truncated below _MAX_GROUPS.
+        # See the ``call_args_list`` comment on ``test_queries_user_and_groups``.
+        assert len(mock_dao.query_all.call_args_list) == 141
 
     @patch("coa_control_plane.grants.list_principal_grants_handler.DynamoDBDAO")
     def test_limits_groups_to_max_as_a_circuit_breaker(self, mock_dao_cls):
@@ -167,7 +172,8 @@ class TestListPrincipalGrants:
         assert resp["statusCode"] == 200
         # 1 user + max 250 groups = 251 queries; the circuit breaker still
         # exists, just sized well above any observed real-world group count.
-        assert mock_dao.query_all.call_count == 251
+        # See the ``call_args_list`` comment on ``test_queries_user_and_groups``.
+        assert len(mock_dao.query_all.call_args_list) == 251
 
     @patch("coa_control_plane.grants.list_principal_grants_handler.DynamoDBDAO")
     def test_skips_invalid_group_names(self, mock_dao_cls):
@@ -177,8 +183,9 @@ class TestListPrincipalGrants:
 
         resp = handler(_event_me("a@b.com", "valid-group,bad::group,ok_group"), None)
         assert resp["statusCode"] == 200
-        # 1 user + 2 valid groups (bad::group skipped)
-        assert mock_dao.query_all.call_count == 3
+        # 1 user + 2 valid groups (bad::group skipped). See the
+        # ``call_args_list`` comment on ``test_queries_user_and_groups``.
+        assert len(mock_dao.query_all.call_args_list) == 3
 
     @patch("coa_control_plane.grants.list_principal_grants_handler.DynamoDBDAO")
     def test_fallback_to_claims_email(self, mock_dao_cls):

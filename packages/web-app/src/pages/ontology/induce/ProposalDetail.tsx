@@ -23,6 +23,7 @@ import {
   compileConstraints,
   getProposal,
   fetchTurtleFromUrl,
+  fetchJsonFromUrl,
   getProposalUploadUrls,
   putToPresignedUrl,
   getProposalValidationJob,
@@ -49,7 +50,11 @@ import {
   isProposalAcceptInProgress,
   proposalStatusIndicator,
 } from "./helpers";
-import { parseConceptMatches } from "./grounding";
+import {
+  parseConceptMatches,
+  parseConceptMatchesEnvelope,
+  type ConceptMatch,
+} from "./grounding";
 import { ConstraintPanel } from "./ConstraintPanel";
 import { TurtleHighlight } from "@components/TurtleHighlight";
 import { parseTurtleEntities, type TurtleEntity } from "./turtle";
@@ -480,6 +485,12 @@ export function ProposalDetailPage() {
   } | null>(null);
   const [editedTurtle, setEditedTurtle] = useState<string | null>(null);
   const [editedR2rml, setEditedR2rml] = useState<string | null>(null);
+  // Parsed grounding matches (one per grounded table). Held in state rather than
+  // read inline off ``proposal.metadata.matches`` because the detail endpoint
+  // now serves them out-of-band via ``matches_url`` (a presigned S3 GET) to stay
+  // under the 6 MB response cap, so they arrive asynchronously in refresh().
+  // Legacy proposals still carry them inline; refresh() prefers that when present.
+  const [groundingMatches, setGroundingMatches] = useState<ConceptMatch[]>([]);
   const [dirty, setDirty] = useState(false);
   // Staged grounding overrides (table → chosen foundational URI, or ``null``
   // to keep the table novel) that are NOT yet persisted. Picking a candidate /
@@ -520,10 +531,13 @@ export function ProposalDetailPage() {
     getProposal(apiClient, namespaceId, proposalId)
       .then(async (p) => {
         setProposal(p);
-        // Prefer inline Turtle (present for normal-size proposals). For large
-        // ontologies it is omitted to stay under the 6 MB response limit, so
-        // fall back to fetching it directly from the presigned S3 URL.
-        const [ontologyTtl, r2rmlTtl] = await Promise.all([
+        // Prefer inline content (present for normal-size proposals). Large
+        // artifacts are omitted from the response to stay under the 6 MB limit,
+        // so fall back to fetching each directly from its presigned S3 URL:
+        //   - ontology / r2rml Turtle -> ontology_url / r2rml_url
+        //   - grounding matches       -> matches_url (JSON envelope)
+        const inlineMatches = p.metadata?.matches;
+        const [ontologyTtl, r2rmlTtl, matches] = await Promise.all([
           p.ontology_turtle != null
             ? Promise.resolve(p.ontology_turtle)
             : p.ontology_url
@@ -534,9 +548,25 @@ export function ProposalDetailPage() {
             : p.r2rml_url
               ? fetchTurtleFromUrl(p.r2rml_url)
               : Promise.resolve(null),
+          inlineMatches !== undefined
+            ? Promise.resolve(parseConceptMatches(inlineMatches))
+            : p.matches_url
+              ? fetchJsonFromUrl(p.matches_url)
+                  .then(parseConceptMatchesEnvelope)
+                  // Grounding matches are secondary review content. A transient
+                  // matches fetch/parse failure must NOT reject the whole
+                  // Promise.all and blank the page (discarding the ontology
+                  // Turtle that loaded fine) — degrade to "no grounding shown".
+                  // Retrying refresh re-presigns and recovers.
+                  .catch((e: unknown) => {
+                    console.warn("Failed to load grounding matches:", e);
+                    return [] as ConceptMatch[];
+                  })
+              : Promise.resolve([]),
         ]);
         setEditedTurtle(ontologyTtl);
         setEditedR2rml(r2rmlTtl);
+        setGroundingMatches(matches);
         originalTurtleRef.current = ontologyTtl;
         originalR2rmlRef.current = r2rmlTtl;
         setDirty(false);
@@ -1370,7 +1400,7 @@ export function ProposalDetailPage() {
               folded into each class-card's Matches tab (Item 1). The
               ConceptMatch records + staged overrides thread down through
               ProposalEntitiesPanel into ClassDetailPanel. */}
-          {updating && Array.isArray(md.matches as unknown[]) && (
+          {updating && groundingMatches.length > 0 && (
             <Box variant="small" color="text-status-info">
               Rebuilding ontology with updated grounding...
             </Box>
@@ -1384,7 +1414,7 @@ export function ProposalDetailPage() {
               r2rmlTurtle={editedR2rml}
               isTerminal={isTerminal}
               onEditEntity={handleEditEntity}
-              groundingMatches={parseConceptMatches(md.matches)}
+              groundingMatches={groundingMatches}
               pendingGroundingOverrides={pendingGroundingOverrides}
               onSelectGroundingCandidate={stageGroundingCandidate}
               onMarkGroundingNovel={stageGroundingNovel}

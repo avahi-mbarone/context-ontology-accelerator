@@ -26,7 +26,7 @@ from coa_common.bedrock_metrics import (
     emit_induction_heartbeat_metrics,
     emit_induction_job_metrics,
 )
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from coa_ontology import dynamo_store
@@ -963,10 +963,8 @@ def _run_induction(
                     "datasource_ids": body.datasource_ids,
                     # Matches are offloaded to S3 by create_proposal (popped from
                     # this dict before the DynamoDB write) to stay under the 400 KB
-                    # item limit. The truncation here is a defensive backstop for
-                    # any path that doesn't offload. Full match data lives in the
-                    # InductionReport (in-memory) and the proposal's S3 artifacts.
-                    "matches": _floats_to_decimal([m.model_dump() for m in matches if not m.source_column][:50]),
+                    # item limit. The S3 artifact receives the FULL match set.
+                    "matches": _floats_to_decimal([m.model_dump() for m in matches if not m.source_column]),
                     # NOTE: column_matches (matches with source_column set) are intentionally
                     # NOT persisted here. They lived inline in this dict for months but had
                     # zero readers anywhere in the codebase. Full match data,
@@ -1319,7 +1317,7 @@ _INCLUDE_FULL_REPORT = {"report", "full"}
 
 
 def _poll_shape(job: "JobResponse | dict[str, Any]", include: str | None) -> "JobResponse | dict[str, Any]":
-    """Return a poll-shaped job: ``report.matches[]`` dropped unless opted in (#807).
+    """Return a poll-shaped job: ``report.matches[]`` dropped unless opted in.
 
     At 50k tables ``report.matches`` holds ~836k entries → multi-MB, which blows
     the API-proxy Lambda's 6MB response cap (413 ``RequestEntityTooLarge``) and
@@ -1363,7 +1361,7 @@ def get_job(job_id: str, namespace: str, include: str | None = None):
     DynamoDB row with no live worker that has exceeded the stale threshold is
     marked ``failed`` so the client poll can terminate.
 
-    Poll-shaped by default (#807): ``report.matches[]`` is dropped so the
+    Poll-shaped by default: ``report.matches[]`` is dropped so the
     response stays under the API-proxy Lambda's 6MB cap at scale. Scalar counts,
     ``status``, ``proposal_id``/``duplicate_of`` and ``error`` are preserved so a
     client can still detect terminal state and read the counts. Pass
@@ -1399,18 +1397,111 @@ def get_job(job_id: str, namespace: str, include: str | None = None):
     return _poll_shape(_sweep_job_if_stale(item, namespace), include)
 
 
+def _as_int(value: Any) -> int | None:
+    """Coerce a DynamoDB numeric attribute to ``int``, or ``None``.
+
+    The contract types these members ``Integer``. boto3 hands numerics back as
+    ``Decimal``, which serializes as a float ("7.0"), so coerce rather than pass
+    through. Non-numeric junk degrades to ``None`` instead of 500-ing a list read
+    on one malformed row.
+    """
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _job_summary(item: dict[str, Any]) -> dict[str, Any]:
+    """Project a persisted induction-job item onto the ``InductionJobSummary`` shape.
+
+    ``ListInductionJobs`` declares ``InductionJobSummaryList`` — jobId, status,
+    createdAt, sourceType, tablesProcessed, novelClassesCreated, error — and
+    nothing else. The handler used to return whole ``JobResponse`` objects, which
+    over-returned against its own contract and serialized the full
+    ``report.matches[]`` for every job in the list. At 50k tables a single report
+    holds ~836k match entries, so a list of completed jobs could blow the
+    API-proxy Lambda's 6MB response cap (413 ``RequestEntityTooLarge``).
+
+    Dropping ``report`` wholesale, rather than emptying ``matches``, is what the
+    contract already specifies: the two scalars a caller needs off the report
+    (``tables_processed``, ``novel_classes_created``) are persisted as top-level
+    attributes precisely so the list never has to carry the report at all.
+    Per-match detail lives on the proposal and is read via the proposal endpoints.
+
+    Keys are snake_case to match this service's actual wire format, which the web
+    app consumes (``job_id``, ``created_at`` — see the ``InductionJob`` interface
+    in ``web-app/src/services/ontology-engine.ts``). Smithy declares them
+    camelCase; that casing drift predates this change and spans the whole
+    ontology-engine surface, so it is deliberately not addressed here.
+
+    A missing ``source_type`` falls back to ``STRUCTURED``, which the contract
+    mandates rather than merely permits: "Items lacking this attribute on read
+    SHALL be treated as STRUCTURED for backward compatibility" (pre-schema-delta
+    rows predate the discriminator).
+    """
+    return {
+        "job_id": item.get("job_id"),
+        "status": item.get("status"),
+        "created_at": item.get("created_at"),
+        "source_type": item.get("source_type") or "STRUCTURED",
+        "tables_processed": _as_int(item.get("tables_processed")),
+        "novel_classes_created": _as_int(item.get("novel_classes_created")),
+        "error": item.get("error"),
+    }
+
+
 @router.get("/jobs")
-def list_jobs(namespace: str):
-    """List in-memory induction jobs for a namespace.
+def list_jobs(
+    namespace: str,
+    status: str | None = None,
+    max_results: int = Query(50, alias="maxResults", ge=1, le=200),
+) -> list[dict[str, Any]]:
+    """List a namespace's induction jobs as contract summaries, from DynamoDB.
+
+    Reads the durable job rows, NOT the in-memory ``_jobs`` dict. ``_jobs`` only
+    holds jobs started by the task serving the request and is wiped on every
+    deployment, so the previous implementation returned ``[]`` in steady state
+    while dozens of job rows sat in DynamoDB — it could not list a job started by
+    another task, or survive a restart. ``count_active_jobs`` below already read
+    durably for exactly this reason.
+
+    Each entry is the Smithy ``InductionJobSummary`` shape — scalar status and
+    counts only. The induction report, including ``report.matches[]``, is
+    deliberately absent: it is not in the declared contract, and serializing it
+    per job is what risks the API-proxy Lambda's 6MB response cap. Fetch a single
+    job via ``GET /jobs/{job_id}`` for its report, and per-match detail from the
+    proposal endpoints.
+
+    Stale non-terminal rows are NOT swept here. ``get_job`` and
+    ``count_active_jobs`` both sweep, so a row still self-heals through those
+    paths; doing it here would turn a read into N writes per call.
 
     Args:
         namespace: Namespace whose jobs to list.
+        status: Optional ``InductionJobStatus`` filter (contract ``status``).
+        max_results: Cap on returned jobs (contract ``maxResults``), 1–200.
 
     Returns:
-        The jobs tracked by this container for the namespace (excludes jobs
-        started before a restart; see ``count_active_jobs`` for durable reads).
+        One ``InductionJobSummary``-shaped dict per persisted job, newest first.
+        Returns an empty list (rather than a 500) if the underlying DynamoDB
+        scan fails — this is a read-only listing endpoint, and degrading to
+        "no jobs shown" is preferable to making the endpoint unavailable
+        during transient throttling or network issues.
     """
-    return [job for job_id, job in _jobs.items() if _job_namespaces.get(job_id) == namespace]
+    try:
+        items = dynamo_store.list_jobs(namespace=namespace, status=status, limit=max_results)
+    except Exception:
+        _log.exception(
+            "list_jobs_scan_failed namespace=%s status=%s max_results=%s",
+            namespace,
+            status,
+            max_results,
+        )
+        return []
+    items.sort(key=lambda i: str(i.get("created_at") or ""), reverse=True)
+    return [_job_summary(item) for item in items]
 
 
 # Terminal IngestJobState values (see ontology-graph.smithy) — an ingest job

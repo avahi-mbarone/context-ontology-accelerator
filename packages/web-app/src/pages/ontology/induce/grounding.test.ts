@@ -7,6 +7,7 @@ import {
   classToTableFromR2rml,
   parseR2rmlByClass,
   parseConceptMatches,
+  parseConceptMatchesEnvelope,
   normalizeNameKey,
   unquoteSqlIdent,
   type ConceptMatch,
@@ -141,6 +142,49 @@ describe("parseR2rmlByClass (TriplesMap-id + POM-id join)", () => {
   it("returns an empty map for null R2RML", () => {
     expect(parseR2rmlByClass(null).size).toBe(0);
     expect(parseR2rmlByClass(undefined).size).toBe(0);
+  });
+});
+
+describe("parseConceptMatchesEnvelope", () => {
+  const one = {
+    source_table: "orders",
+    source_column: "",
+    matched_class_uri: "https://schema.org/Order",
+    match_type: "high_confidence" as const,
+  };
+
+  it("unwraps the S3 envelope { matches: [...] }", () => {
+    // Shape written by put_proposal_matches_s3 and fetched from matches_url.
+    const parsed = parseConceptMatchesEnvelope({ matches: [one] });
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0].source_table).toBe("orders");
+    expect(parsed[0].matched_class_uri).toBe("https://schema.org/Order");
+  });
+
+  it("accepts a bare array (legacy inline metadata.matches shape)", () => {
+    const parsed = parseConceptMatchesEnvelope([one]);
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0].source_table).toBe("orders");
+  });
+
+  it("returns [] for null / undefined / a wrongly-typed payload", () => {
+    expect(parseConceptMatchesEnvelope(null)).toEqual([]);
+    expect(parseConceptMatchesEnvelope(undefined)).toEqual([]);
+    expect(parseConceptMatchesEnvelope(42)).toEqual([]);
+    // Envelope present but matches is not an array -> [] (no throw).
+    expect(parseConceptMatchesEnvelope({ matches: "nope" })).toEqual([]);
+  });
+
+  it("preserves every entry (no [:50]-style truncation on the read path)", () => {
+    // 75 table-level matches — the #908 repro count — must all survive the
+    // envelope parse; the fix delivers the full list, not a capped slice.
+    const many = Array.from({ length: 75 }, (_, i) => ({
+      source_table: `t${i}`,
+      source_column: "",
+      matched_class_uri: `https://schema.org/C${i}`,
+      match_type: "high_confidence" as const,
+    }));
+    expect(parseConceptMatchesEnvelope({ matches: many })).toHaveLength(75);
   });
 });
 

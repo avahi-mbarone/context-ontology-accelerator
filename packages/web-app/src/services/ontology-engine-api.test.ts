@@ -21,6 +21,7 @@ import {
   getObjectProperty,
   getDatatypeProperty,
   fetchTurtleFromUrl,
+  fetchJsonFromUrl,
   putToPresignedUrl,
 } from "./ontology-engine";
 import type { ApiClient } from "@components/ApiClientProvider";
@@ -209,6 +210,33 @@ describe("ontology-engine API wrappers", () => {
       );
       await expect(fetchTurtleFromUrl("https://s3/x")).rejects.toThrow(
         /403 Forbidden/,
+      );
+    });
+
+    it("fetchJsonFromUrl returns the parsed body on ok", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({
+          ok: true,
+          json: () => Promise.resolve({ matches: [{ source_table: "t" }] }),
+        }),
+      );
+      expect(await fetchJsonFromUrl("https://s3/matches.json")).toEqual({
+        matches: [{ source_table: "t" }],
+      });
+    });
+
+    it("fetchJsonFromUrl throws on non-ok", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({
+          ok: false,
+          status: 404,
+          statusText: "Not Found",
+        }),
+      );
+      await expect(fetchJsonFromUrl("https://s3/matches.json")).rejects.toThrow(
+        /404 Not Found/,
       );
     });
 

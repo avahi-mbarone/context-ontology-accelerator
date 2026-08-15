@@ -10,6 +10,7 @@ REST API for programmatic query/retrieval — thin Lambda adapter that forwards 
 | POST | `/namespaces/{namespaceId}/translate` | NL-to-SPARQL translation only |
 | POST | `/namespaces/{namespaceId}/kb/search` | Vector search (OpenSearch) |
 | POST | `/namespaces/{namespaceId}/graph/traverse` | Graph traversal (Neptune) |
+| GET  | `/namespaces/{namespaceId}/schema` | Schema discovery — returns queryable classes and properties |
 
 ## How it works
 
@@ -23,7 +24,7 @@ The Lambda validates input, forwards the caller's access token to AgentCore via 
 
 Use a Cognito **access token** (not ID token) — AgentCore validates `client_id`.
 
-Cedar actions: `query` (query/translate/traverse), `searchDocuments` (kb/search).
+Cedar actions: `query` (query/translate/traverse), `searchDocuments` (kb/search), `viewNamespace` (schema).
 
 ## Errors
 

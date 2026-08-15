@@ -17,6 +17,7 @@ members = [
     "coa-control-plane",
     "coa-control-plane-server",
     "coa-data-layer",
+    "coa-data-layer-server",
     "coa-mcp",
     "coa-metrics",
     "coa-ontology",
@@ -721,6 +722,17 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "coa-common", editable = "libs/common" }]
+
+[[package]]
+name = "coa-data-layer-server"
+version = "0.0.1"
+source = { editable = "smithy-generated/data-layer-python-server" }
+dependencies = [
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pydantic", specifier = ">=2.0" }]
 
 [[package]]
 name = "coa-mcp"
