@@ -791,6 +791,20 @@ export class NamespaceStack extends SCLStack {
     // because SourcesStack/MetricServiceStack deploy *after* NamespaceStack
     // (see bin/app.ts) — the same pattern OntologyStack already uses to
     // invoke sources-api (see ontology-stack.ts).
+    // GraphRAG doc-KG index teardown needs the AOSS collection. Both params are
+    // written by the storage stack; the read requires an explicit
+    // addDependency() in bin/app.ts because CDK cannot infer ordering from
+    // valueForStringParameter.
+    const opensearchEndpoint = ssm.StringParameter.valueForStringParameter(
+      this,
+      `${ssmPrefix}/opensearch/endpoint`,
+    );
+    const opensearchCollectionName =
+      ssm.StringParameter.valueForStringParameter(
+        this,
+        `${ssmPrefix}/opensearch/collection-name`,
+      );
+
     const deletionPipeline: NamespaceDeletionPipeline =
       new NamespaceDeletionPipeline(this, "DeletionPipeline", {
         prefixed: (name: string) => this.prefixed(name),
@@ -817,6 +831,12 @@ export class NamespaceStack extends SCLStack {
         cloudMapNamespaceId: props.cloudMapNamespaceId,
         ontologyBucketName: props.ontologyBucketName,
         ontologyEngineEndpoint: props.ontologyEngineEndpoint,
+        // For dropping the namespace's GraphRAG doc-KG indexes on teardown.
+        // Read from SSM (the storage stack writes both) — see bin/app.ts for
+        // the explicit addDependency this read requires, since CDK cannot infer
+        // ordering from valueForStringParameter.
+        opensearchEndpoint,
+        opensearchCollectionName,
         resourcePrefix: this.prefixed(""),
       });
 

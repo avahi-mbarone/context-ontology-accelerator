@@ -701,10 +701,24 @@ def delete_ontologies(namespace: str = "default", ontology_id: str | None = None
                 if graph_store.delete_ontology(ontology_id):
                     graphs_dropped += 1
 
-    # 2. Delete entire AOSS vector index for the namespace
-    index_deleted = False
-    with contextlib.suppress(Exception):
-        index_deleted = vector_store.delete_index(namespace=namespace)
+    # 2. Delete the entire AOSS vector index for the namespace.
+    #
+    # HARD GATE — deliberately NOT best-effort, unlike the graph drop above.
+    # AOSS caps a collection at 1000 indexes and this store uses one index per
+    # namespace, so a swallowed failure here does not degrade gracefully: the
+    # caller (namespace deletion pipeline) goes on to delete the namespace
+    # record, after which NOTHING can ever reclaim this index — its namespace
+    # no longer exists, so no future teardown will ever target it again. Those
+    # shells accumulate until every embedding write in the deployment fails
+    # with `index_limit_breached`.
+    #
+    # Letting this raise turns an unrecoverable silent leak into a retryable
+    # DELETE_FAILED, which is the same trade `_delete_ontology_backend` makes
+    # for its AOSS teardown ("hard gate 2") and what finalize's docstring means
+    # by DELETE_FAILED being preferable because it supports retry. delete_index
+    # is idempotent (returns False when the index is already absent), so the
+    # retry is safe.
+    index_deleted = vector_store.delete_index(namespace=namespace)
 
     # 3. Purge all DDB items (registry + jobs + proposals)
     ddb_deleted = dynamo_store.delete_all_namespace_items(namespace)

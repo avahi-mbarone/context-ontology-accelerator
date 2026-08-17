@@ -25,7 +25,9 @@ from urllib.error import HTTPError, URLError
 import boto3
 import structlog
 from coa_common import async_boto_config
+from coa_common.constants import graphrag_index_names
 from coa_common.dao import DynamoDBDAO, QueryParams
+from coa_common.opensearch import AossVectorClient
 
 logger = structlog.get_logger(__name__)
 
@@ -299,6 +301,56 @@ def teardown_vkg_service(namespace_id: str) -> None:
         )
 
 
+def delete_graphrag_indexes(namespace_id: str) -> list[str]:
+    """Delete the namespace's GraphRAG doc-KG vector indexes. Returns those removed.
+
+    These indexes (``chunk_*``/``topic_*``, plus legacy ``statement_*``) are
+    NAMESPACE-scoped, not source-scoped: every doc source in a namespace shares
+    one GraphRAG tenant id, so ``chunk_{tenant}`` holds chunks for ALL of them.
+    Source deletion therefore must NOT drop them — it only removes its own
+    documents from the shared index, which is what graph_cleanup already does.
+    They become garbage exactly when the namespace goes away, which is why this
+    lives in namespace teardown.
+
+    Nothing deleted these before, so every deleted namespace left its index set
+    behind forever. AOSS caps a collection at 1000 indexes and this is one set
+    per namespace, so they accumulate until every embedding write in the
+    deployment fails with ``index_limit_breached``.
+
+    Safe against an in-flight ``graph_cleanup`` ECS task: that task installs the
+    non-creating AOSS patch (``allow_create=False``), so it can no longer
+    recreate an index we just dropped — it sees the index absent, falls back to
+    graphrag's dummy client, and its remaining embedding deletes become no-ops.
+    Which is correct: the vectors it was going to delete went with the index.
+
+    Deleting an absent index is a no-op, so this is idempotent and safe to
+    retry. Raises on a real failure, for the same reason
+    :func:`delete_all_ontologies` does — a swallowed error here is an
+    unreclaimable leak once the namespace record is gone.
+    """
+    endpoint = os.environ.get("OSS_ENDPOINT", "")
+    if not endpoint:
+        logger.warning("oss_endpoint_not_configured", namespace_id=namespace_id)
+        return []
+
+    region = os.environ.get("AWS_REGION", "us-east-1")
+    # dimensions is irrelevant for a delete but required by the client ctor.
+    client = AossVectorClient(endpoint=endpoint, region=region, dimensions=1024, timeout=60)
+
+    removed: list[str] = []
+    for index in graphrag_index_names(namespace_id):
+        if client.delete_index(index):
+            removed.append(index)
+
+    logger.info(
+        "graphrag_indexes_deleted",
+        namespace_id=namespace_id,
+        removed=removed,
+        checked=graphrag_index_names(namespace_id),
+    )
+    return removed
+
+
 # ── Ontology teardown (delegates to ontology-engine service) ──────────────
 
 
@@ -306,7 +358,16 @@ def delete_all_ontologies(namespace_id: str) -> None:
     """Call the ontology-engine to delete all ontology data for a namespace.
 
     Drops Neptune named graphs, deletes the AOSS vector index, and purges
-    all ontology DynamoDB records (registry, jobs, proposals). Best-effort.
+    all ontology DynamoDB records (registry, jobs, proposals).
+
+    NOT best-effort: raises on failure. The AOSS vector index is one index per
+    namespace against a collection with a hard 1000-index cap, and the caller
+    goes on to delete the namespace record — so swallowing a failure here
+    permanently orphans that index (nothing can ever target a namespace that no
+    longer exists) and the deployment eventually fails every embedding write
+    with ``index_limit_breached``. Raising lets the pipeline step retry and, if
+    it keeps failing, land the namespace in DELETE_FAILED, which is
+    recoverable. A silent leak is not.
     """
     endpoint = os.environ.get("ONTOLOGY_ENGINE_ENDPOINT", "").rstrip("/")
     if not endpoint:
@@ -332,6 +393,7 @@ def delete_all_ontologies(namespace_id: str) -> None:
             namespace_id=namespace_id,
             error=str(e),
         )
+        raise
 
 
 def delete_ontology_artifacts(namespace_id: str) -> None:

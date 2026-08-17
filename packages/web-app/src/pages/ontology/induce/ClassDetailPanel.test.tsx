@@ -48,7 +48,7 @@ describe("ClassDetailPanel", () => {
       <ClassDetailPanel
         group={group}
         r2rml={null}
-        isTerminal={false}
+        isReadOnly={false}
         onSave={vi.fn()}
       />,
     );
@@ -62,7 +62,7 @@ describe("ClassDetailPanel", () => {
       <ClassDetailPanel
         group={group}
         r2rml={null}
-        isTerminal={false}
+        isReadOnly={false}
         onSave={onSave}
       />,
     );
@@ -74,12 +74,12 @@ describe("ClassDetailPanel", () => {
     );
   });
 
-  it("shows readonly fields when isTerminal", () => {
+  it("shows readonly fields when isReadOnly", () => {
     render(
       <ClassDetailPanel
         group={group}
         r2rml={null}
-        isTerminal={true}
+        isReadOnly={true}
         onSave={vi.fn()}
       />,
     );
@@ -97,7 +97,7 @@ describe("ClassDetailPanel", () => {
       <ClassDetailPanel
         group={grounded}
         r2rml={null}
-        isTerminal={false}
+        isReadOnly={false}
         onSave={vi.fn()}
       />,
     );
@@ -110,7 +110,7 @@ describe("ClassDetailPanel", () => {
       <ClassDetailPanel
         group={group}
         r2rml={null}
-        isTerminal={false}
+        isReadOnly={false}
         onSave={vi.fn()}
       />,
     );
@@ -122,7 +122,7 @@ describe("ClassDetailPanel", () => {
       <ClassDetailPanel
         group={group}
         r2rml={null}
-        isTerminal={false}
+        isReadOnly={false}
         onSave={vi.fn()}
       />,
     );
@@ -136,7 +136,7 @@ describe("ClassDetailPanel", () => {
       <ClassDetailPanel
         group={group}
         r2rml={null}
-        isTerminal={false}
+        isReadOnly={false}
         onSave={vi.fn()}
         onSaveProperty={onSaveProperty}
       />,
@@ -163,7 +163,7 @@ describe("ClassDetailPanel", () => {
         group={group}
         r2rml={r2rml}
         r2rmlMapping={mapping}
-        isTerminal={false}
+        isReadOnly={false}
         onSave={vi.fn()}
       />,
     );
@@ -185,7 +185,7 @@ describe("ClassDetailPanel", () => {
       <ClassDetailPanel
         group={enriched}
         r2rml={null}
-        isTerminal={false}
+        isReadOnly={false}
         onSave={vi.fn()}
       />,
     );
@@ -222,7 +222,7 @@ describe("ClassDetailPanel", () => {
       <ClassDetailPanel
         group={group}
         r2rml={null}
-        isTerminal={false}
+        isReadOnly={false}
         onSave={vi.fn()}
         groundingMatch={groundingMatch}
         onSelectGroundingCandidate={onSelect}
@@ -271,7 +271,7 @@ ex:Policy a owl:Class ;
         r2rml={null}
         prelude={`@prefix ex: <http://example.com/> .`}
         fullTurtle={fullTurtle}
-        isTerminal={false}
+        isReadOnly={false}
         onSave={vi.fn()}
         onUpdateTurtle={onUpdateTurtle}
       />,
@@ -322,7 +322,7 @@ ex:Policy a owl:Class ;
       <ClassDetailPanel
         group={group} // group.matches is undefined → 0 sibling matches
         r2rml={null}
-        isTerminal={false}
+        isReadOnly={false}
         onSave={vi.fn()}
         groundingMatch={groundingMatch}
       />,
@@ -338,7 +338,7 @@ ex:Policy a owl:Class ;
       <ClassDetailPanel
         group={group}
         r2rml={null}
-        isTerminal={false}
+        isReadOnly={false}
         onSave={vi.fn()}
       />,
     );
@@ -351,7 +351,7 @@ ex:Policy a owl:Class ;
       <ClassDetailPanel
         group={group}
         r2rml={null}
-        isTerminal={false}
+        isReadOnly={false}
         onSave={vi.fn()}
       />,
     );

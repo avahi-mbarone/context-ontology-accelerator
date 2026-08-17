@@ -41,7 +41,9 @@ from __future__ import annotations
 import os
 
 import structlog
+from coa_common import resolve_region
 from coa_common.logging import setup_logging
+from coa_common.opensearch import AossVectorClient
 
 from .graph_build import (
     EMBEDDING_INDEXES,
@@ -62,6 +64,48 @@ OPENSEARCH_ENDPOINT: str = os.environ.get("OPENSEARCH_ENDPOINT", "")
 # Small batch size to avoid Neptune's per-query memory limit.
 # The default is 1000 which causes MemoryLimitExceededException on large docs.
 _BATCH_SIZE = 200
+
+
+def _existing_embedding_indexes(prefixes: list[str], tenant_id: str) -> list[str]:
+    """Return only the ``prefixes`` whose AOSS index actually exists.
+
+    Deletion MUST NOT be handed an index name that isn't there. graphrag's
+    ``delete_embeddings`` treats "no documents found for these ids" as
+    replication lag and sleeps in a **70-second retry loop per batch** before
+    giving up (``_insufficient_ids`` → ``time.sleep(10)`` until 70s elapse).
+    With a missing index every batch takes that full 70s: the vector client is
+    graphrag's dummy (``_os_client is None``), so ``paginated_search`` returns
+    nothing and the id map is always empty. At ``_BATCH_SIZE`` 200 per index
+    that is where the module docstring's "36-source deletion burned 10 hours
+    ... left the source DELETE_FAILED" comes from.
+
+    A missing index is now a NORMAL condition rather than a bug: namespace
+    teardown drops ``chunk_*``/``topic_*`` once the last source is deleted
+    (control-plane ``cleanup.delete_graphrag_indexes``), and these ECS cleanup
+    tasks can still be running when it does. Passing only the indexes that
+    exist means graphrag skips vector deletion entirely instead of stalling,
+    while the Neptune subgraph deletes — the part that still matters — proceed.
+
+    Best-effort: if the existence probe itself fails we keep the prefix, so a
+    transient AOSS fault degrades to the old (slow) behaviour rather than
+    silently skipping a delete that was actually needed.
+    """
+    if not prefixes:
+        return []
+
+    client = AossVectorClient(endpoint=OPENSEARCH_ENDPOINT, region=resolve_region()).raw_client()
+    kept: list[str] = []
+    for prefix in prefixes:
+        index_name = f"{prefix}_{tenant_id}"
+        try:
+            if client.indices.exists(index=index_name):
+                kept.append(prefix)
+            else:
+                logger.info("embedding_index_absent_skipping", index=index_name)
+        except Exception:  # noqa: BLE001 — probe only; keep the prefix on failure
+            logger.warning("embedding_index_probe_failed_keeping", index=index_name, exc_info=True)
+            kept.append(prefix)
+    return kept
 
 
 def main() -> None:
@@ -94,7 +138,14 @@ def main() -> None:
     # LexicalGraphIndex/VectorStoreFactory bind their own references, and the
     # paginated_search retry is what keeps a transient AOSS 429/5xx during deletion
     # from aborting the task with a masked UnboundLocalError.
-    _patch_graphrag_toolkit_for_aoss_nextgen()
+    #
+    # allow_create=False: this is the DELETION path, and it must never create an
+    # index. graphrag's VectorIndex.writeable defaults to True and its
+    # index_exists creates when writeable, so cleaning a tenant whose indexes
+    # are already gone would recreate chunk_*/topic_* as empty shells for a
+    # namespace on its way out — unreclaimable, and AOSS caps a collection at
+    # 1000 indexes. A missing index means there is nothing to delete anyway.
+    _patch_graphrag_toolkit_for_aoss_nextgen(allow_create=False)
     _patch_graphrag_paginated_search_retry()
     _patch_graphrag_bulk_ingest_retry()
 
@@ -114,9 +165,21 @@ def main() -> None:
         tenant_id=TENANT_ID,
     )
 
+    # Hand graphrag ONLY the indexes that still exist. A name that is already
+    # gone would cost 70s of futile retry per batch (see
+    # _existing_embedding_indexes), and namespace teardown legitimately drops
+    # these while this task may still be running.
+    existing_indexes = _existing_embedding_indexes(EMBEDDING_INDEXES, TENANT_ID)
+    if not existing_indexes:
+        logger.info(
+            "no_embedding_indexes_present_skipping_vector_deletes",
+            tenant_id=TENANT_ID,
+            configured=EMBEDDING_INDEXES,
+        )
+
     with (
         GraphStoreFactory.for_graph_store(graph_store_uri) as graph_store,
-        VectorStoreFactory.for_vector_store(vector_store_uri, index_names=EMBEDDING_INDEXES) as vector_store,
+        VectorStoreFactory.for_vector_store(vector_store_uri, index_names=existing_indexes) as vector_store,
     ):
         graph_index = LexicalGraphIndex(graph_store, vector_store, tenant_id=TENANT_ID)
 

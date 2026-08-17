@@ -222,6 +222,11 @@ async function deploy(): Promise<void> {
     ontologyBucketName: storage.ontologyArtifactsBucket.bucketName,
     ontologyEngineEndpoint: `http://ontology-engine.${prefix}-${envName}-services.local:8001`,
   });
+  // The deletion pipeline reads /opensearch/{endpoint,collection-name} to drop
+  // the namespace's GraphRAG doc-KG indexes on teardown. CDK cannot infer this
+  // from valueForStringParameter, so the dependency must be explicit or a fresh
+  // account deploys the namespace stack before those params exist.
+  smusDomain.addDependency(storage); // needs /opensearch/endpoint + /opensearch/collection-name
 
   // ── Service stacks ─────────────────────────────────────────────────
   const metricService = new MetricServiceStack(
@@ -339,6 +344,8 @@ async function deploy(): Promise<void> {
       "/namespaces/{namespaceId}/translate": `/${prefix}/data-layer/api-fn-arn`,
       "/namespaces/{namespaceId}/kb/search": `/${prefix}/data-layer/api-fn-arn`,
       "/namespaces/{namespaceId}/graph/traverse": `/${prefix}/data-layer/api-fn-arn`,
+      // ── Data Layer — schema discovery (mirrors MCP describe_schema) ─
+      "/namespaces/{namespaceId}/schema": `/${prefix}/data-layer/api-fn-arn`,
     },
   });
 

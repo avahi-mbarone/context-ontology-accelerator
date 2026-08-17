@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from opensearchpy.exceptions import ConnectionError as OSConnectionError
-from opensearchpy.exceptions import ConnectionTimeout, RequestError, TransportError
+from opensearchpy.exceptions import ConnectionTimeout, NotFoundError, RequestError, TransportError
 from opensearchpy.helpers.errors import BulkIndexError
 
 pytestmark = pytest.mark.unit
@@ -431,3 +431,72 @@ class TestTransportSplit:
         c = AossVectorClient(dimensions=4)  # no endpoint, no transport
         with pytest.raises(RuntimeError):
             c.ensure_index("idx")
+
+
+# ── missing index reads as "no data" (index-resurrection guard) ──────────
+
+
+def _client_raising(exc: Exception):
+    """Direct client whose underlying search always raises ``exc``."""
+    c = AossVectorClient(endpoint="https://x.aoss.us-west-2.on.aws", region="us-west-2", dimensions=4)
+    fake = MagicMock()
+    fake.search.side_effect = exc
+    c._client = fake
+    return c, fake
+
+
+class TestMissingIndexReadsEmpty:
+    """A read against a non-existent index must return empty, not raise.
+
+    This is what lets callers stop calling ``ensure_index`` on the read path.
+    An ``ensure_index`` on a read resurrects an empty index for a namespace that
+    was already torn down; nothing reclaims those, and AOSS caps a collection at
+    1000 indexes, so they pile up until every write fails with
+    ``index_limit_breached``.
+    """
+
+    # The 404 surfaces through several opensearch-py shapes; _is_index_not_found
+    # matches on class name AND message, so cover both.
+    @pytest.fixture(
+        params=[
+            TransportError(404, "index_not_found_exception", {}),
+            NotFoundError(404, "index_not_found_exception", {}),
+            Exception("no such index [foo]"),
+        ],
+        ids=["transport-404", "notfound", "message-only"],
+    )
+    def missing(self, request):
+        return request.param
+
+    def test_knn_search_returns_empty(self, missing):
+        c, _ = _client_raising(missing)
+        assert c.knn_search("gone-idx", [0.1] * 4, top_k=5) == []
+
+    def test_filter_search_returns_empty(self, missing):
+        c, _ = _client_raising(missing)
+        assert c.filter_search("gone-idx", [{"term": {"ontology_id": "o"}}]) == []
+
+    def test_count_returns_zero(self, missing):
+        c, _ = _client_raising(missing)
+        assert c.count("gone-idx") == 0
+
+    def test_iter_source_field_returns_empty(self, missing):
+        c, _ = _client_raising(missing)
+        assert c.iter_source_field("gone-idx", [{"term": {"ontology_id": "o"}}], "entity_uri") == []
+
+    def test_delete_by_term_returns_zero(self, missing):
+        """Nothing to delete in an index that doesn't exist — and no raise."""
+        c, _ = _client_raising(missing)
+        assert c.delete_by_term("gone-idx", "ontology_id", "o") == 0
+
+    def test_real_errors_still_propagate(self):
+        """Only index-not-found is swallowed; a genuine failure must surface."""
+        c, _ = _client_raising(TransportError(500, "internal_server_error", {}))
+        with pytest.raises(TransportError):
+            c.filter_search("idx", [{"term": {"x": "y"}}])
+
+    def test_missing_index_is_not_created(self):
+        """The whole point: a read must not create the index it just missed."""
+        c, fake = _client_raising(NotFoundError(404, "index_not_found_exception", {}))
+        c.filter_search("gone-idx", [{"term": {"ontology_id": "o"}}])
+        fake.indices.create.assert_not_called()

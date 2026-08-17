@@ -1004,6 +1004,18 @@ def _matches_json_default(o):
     raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
 
 
+def _proposal_matches_s3_key(namespace: str, proposal_id: str) -> str:
+    """S3 key for a proposal's offloaded ``matches.json``.
+
+    Distinct from ``_proposal_s3_key`` (which is Turtle-only, suffixing
+    ``.ttl``): matches are JSON. Kept as the single source of truth for the key
+    so the write (``put_proposal_matches_s3``), the read
+    (``get_proposal_by_id``) and the presign (``presign_proposal_matches``) can
+    never drift.
+    """
+    return f"{_S3_PROPOSALS_PREFIX}/{namespace}/{proposal_id}/latest/matches.json"
+
+
 def put_proposal_matches_s3(proposal_id: str, matches: list, namespace: str = DEFAULT_NAMESPACE) -> str:
     """Offload a proposal's grounding ``matches`` to S3 and return the key.
 
@@ -1016,7 +1028,7 @@ def put_proposal_matches_s3(proposal_id: str, matches: list, namespace: str = DE
     """
     import json as _json
 
-    key = f"{_S3_PROPOSALS_PREFIX}/{namespace}/{proposal_id}/latest/matches.json"
+    key = _proposal_matches_s3_key(namespace, proposal_id)
     _get_s3().put_object(
         Bucket=_S3_BUCKET,
         Key=key,
@@ -1024,6 +1036,40 @@ def put_proposal_matches_s3(proposal_id: str, matches: list, namespace: str = DE
         ContentType="application/json",
     )
     return key
+
+
+def presign_proposal_matches(
+    namespace: str,
+    proposal_id: str,
+    expires_in: int = 3600,
+) -> str | None:
+    """Presigned S3 GET URL for a proposal's ``matches.json`` (``None`` if absent).
+
+    The matches counterpart to :func:`presign_proposal_artifact`: lets the
+    browser fetch the full grounding-match list directly from S3, bypassing the
+    6 MB API Gateway / Lambda response cap that inlining the list in
+    ``GET /proposals/{id}`` would hit on wide schemas (thousands of tables ×
+    up-to-30 candidates each). Returns ``None`` when no matches object exists
+    (all-novel inductions skip the write; pre-offload legacy proposals carry the
+    list inline instead), so the caller can fall back accordingly.
+    """
+    key = _proposal_matches_s3_key(namespace, proposal_id)
+    s3 = _get_s3()
+    try:
+        s3.head_object(Bucket=_S3_BUCKET, Key=key)
+    except ClientError as e:
+        # A genuine "object not found" (404 / NoSuchKey) means there is nothing
+        # to offer -> None. Any other error (permissions, throttling, network)
+        # is real and must propagate rather than be silently swallowed.
+        code = e.response.get("Error", {}).get("Code")
+        if code in ("404", "NoSuchKey", "NotFound"):
+            return None
+        raise
+    return s3.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": _S3_BUCKET, "Key": key},
+        ExpiresIn=expires_in,
+    )
 
 
 def put_proposal_constraints(namespace: str, proposal_id: str, constraint_config_json: str) -> str:
@@ -1071,7 +1117,10 @@ def _sweep_proposal_if_stale(proposal_id: str, namespace: str, item: dict) -> di
 
 
 def get_proposal_by_id(
-    proposal_id: str, namespace: str = DEFAULT_NAMESPACE, hydrate_turtle: bool = True
+    proposal_id: str,
+    namespace: str = DEFAULT_NAMESPACE,
+    hydrate_turtle: bool = True,
+    hydrate_matches: bool = True,
 ) -> dict | None:
     """Fetch a proposal's META item, hydrating S3-offloaded content.
 
@@ -1081,10 +1130,16 @@ def get_proposal_by_id(
         hydrate_turtle: When True, re-read the authoritative ontology/R2RML
             Turtle from S3; skip this (possibly multi-MB) read when only
             metadata is needed.
+        hydrate_matches: When True, re-read the offloaded grounding ``matches``
+            list from S3 into ``metadata["matches"]``. Server-side consumers
+            that operate on the full list (e.g. grounding-override rebuild) need
+            this. The detail endpoint sets it False and serves matches
+            out-of-band via a presigned S3 URL instead, because the list can
+            exceed the 6 MB API Gateway / Lambda response cap on wide schemas.
 
     Returns:
-        The proposal item (with matches and, when requested, Turtle hydrated
-        from S3), or None if no such proposal exists.
+        The proposal item (with matches/Turtle hydrated from S3 when the
+        corresponding flag is set), or None if no such proposal exists.
     """
     resp = _get_table().get_item(Key={"PK": _proposal_pk(namespace, proposal_id), "SK": "META"})
     item = resp.get("Item")
@@ -1106,29 +1161,29 @@ def get_proposal_by_id(
     if hydrate_turtle and item.get("r2rml_s3_key"):
         item["r2rml_turtle"] = _get_artifact_s3(namespace, proposal_id, "r2rml") or ""
     # Hydrate matches from S3
-    if item.get("matches_s3_key") and not (item.get("metadata", {}) or {}).get("matches"):
+    if hydrate_matches and item.get("matches_s3_key") and not (item.get("metadata", {}) or {}).get("matches"):
         try:
-            import json as _json
-
             key = item["matches_s3_key"]
             raw = _get_s3().get_object(Bucket=_S3_BUCKET, Key=key)["Body"].read().decode("utf-8")
-            matches_data = _json.loads(raw)
+            matches_data = json.loads(raw)
             if "metadata" not in item:
                 item["metadata"] = {}
             item["metadata"]["matches"] = matches_data.get("matches", [])
-        except Exception as e:  # degrade gracefully, but make a misconfigured bucket / corrupt JSON observable
+        # Narrow to the actual failure modes (S3 transport, corrupt JSON, shape) so a
+        # programming error surfaces instead of being swallowed as a graceful degrade.
+        except (ClientError, BotoCoreError, json.JSONDecodeError, KeyError) as e:
             _log.warning("matches hydration failed for %s in %s: %s", proposal_id, namespace, e)
     # Hydrate constraint_config from S3
     if (item.get("metadata") or {}).get("has_constraint_config"):
         try:
-            import json as _json
-
             raw = _get_artifact_s3(namespace, proposal_id, "constraints")
             if raw:
                 if "metadata" not in item:
                     item["metadata"] = {}
-                item["metadata"]["constraint_config"] = _json.loads(raw)
-        except Exception as e:  # degrade gracefully, but log so the failure isn't silent
+                item["metadata"]["constraint_config"] = json.loads(raw)
+        # Narrow to the actual failure modes (S3 transport, corrupt JSON) so a
+        # programming error surfaces instead of being swallowed as a graceful degrade.
+        except (ClientError, BotoCoreError, json.JSONDecodeError) as e:
             _log.warning("constraint_config hydration failed for %s in %s: %s", proposal_id, namespace, e)
     return item
 

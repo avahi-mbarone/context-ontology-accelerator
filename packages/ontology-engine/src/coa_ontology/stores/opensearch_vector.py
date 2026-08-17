@@ -97,9 +97,27 @@ class OpenSearchVectorStore(VectorStore):
     def _ensure_index(self, namespace: str | None = None) -> str:
         """Create the OSS index for the namespace if it doesn't exist.
 
+        WRITE PATH ONLY. Reads must use :meth:`_read_index` — see its docstring.
+
         Returns the resolved index name.
         """
         return self._aoss().ensure_index(_index_for_namespace(self._resolve_ns(namespace)))
+
+    def _read_index(self, namespace: str | None = None) -> str:
+        """Resolve the index name for a read WITHOUT creating it.
+
+        Reads deliberately do not ``ensure_index``: creating an index on the
+        read path resurrects an empty shell for a namespace that was already
+        torn down (namespace deletion drops the index, then any late read —
+        a status poll, a search, a stale retry — recreated it). Nothing ever
+        reclaims those shells, and AOSS caps a collection at 1000 indexes, so
+        they accumulate until every write fails with ``index_limit_breached``.
+
+        The shared ``AossVectorClient`` read helpers treat a missing index as
+        "no data", so a read against a not-yet-created index returns empty
+        instead of raising.
+        """
+        return _index_for_namespace(self._resolve_ns(namespace))
 
     def raw_client(self):
         """Return the retry-wrapped opensearch-py client for low-level access.
@@ -189,7 +207,7 @@ class OpenSearchVectorStore(VectorStore):
         Returns:
             List of matching embedding documents.
         """
-        idx = self._ensure_index(namespace)
+        idx = self._read_index(namespace)
         filters: list[dict[str, Any]] = [{"term": {"entity_uri": entity_uri}}]
         if entity_type:
             filters.append({"term": {"entity_type": entity_type}})
@@ -215,7 +233,7 @@ class OpenSearchVectorStore(VectorStore):
         Returns:
             List of matching embedding documents.
         """
-        idx = self._ensure_index(namespace)
+        idx = self._read_index(namespace)
         filters: list[dict[str, Any]] = [{"term": {"ontology_id": ontology_id}}]
         if entity_type:
             filters.append({"term": {"entity_type": entity_type}})
@@ -240,7 +258,7 @@ class OpenSearchVectorStore(VectorStore):
         # Project only entity_uri (exclude the knn_vector + text payload) and
         # page with search_after — the readiness wait needs the complete URI
         # set, never the vectors.
-        idx = self._ensure_index(namespace)
+        idx = self._read_index(namespace)
         return self._aoss().iter_source_field(idx, [{"term": {"ontology_id": ontology_id}}], "entity_uri")
 
     def search_nearest(
@@ -271,7 +289,7 @@ class OpenSearchVectorStore(VectorStore):
         Returns:
             List of :class:`EmbeddingHit` nearest matches.
         """
-        idx = self._ensure_index(namespace)
+        idx = self._read_index(namespace)
         filters: list[dict[str, Any]] = [
             {"term": {"embedding_type": embedding_type}},
             {"term": {"model_id": model_id}},
@@ -311,7 +329,7 @@ class OpenSearchVectorStore(VectorStore):
         Uses per-doc deletes because AOSS has no ``_delete_by_query`` on
         VECTORSEARCH collections.
         """
-        idx = self._ensure_index(namespace)
+        idx = self._read_index(namespace)
         return self._aoss().delete_by_term(idx, "ontology_id", ontology_id)
 
     def delete_index(self, namespace: str | None = None) -> bool:

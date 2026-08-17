@@ -1,4 +1,5 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Unit tests for DELETE /ontologies/ (delete all ontologies in namespace)."""
@@ -80,6 +81,48 @@ class TestDeleteAllOntologies:
         body = resp.json()
         assert body["graphsDropped"] == 0
         assert body["indexDeleted"] is True
+
+    @patch("coa_ontology.dynamo_store.list_ontologies_registry")
+    @patch("coa_ontology.dynamo_store.delete_all_namespace_items")
+    def test_index_delete_failure_is_a_hard_gate(self, mock_delete_all, mock_list, client):
+        """An AOSS index delete failure must NOT be swallowed.
+
+        The caller (namespace deletion pipeline) deletes the namespace record
+        after this returns, so a swallowed failure orphans the index forever —
+        nothing can target a namespace that no longer exists — until the
+        collection hits its hard 1000-index cap and every embedding write in
+        the deployment fails with index_limit_breached. Failing loudly makes
+        the pipeline retry and, on exhaustion, land a recoverable
+        DELETE_FAILED. Contrast test_graph_failure_is_suppressed: a dropped
+        graph is bad but consumes no quota that can wedge the deployment.
+        """
+        test_client, mock_graph, mock_vector = client
+        mock_list.return_value = [{"ontology_id": "http://ex.org/ont1"}]
+        mock_graph.delete_ontology.return_value = True
+        mock_vector.delete_index.side_effect = RuntimeError("AOSS throttled")
+
+        with pytest.raises(RuntimeError, match="AOSS throttled"):
+            test_client.delete("/ontologies/?namespace=test-ns")
+
+    @patch("coa_ontology.dynamo_store.list_ontologies_registry")
+    @patch("coa_ontology.dynamo_store.delete_all_namespace_items")
+    def test_index_delete_failure_preserves_the_ddb_recovery_anchor(self, mock_delete_all, mock_list, client):
+        """Don't purge the registry while the index is still there.
+
+        The DDB rows are the recovery anchor for a retried teardown (same
+        rationale as _delete_ontology_backend deleting its registry row last).
+        Purging them while the index survives would strand the index with
+        nothing left pointing at it.
+        """
+        test_client, mock_graph, mock_vector = client
+        mock_list.return_value = [{"ontology_id": "http://ex.org/ont1"}]
+        mock_graph.delete_ontology.return_value = True
+        mock_vector.delete_index.side_effect = RuntimeError("AOSS throttled")
+
+        with pytest.raises(RuntimeError):
+            test_client.delete("/ontologies/?namespace=test-ns")
+
+        mock_delete_all.assert_not_called()
 
 
 class _InlineThread:

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -195,3 +196,179 @@ class TestDeleteRoleMappingsAndRoles:
             cleanup.delete_roles("ns-123")
 
         mock_delete.assert_called_once_with("test-roles", "NS#ns-123")
+
+
+@pytest.mark.unit
+class TestDeleteAllOntologies:
+    """The ontology teardown call is a HARD GATE, not best-effort.
+
+    It owns the AOSS vector index — one index per namespace against a
+    collection with a hard 1000-index cap. The deletion pipeline deletes the
+    namespace record after this step, so a swallowed failure orphans that index
+    permanently (nothing can target a namespace that no longer exists) and the
+    deployment eventually fails every embedding write with
+    ``index_limit_breached``. Raising makes the step retry and, on exhaustion,
+    land a recoverable DELETE_FAILED.
+    """
+
+    def test_http_error_propagates(self, monkeypatch):
+        from urllib.error import HTTPError
+
+        from coa_control_plane.namespace import cleanup
+
+        monkeypatch.setenv("ONTOLOGY_ENGINE_ENDPOINT", "http://ontology.internal")
+
+        def _raise(*_a, **_k):
+            raise HTTPError("http://ontology.internal", 500, "boom", {}, None)
+
+        monkeypatch.setattr(cleanup.urllib_request, "urlopen", _raise)
+
+        with pytest.raises(HTTPError):
+            cleanup.delete_all_ontologies("ns-123")
+
+    def test_connection_error_propagates(self, monkeypatch):
+        from urllib.error import URLError
+
+        from coa_control_plane.namespace import cleanup
+
+        monkeypatch.setenv("ONTOLOGY_ENGINE_ENDPOINT", "http://ontology.internal")
+
+        def _raise(*_a, **_k):
+            raise URLError("unreachable")
+
+        monkeypatch.setattr(cleanup.urllib_request, "urlopen", _raise)
+
+        with pytest.raises(URLError):
+            cleanup.delete_all_ontologies("ns-123")
+
+    def test_unconfigured_endpoint_is_still_a_noop(self, monkeypatch):
+        """No endpoint configured is a deployment shape, not a teardown failure."""
+        from coa_control_plane.namespace import cleanup
+
+        monkeypatch.delenv("ONTOLOGY_ENGINE_ENDPOINT", raising=False)
+
+        cleanup.delete_all_ontologies("ns-123")  # must not raise
+
+
+@pytest.mark.unit
+class TestDeleteOntologyStepPropagates:
+    """The pipeline step must not catch what cleanup.py now raises."""
+
+    def test_handler_propagates_ontology_failure(self, monkeypatch):
+        from coa_control_plane.namespace.deletion_pipeline import delete_ontology
+
+        with (
+            patch.object(delete_ontology, "delete_all_ontologies", side_effect=RuntimeError("AOSS throttled")),
+            patch.object(delete_ontology, "delete_ontology_artifacts") as mock_s3,
+            pytest.raises(RuntimeError, match="AOSS throttled"),
+        ):
+            delete_ontology.handler({"namespaceId": "ns-123"}, None)
+
+        # S3 sweep must not run — the step is being retried from the top.
+        mock_s3.assert_not_called()
+
+
+@pytest.mark.unit
+class TestDeleteGraphragIndexes:
+    """GraphRAG doc-KG indexes are NAMESPACE-scoped, so namespace teardown owns them.
+
+    Every doc source in a namespace shares one GraphRAG tenant id, so
+    ``chunk_{tenant}`` holds chunks for all of them. A single source's deletion
+    must therefore only remove its own documents (which graph_cleanup does) and
+    must NOT drop the shared index. Nothing dropped them at all before, leaving
+    one index set per deleted namespace against a collection AOSS caps at 1000.
+    """
+
+    def test_deletes_all_three_index_names_for_the_namespace(self, monkeypatch):
+        from coa_common.constants import to_graphrag_tenant_id
+        from coa_control_plane.namespace import cleanup
+
+        monkeypatch.setenv("OSS_ENDPOINT", "https://x.aoss.us-east-1.on.aws")
+        mock_client = MagicMock()
+        mock_client.delete_index.return_value = True
+        monkeypatch.setattr(cleanup, "AossVectorClient", lambda **_k: mock_client)
+
+        ns = "550e8400-e29b-41d4-a716-446655440000"
+        removed = cleanup.delete_graphrag_indexes(ns)
+
+        tenant = to_graphrag_tenant_id(ns)
+        assert removed == [f"chunk_{tenant}", f"topic_{tenant}", f"statement_{tenant}"]
+
+    def test_legacy_statement_index_is_included(self, monkeypatch):
+        """The build path stopped embedding statements, but old namespaces still
+        have a statement_* index consuming quota."""
+        from coa_control_plane.namespace import cleanup
+
+        monkeypatch.setenv("OSS_ENDPOINT", "https://x.aoss.us-east-1.on.aws")
+        mock_client = MagicMock()
+        mock_client.delete_index.return_value = True
+        monkeypatch.setattr(cleanup, "AossVectorClient", lambda **_k: mock_client)
+
+        cleanup.delete_graphrag_indexes("550e8400-e29b-41d4-a716-446655440000")
+
+        deleted = {c.args[0] for c in mock_client.delete_index.call_args_list}
+        assert any(n.startswith("statement_") for n in deleted)
+
+    def test_absent_indexes_are_not_reported_as_removed(self, monkeypatch):
+        """Deleting an absent index is a no-op, which keeps this idempotent."""
+        from coa_control_plane.namespace import cleanup
+
+        monkeypatch.setenv("OSS_ENDPOINT", "https://x.aoss.us-east-1.on.aws")
+        mock_client = MagicMock()
+        mock_client.delete_index.return_value = False  # nothing existed
+        monkeypatch.setattr(cleanup, "AossVectorClient", lambda **_k: mock_client)
+
+        assert cleanup.delete_graphrag_indexes("550e8400-e29b-41d4-a716-446655440000") == []
+
+    def test_noop_when_endpoint_unconfigured(self, monkeypatch):
+        """A deployment without an AOSS collection must not fail teardown."""
+        from coa_control_plane.namespace import cleanup
+
+        monkeypatch.delenv("OSS_ENDPOINT", raising=False)
+        called = MagicMock()
+        monkeypatch.setattr(cleanup, "AossVectorClient", called)
+
+        assert cleanup.delete_graphrag_indexes("ns-1") == []
+        called.assert_not_called()
+
+    def test_failure_propagates(self, monkeypatch):
+        """Same hard-gate rationale as the ontology index: a swallowed failure
+        here is an unreclaimable leak once the namespace record is gone."""
+        from coa_control_plane.namespace import cleanup
+
+        monkeypatch.setenv("OSS_ENDPOINT", "https://x.aoss.us-east-1.on.aws")
+        mock_client = MagicMock()
+        mock_client.delete_index.side_effect = RuntimeError("AOSS throttled")
+        monkeypatch.setattr(cleanup, "AossVectorClient", lambda **_k: mock_client)
+
+        with pytest.raises(RuntimeError, match="AOSS throttled"):
+            cleanup.delete_graphrag_indexes("550e8400-e29b-41d4-a716-446655440000")
+
+
+@pytest.mark.unit
+class TestDeleteSourcesStepDropsGraphragIndexes:
+    """The sources step is where 'no sources remain in this namespace' becomes true."""
+
+    def test_indexes_dropped_after_sources(self, monkeypatch):
+        from coa_control_plane.namespace.deletion_pipeline import delete_sources
+
+        order: list[str] = []
+
+        def _fake_invoke(event):
+            if event["httpMethod"] == "GET":
+                return {"statusCode": 200, "body": json.dumps({"items": [{"sourceId": "s-1"}]})}
+            order.append("delete_source")
+            return {"statusCode": 202}
+
+        monkeypatch.setattr(delete_sources, "_invoke_sources_api", _fake_invoke)
+        monkeypatch.setattr(
+            delete_sources,
+            "delete_graphrag_indexes",
+            lambda ns: (order.append("drop_indexes"), ["chunk_x"])[1],
+        )
+
+        result = delete_sources.handler({"namespaceId": "ns-1"}, None)
+
+        assert order == ["delete_source", "drop_indexes"], "indexes must drop AFTER sources"
+        assert result["sourcesDeleted"] == 1
+        assert result["graphragIndexesDeleted"] == ["chunk_x"]

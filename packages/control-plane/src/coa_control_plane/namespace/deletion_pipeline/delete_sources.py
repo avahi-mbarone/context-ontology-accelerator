@@ -23,6 +23,8 @@ from typing import Any
 import boto3
 import structlog
 
+from coa_control_plane.namespace.cleanup import delete_graphrag_indexes
+
 logger = structlog.get_logger(__name__)
 
 _MAX_RESULTS = 100
@@ -84,12 +86,20 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     """Step Functions task: delete every source for the namespace.
 
     Input: {"namespaceId": str}
-    Output: {"sourcesDeleted": int}
+    Output: {"sourcesDeleted": int, "graphragIndexesDeleted": list[str]}
 
     Raises on any failure so the state machine's retry/catch policy applies
     (see the pipeline construct — this step retries 3x before the chain
     continues past it, per the #213 acceptance criteria for non-critical
     steps).
+
+    After the last source is gone, drops the namespace's GraphRAG doc-KG vector
+    indexes. Those are namespace-scoped (all doc sources share one GraphRAG
+    tenant), so an individual source delete must not remove them — it only
+    clears its own documents from the shared index. This step is where "no
+    sources remain in this namespace" becomes true, so it is where they can be
+    dropped. Nothing deleted them before, leaving one index set per deleted
+    namespace against a collection AOSS caps at 1000 indexes.
     """
     namespace_id = event["namespaceId"]
     deleted = 0
@@ -108,4 +118,6 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         raise RuntimeError(f"Exceeded {_MAX_PAGES} pages listing sources for {namespace_id}")
 
     logger.info("namespace_sources_deleted", namespace_id=namespace_id, count=deleted)
-    return {"sourcesDeleted": deleted}
+
+    graphrag_removed = delete_graphrag_indexes(namespace_id)
+    return {"sourcesDeleted": deleted, "graphragIndexesDeleted": graphrag_removed}

@@ -43,6 +43,8 @@ describe("NamespaceDeletionPipeline", () => {
       vkgClusterArn: "arn:aws:ecs:us-east-1:123456789012:cluster/vkg",
       cloudMapNamespaceId: "ns-abc123",
       ontologyBucketName: "coa-dev-ontology-artifacts",
+      opensearchEndpoint: "https://abc.us-east-1.aoss.amazonaws.com",
+      opensearchCollectionName: "coa-dev-vector-store",
       resourcePrefix: "coa-dev-",
     });
 
@@ -232,5 +234,107 @@ describe("NamespaceDeletionPipeline", () => {
         ]),
       },
     });
+  });
+});
+
+// GraphRAG doc-KG indexes are namespace-scoped (all doc sources in a namespace
+// share one GraphRAG tenant id), so namespace teardown drops them. Nothing did
+// before, leaving one index set per deleted namespace against a collection AOSS
+// caps at 1000 indexes — past that, every embedding write fails with
+// index_limit_breached.
+describe("NamespaceDeletionPipeline GraphRAG index teardown", () => {
+  let template: Template;
+
+  beforeAll(() => {
+    const app = new cdk.App();
+    const stack = new cdk.Stack(app, "GraphragStack");
+    const vpc = new ec2.Vpc(stack, "Vpc");
+    const table = (id: string) =>
+      new dynamodb.Table(stack, id, {
+        partitionKey: { name: "PK", type: dynamodb.AttributeType.STRING },
+      });
+
+    new NamespaceDeletionPipeline(stack, "DeletionPipeline", {
+      prefixed: (name: string) => `coa-dev-${name}`,
+      lambdaCode: lambda.Code.fromInline("def handler(event, context): pass"),
+      vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      namespacesTable: table("Namespaces"),
+      resourceRoleMappingsTable: table("RRM"),
+      rolesTable: table("Roles"),
+      sourcesApiFnName: "coa-dev-sources-api",
+      metricApiFnName: "coa-dev-metric-api",
+      opensearchEndpoint: "https://abc.us-east-1.aoss.amazonaws.com",
+      opensearchCollectionName: "coa-dev-vector-store",
+      resourcePrefix: "coa-dev-",
+    });
+    template = Template.fromStack(stack);
+  });
+
+  test("DeleteSources Lambda receives the AOSS endpoint", () => {
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      FunctionName: "coa-dev-ns-deletion-sources",
+      Environment: {
+        Variables: Match.objectLike({
+          OSS_ENDPOINT: "https://abc.us-east-1.aoss.amazonaws.com",
+        }),
+      },
+    });
+  });
+
+  test("an AOSS data access policy grants DeleteIndex on graphrag names only", () => {
+    // AOSS needs BOTH an IAM action and a data-access policy naming the role;
+    // either alone yields 403 at runtime.
+    const capture = new Capture();
+    template.hasResourceProperties("AWS::OpenSearchServerless::AccessPolicy", {
+      Name: "coa-dev-ns-del-graphrag",
+      Type: "data",
+      Policy: capture,
+    });
+    const policy = capture.asObject();
+    // The role ARN is a CFN token, so the policy renders as an Fn::Join rather
+    // than a plain string — assert against the serialized form.
+    const policyStr = JSON.stringify(policy);
+    expect(policyStr).toContain("aoss:DeleteIndex");
+    expect(policyStr).toContain("index/coa-dev-vector-store/chunk_*");
+    expect(policyStr).toContain("index/coa-dev-vector-store/topic_*");
+    // Legacy index from before statements stopped being embedded.
+    expect(policyStr).toContain("index/coa-dev-vector-store/statement_*");
+    // Must NOT be collection-wide: a bug here must not be able to reach the
+    // ontology or metric indexes living in the same collection.
+    expect(policyStr).not.toContain("index/coa-dev-vector-store/*");
+    // Least privilege: no write/create on this policy.
+    expect(policyStr).not.toContain("aoss:CreateIndex");
+    expect(policyStr).not.toContain("aoss:WriteDocument");
+    // Scoped to the DeleteSources Lambda's own role, not account-wide.
+    expect(policyStr).toContain("DeleteSourcesFnServiceRole");
+  });
+
+  test("omitting the collection name skips the policy entirely", () => {
+    const app = new cdk.App();
+    const stack = new cdk.Stack(app, "NoAossStack");
+    const vpc = new ec2.Vpc(stack, "Vpc");
+    const table = (id: string) =>
+      new dynamodb.Table(stack, id, {
+        partitionKey: { name: "PK", type: dynamodb.AttributeType.STRING },
+      });
+
+    new NamespaceDeletionPipeline(stack, "DeletionPipeline", {
+      prefixed: (name: string) => `coa-dev-${name}`,
+      lambdaCode: lambda.Code.fromInline("def handler(event, context): pass"),
+      vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      namespacesTable: table("Namespaces"),
+      resourceRoleMappingsTable: table("RRM"),
+      rolesTable: table("Roles"),
+      sourcesApiFnName: "coa-dev-sources-api",
+      metricApiFnName: "coa-dev-metric-api",
+      resourcePrefix: "coa-dev-",
+    });
+
+    Template.fromStack(stack).resourceCountIs(
+      "AWS::OpenSearchServerless::AccessPolicy",
+      0,
+    );
   });
 });

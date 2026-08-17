@@ -60,12 +60,12 @@ function PropertyEditor({
   entity,
   onSave,
   onBack,
-  isTerminal,
+  isReadOnly,
 }: {
   entity: TurtleEntity;
   onSave: (updated: string) => void;
   onBack: () => void;
-  isTerminal: boolean;
+  isReadOnly: boolean;
 }) {
   const [label, setLabel] = useState(
     extractQuoted(entity.body, "rdfs:label") ?? entity.subject,
@@ -84,7 +84,7 @@ function PropertyEditor({
         Back to class
       </Button>
 
-      {!isTerminal && (
+      {!isReadOnly && (
         <Box float="right">
           <Toggle
             checked={editRaw}
@@ -104,9 +104,9 @@ function PropertyEditor({
               setDirty(true);
             }}
             rows={10}
-            disabled={isTerminal}
+            disabled={isReadOnly}
           />
-          {!isTerminal && (
+          {!isReadOnly && (
             <Button
               variant="primary"
               disabled={!dirty}
@@ -122,7 +122,7 @@ function PropertyEditor({
       ) : (
         <SpaceBetween size="s">
           <FormField label="Label">
-            {isTerminal ? (
+            {isReadOnly ? (
               <Box>{label}</Box>
             ) : (
               <Input
@@ -145,7 +145,7 @@ function PropertyEditor({
               <Box>{comment}</Box>
             </FormField>
           )}
-          {!isTerminal && dirty && (
+          {!isReadOnly && dirty && (
             <Button
               variant="primary"
               onClick={() => {
@@ -197,7 +197,7 @@ interface Props {
    *  compact ``fullSubject`` (e.g. ``ind:Claim``) to the absolute IRI the
    *  SuggestionPanel matches triples on. */
   prelude?: string;
-  isTerminal: boolean;
+  isReadOnly: boolean;
   onSave: (updatedTurtle: string) => void;
   onSaveProperty?: (entity: TurtleEntity, updatedBody: string) => void;
   /** Called when the SuggestionPanel rewrites the WHOLE proposal Turtle
@@ -222,7 +222,7 @@ export function ClassDetailPanel({
   r2rmlMapping,
   fullTurtle,
   prelude,
-  isTerminal,
+  isReadOnly,
   onSave,
   onSaveProperty,
   groundingMatch,
@@ -258,7 +258,7 @@ export function ClassDetailPanel({
     return (
       <PropertyEditor
         entity={editingProperty}
-        isTerminal={isTerminal}
+        isReadOnly={isReadOnly}
         onBack={() => setEditingProperty(null)}
         onSave={(updated) => {
           onSaveProperty?.(editingProperty, updated);
@@ -286,7 +286,7 @@ export function ClassDetailPanel({
 
   return (
     <SpaceBetween size="m">
-      {!isTerminal && (
+      {!isReadOnly && (
         <Box float="right">
           <Toggle
             checked={editRaw}
@@ -306,9 +306,9 @@ export function ClassDetailPanel({
               setDirty(true);
             }}
             rows={15}
-            disabled={isTerminal}
+            disabled={isReadOnly}
           />
-          {!isTerminal && (
+          {!isReadOnly && (
             <Button
               variant="primary"
               disabled={!dirty}
@@ -325,7 +325,7 @@ export function ClassDetailPanel({
         <SpaceBetween size="m">
           <SpaceBetween size="s">
             <FormField label="Label">
-              {isTerminal ? (
+              {isReadOnly ? (
                 <Box>{label}</Box>
               ) : (
                 <Input
@@ -338,7 +338,7 @@ export function ClassDetailPanel({
               )}
             </FormField>
             <FormField label="Description">
-              {isTerminal ? (
+              {isReadOnly ? (
                 <Box>{description || "—"}</Box>
               ) : (
                 <Textarea
@@ -420,7 +420,7 @@ export function ClassDetailPanel({
                 class has no coa:suggestedSubClassOf, so it's safe to always
                 render here. In read-only / turtle-less contexts we keep the
                 original static badge as an informational fallback. */}
-            {fullTurtle && onUpdateTurtle && !isTerminal ? (
+            {fullTurtle && onUpdateTurtle && !isReadOnly ? (
               <SuggestionPanel
                 iri={classIri}
                 turtle={fullTurtle}
@@ -441,7 +441,7 @@ export function ClassDetailPanel({
             )}
           </SpaceBetween>
 
-          {!isTerminal && dirty && (
+          {!isReadOnly && dirty && (
             <Button variant="primary" onClick={handleStructuredSave}>
               Apply
             </Button>
@@ -569,10 +569,10 @@ export function ClassDetailPanel({
                         match={groundingMatch}
                         pendingOverride={pendingGroundingOverride}
                         onSelectCandidate={
-                          isTerminal ? undefined : onSelectGroundingCandidate
+                          isReadOnly ? undefined : onSelectGroundingCandidate
                         }
                         onMarkNovel={
-                          isTerminal ? undefined : onMarkGroundingNovel
+                          isReadOnly ? undefined : onMarkGroundingNovel
                         }
                       />
                     ) : (

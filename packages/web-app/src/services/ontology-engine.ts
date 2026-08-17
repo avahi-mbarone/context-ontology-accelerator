@@ -59,6 +59,14 @@ export interface Proposal {
    * the artifact does not exist. Fetch directly from S3 (not via apiClient). */
   ontology_url?: string | null;
   r2rml_url?: string | null;
+  /** Presigned S3 GET URL for the grounding-match list (``matches.json``).
+   * Served out-of-band for the same reason as the Turtle: the list is one entry
+   * per grounded table, each with up to ~30 candidate classes, so a wide schema
+   * can exceed the 6 MB response limit. ``null`` when there is no offloaded
+   * matches object — either an all-novel induction (no matches) or a legacy
+   * proposal that still carries the list inline in ``metadata.matches``. Fetch
+   * directly from S3 (not via apiClient). */
+  matches_url?: string | null;
   /** Reason from the most recent failed accept attempt, naming the pipeline
    * step that failed (ingest / embeddings_searchable / reconcile_counts /
    * s3_persist). Set together with status === "accept_failed"; cleared on the
@@ -273,6 +281,32 @@ export async function fetchTurtleFromUrl(url: string): Promise<string> {
     );
   }
   return resp.text();
+}
+
+/**
+ * Fetch a JSON artifact directly from a presigned S3 URL — the JSON sibling of
+ * {@link fetchTurtleFromUrl}, used for the grounding-match list served via
+ * ``Proposal.matches_url``. Goes straight to S3 (the presigned URL carries its
+ * own auth), so it must NOT go through apiClient. Returns the parsed body as
+ * ``unknown``; the caller narrows it (e.g. ``parseConceptMatches``).
+ */
+export async function fetchJsonFromUrl(url: string): Promise<unknown> {
+  const resp = await fetch(url);
+  if (!resp.ok) {
+    throw new Error(
+      `Failed to download JSON from S3 (${resp.status} ${resp.statusText})`,
+    );
+  }
+  try {
+    return await resp.json();
+  } catch (e) {
+    // Malformed JSON from S3 throws a bare SyntaxError with no artifact context;
+    // wrap it so the failing URL is identifiable when debugging.
+    const detail = e instanceof Error ? e.message : String(e);
+    throw new Error(`Failed to parse JSON from S3 (${url}): ${detail}`, {
+      cause: e,
+    });
+  }
 }
 
 /**

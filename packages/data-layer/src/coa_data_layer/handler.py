@@ -14,17 +14,41 @@ Environment:
 from __future__ import annotations
 
 import json
+import logging
 import os
 from urllib import request as urllib_request
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 
+import boto3
+from botocore.exceptions import BotoCoreError, ClientError
+
+logger = logging.getLogger(__name__)
+
 RUNTIME_ARN = os.environ["AGENTCORE_RUNTIME_ARN"]
 REGION = os.environ.get("AWS_REGION", "us-east-1")
+
+# Ontology-api-proxy Lambda that fronts the ontology-engine's FastAPI. The MCP
+# ``describe_schema`` tool reads the same route, so a UI/data-layer caller and
+# an MCP agent see the same schema — one source of truth for the queryable
+# ontology.
+ONTOLOGY_PROXY_LAMBDA_ARN = os.environ.get("ONTOLOGY_PROXY_LAMBDA_ARN", "")
 
 AGENTCORE_ENDPOINT = f"https://bedrock-agentcore.{REGION}.amazonaws.com"
 ENCODED_ARN = quote(RUNTIME_ARN, safe="")
 INVOKE_URL = f"{AGENTCORE_ENDPOINT}/runtimes/{ENCODED_ARN}/invocations?qualifier=DEFAULT"
+
+# Lambda client for the ontology-api-proxy invocation. Created lazily so that
+# the handler still loads in test environments that don't stub boto3.
+_lambda_client = None
+
+
+def _get_lambda_client():
+    global _lambda_client
+    if _lambda_client is None:
+        _lambda_client = boto3.client("lambda", region_name=REGION)
+    return _lambda_client
+
 
 _ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "")
 
@@ -278,6 +302,99 @@ def _handle_graph_traverse(namespace: str, event: dict) -> dict:
     )
 
 
+def _handle_describe_schema(namespace: str, event: dict) -> dict:
+    """Describe the namespace's queryable schema.
+
+    Proxies to the ontology-api-proxy Lambda's ``/graph/schema`` route — the
+    same source MCP's ``describe_schema`` tool reads. This handler is the
+    only place in the data layer that does not go through the Context
+    Manager, because the schema query is pure Neptune SPARQL and doesn't
+    involve any tiered orchestration.
+    """
+    if not ONTOLOGY_PROXY_LAMBDA_ARN:
+        return _error_response(501, "DescribeSchema unavailable: ONTOLOGY_PROXY_LAMBDA_ARN not configured")
+
+    query = event.get("queryStringParameters") or {}
+    # camelCase (Smithy wire form) → forward as-is; the ontology-api-proxy's
+    # per-path alias table renames them to snake_case for FastAPI binding.
+    forwarded_query: dict[str, str] = {}
+    if query.get("includeProperties") is not None:
+        forwarded_query["includeProperties"] = str(query["includeProperties"]).lower()
+    if query.get("maxResults") is not None:
+        forwarded_query["maxResults"] = str(query["maxResults"])
+
+    proxy_event = {
+        "httpMethod": "GET",
+        "resource": "/namespaces/{namespaceId}/graph/schema",
+        "path": f"/namespaces/{namespace}/graph/schema",
+        "pathParameters": {"namespaceId": namespace},
+        "queryStringParameters": forwarded_query or None,
+        "headers": {"Authorization": f"Bearer {_get_bearer_token(event)}"},
+        "body": None,
+        "isBase64Encoded": False,
+        "requestContext": {"stage": "data-layer"},
+    }
+
+    # boto3's Lambda invoke raises on throttling, permissions failures,
+    # invalid function names, and connect/read timeouts. Left unhandled these
+    # bubble up to the top-level ``except Exception`` in ``handler`` and come
+    # back as "Context Manager invocation failed" — misleading, since CM was
+    # never in the path. Map them to a 502 with a stable message; the full
+    # error is logged so operators can still diagnose.
+    try:
+        response = _get_lambda_client().invoke(
+            FunctionName=ONTOLOGY_PROXY_LAMBDA_ARN,
+            InvocationType="RequestResponse",
+            Payload=json.dumps(proxy_event).encode("utf-8"),
+        )
+    except (ClientError, BotoCoreError) as exc:
+        logger.exception("describe_schema_invoke_failed", exc_info=exc)
+        return _error_response(502, "Failed to invoke schema backend Lambda")
+
+    if "FunctionError" in response:
+        # The Lambda payload from a FunctionError contains a Python traceback
+        # or a modelled error — either can carry ARNs, request IDs, or line
+        # numbers that shouldn't reach the customer. Log the truncated
+        # payload for operators and return a generic message.
+        err_preview = response["Payload"].read().decode("utf-8", errors="replace")[:500]
+        logger.warning("describe_schema_function_error err_preview=%s", err_preview)
+        return _error_response(502, "Schema backend failed")
+
+    # An invoke that succeeded at the Lambda control-plane level can still
+    # return a body that isn't valid JSON (e.g. the proxy Lambda crashed
+    # inside its handler wrapper). Catch that here so we produce a 502 with
+    # a stable message rather than the router's generic "invocation failed".
+    try:
+        proxy_response = json.loads(response["Payload"].read().decode("utf-8"))
+    except (json.JSONDecodeError, ValueError, UnicodeDecodeError) as exc:
+        logger.warning("describe_schema_invalid_envelope", exc_info=exc)
+        return _error_response(502, "Schema backend returned invalid JSON")
+
+    status_code = proxy_response.get("statusCode", 200)
+    body_str = proxy_response.get("body", "{}")
+    try:
+        body = json.loads(body_str) if isinstance(body_str, str) else body_str
+    except (json.JSONDecodeError, TypeError) as exc:
+        logger.warning("describe_schema_invalid_body body_preview=%s", str(body_str)[:200], exc_info=exc)
+        body = {}
+
+    if status_code >= 400:
+        message = body.get("message") if isinstance(body, dict) else None
+        return _error_response(status_code, message or f"Schema backend returned {status_code}")
+
+    # Shape the response to match the Smithy DescribeSchema output. The
+    # ontology-engine already returns ``classes`` and ``ontologyVersion`` in
+    # the right shape; project them explicitly so a future backend change can't
+    # leak internal fields into the customer-visible response.
+    return _success_response(
+        200,
+        {
+            "classes": body.get("classes", []) if isinstance(body, dict) else [],
+            "ontologyVersion": body.get("ontologyVersion", "") if isinstance(body, dict) else "",
+        },
+    )
+
+
 # ── Main handler ─────────────────────────────────────────────────────────────
 
 _ROUTE_MAP = {
@@ -285,6 +402,7 @@ _ROUTE_MAP = {
     ("POST", "/namespaces/{namespaceId}/translate"): _handle_translate,
     ("POST", "/namespaces/{namespaceId}/kb/search"): _handle_kb_search,
     ("POST", "/namespaces/{namespaceId}/graph/traverse"): _handle_graph_traverse,
+    ("GET", "/namespaces/{namespaceId}/schema"): _handle_describe_schema,
 }
 
 

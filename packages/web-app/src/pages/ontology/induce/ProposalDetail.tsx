@@ -23,6 +23,7 @@ import {
   compileConstraints,
   getProposal,
   fetchTurtleFromUrl,
+  fetchJsonFromUrl,
   getProposalUploadUrls,
   putToPresignedUrl,
   getProposalValidationJob,
@@ -49,7 +50,11 @@ import {
   isProposalAcceptInProgress,
   proposalStatusIndicator,
 } from "./helpers";
-import { parseConceptMatches } from "./grounding";
+import {
+  parseConceptMatches,
+  parseConceptMatchesEnvelope,
+  type ConceptMatch,
+} from "./grounding";
 import { ConstraintPanel } from "./ConstraintPanel";
 import { TurtleHighlight } from "@components/TurtleHighlight";
 import { parseTurtleEntities, type TurtleEntity } from "./turtle";
@@ -69,7 +74,7 @@ import { ButtonWithHint } from "@components/ButtonWithHint";
  * Every other status HAS a computed ontology and should show the panel:
  * ``pending``/``updated`` (reviewable — editing enabled), and
  * ``accepting``/``accepted``/``rejected``/``cancelled`` (viewable read-only —
- * the panel's own ``isTerminal`` disables editing on terminal statuses). The
+ * the panel's own ``isReadOnly`` disables editing on terminal statuses). The
  * earlier gate wrongly excluded ``accepted`` et al., hiding constraints that
  * exist and were previously viewable — this restores them.
  */
@@ -77,6 +82,29 @@ const _NO_ONTOLOGY_STATUSES = new Set(["inducing", "failed"]);
 
 export function proposalHasComputedOntology(status: string): boolean {
   return !_NO_ONTOLOGY_STATUSES.has(status);
+}
+
+/**
+ * Whether the proposal disables every edit + accept control on the page.
+ *
+ * True when the proposal has reached a terminal state (accepted/rejected/
+ * cancelled/failed) OR when its ontology has not been produced yet
+ * ("inducing" — the worker is still running). "failed" is genuinely terminal;
+ * "inducing" is transient but has nothing to act on, so the same disable-all
+ * applies. Named for what it gates rather than for the state machine — the
+ * state-machine sense of "terminal" stays available for anyone else who needs
+ * a stricter predicate.
+ */
+const _READ_ONLY_STATUSES = new Set([
+  "accepted",
+  "rejected",
+  "cancelled",
+  "failed",
+  "inducing",
+]);
+
+export function proposalIsReadOnly(status: string): boolean {
+  return _READ_ONLY_STATUSES.has(status);
 }
 
 /**
@@ -480,6 +508,12 @@ export function ProposalDetailPage() {
   } | null>(null);
   const [editedTurtle, setEditedTurtle] = useState<string | null>(null);
   const [editedR2rml, setEditedR2rml] = useState<string | null>(null);
+  // Parsed grounding matches (one per grounded table). Held in state rather than
+  // read inline off ``proposal.metadata.matches`` because the detail endpoint
+  // now serves them out-of-band via ``matches_url`` (a presigned S3 GET) to stay
+  // under the 6 MB response cap, so they arrive asynchronously in refresh().
+  // Legacy proposals still carry them inline; refresh() prefers that when present.
+  const [groundingMatches, setGroundingMatches] = useState<ConceptMatch[]>([]);
   const [dirty, setDirty] = useState(false);
   // Staged grounding overrides (table → chosen foundational URI, or ``null``
   // to keep the table novel) that are NOT yet persisted. Picking a candidate /
@@ -520,10 +554,13 @@ export function ProposalDetailPage() {
     getProposal(apiClient, namespaceId, proposalId)
       .then(async (p) => {
         setProposal(p);
-        // Prefer inline Turtle (present for normal-size proposals). For large
-        // ontologies it is omitted to stay under the 6 MB response limit, so
-        // fall back to fetching it directly from the presigned S3 URL.
-        const [ontologyTtl, r2rmlTtl] = await Promise.all([
+        // Prefer inline content (present for normal-size proposals). Large
+        // artifacts are omitted from the response to stay under the 6 MB limit,
+        // so fall back to fetching each directly from its presigned S3 URL:
+        //   - ontology / r2rml Turtle -> ontology_url / r2rml_url
+        //   - grounding matches       -> matches_url (JSON envelope)
+        const inlineMatches = p.metadata?.matches;
+        const [ontologyTtl, r2rmlTtl, matches] = await Promise.all([
           p.ontology_turtle != null
             ? Promise.resolve(p.ontology_turtle)
             : p.ontology_url
@@ -534,9 +571,25 @@ export function ProposalDetailPage() {
             : p.r2rml_url
               ? fetchTurtleFromUrl(p.r2rml_url)
               : Promise.resolve(null),
+          inlineMatches !== undefined
+            ? Promise.resolve(parseConceptMatches(inlineMatches))
+            : p.matches_url
+              ? fetchJsonFromUrl(p.matches_url)
+                  .then(parseConceptMatchesEnvelope)
+                  // Grounding matches are secondary review content. A transient
+                  // matches fetch/parse failure must NOT reject the whole
+                  // Promise.all and blank the page (discarding the ontology
+                  // Turtle that loaded fine) — degrade to "no grounding shown".
+                  // Retrying refresh re-presigns and recovers.
+                  .catch((e: unknown) => {
+                    console.warn("Failed to load grounding matches:", e);
+                    return [] as ConceptMatch[];
+                  })
+              : Promise.resolve([]),
         ]);
         setEditedTurtle(ontologyTtl);
         setEditedR2rml(r2rmlTtl);
+        setGroundingMatches(matches);
         originalTurtleRef.current = ontologyTtl;
         originalR2rmlRef.current = r2rmlTtl;
         setDirty(false);
@@ -952,14 +1005,13 @@ export function ProposalDetailPage() {
   if (!proposal) return null;
 
   const md = (proposal.metadata ?? {}) as Record<string, unknown>;
-  const isTerminal = ["accepted", "rejected", "cancelled"].includes(
-    proposal.status,
-  );
+  // Gates every edit + accept control on this page. See proposalIsReadOnly.
+  const isReadOnly = proposalIsReadOnly(proposal.status);
   const isAccepting = isProposalAcceptInProgress(proposal.status) || accepting;
   // Show the SHACL / infer-constraints panel whenever the proposal has a
   // computed ontology (see proposalHasComputedOntology) — hidden only for the
   // in-progress "inducing" stub and "failed" runs where nothing exists yet.
-  // Accepted/rejected/cancelled still show it read-only (isTerminal disables
+  // Accepted/rejected/cancelled still show it read-only (isReadOnly disables
   // editing inside the panel).
   const hasComputedOntology = proposalHasComputedOntology(proposal.status);
 
@@ -1006,14 +1058,14 @@ export function ProposalDetailPage() {
                   hint="Saves your edits (Turtle, R2RML, grounding choices) to the draft without accepting it."
                   onClick={saveChanges}
                   loading={updating}
-                  disabled={!dirty || isTerminal}
+                  disabled={!dirty || isReadOnly}
                 >
                   Save changes
                 </ButtonWithHint>
                 <Button
                   onClick={cancel}
                   loading={cancelling}
-                  disabled={isTerminal}
+                  disabled={isReadOnly}
                 >
                   Cancel
                 </Button>
@@ -1030,7 +1082,7 @@ export function ProposalDetailPage() {
                   variant="primary"
                   onClick={requestAccept}
                   loading={isAccepting || checkingAccept}
-                  disabled={isTerminal || isAccepting || checkingAccept}
+                  disabled={isReadOnly || isAccepting || checkingAccept}
                 >
                   {proposal.status === "accepted"
                     ? "Already accepted"
@@ -1370,7 +1422,7 @@ export function ProposalDetailPage() {
               folded into each class-card's Matches tab (Item 1). The
               ConceptMatch records + staged overrides thread down through
               ProposalEntitiesPanel into ClassDetailPanel. */}
-          {updating && Array.isArray(md.matches as unknown[]) && (
+          {updating && groundingMatches.length > 0 && (
             <Box variant="small" color="text-status-info">
               Rebuilding ontology with updated grounding...
             </Box>
@@ -1382,9 +1434,9 @@ export function ProposalDetailPage() {
               prelude={turtleParse.prelude}
               fullTurtle={editedTurtle}
               r2rmlTurtle={editedR2rml}
-              isTerminal={isTerminal}
+              isReadOnly={isReadOnly}
               onEditEntity={handleEditEntity}
-              groundingMatches={parseConceptMatches(md.matches)}
+              groundingMatches={groundingMatches}
               pendingGroundingOverrides={pendingGroundingOverrides}
               onSelectGroundingCandidate={stageGroundingCandidate}
               onMarkGroundingNovel={stageGroundingNovel}
@@ -1419,7 +1471,7 @@ export function ProposalDetailPage() {
               }
               defaultExpanded={false}
               headerActions={
-                !isTerminal && (
+                !isReadOnly && (
                   <Button
                     variant="inline-link"
                     onClick={() => setR2rmlEditMode((m) => !m)}
@@ -1437,7 +1489,7 @@ export function ProposalDetailPage() {
                     setDirty(true);
                   }}
                   rows={20}
-                  disabled={isTerminal}
+                  disabled={isReadOnly}
                   ariaLabel="R2RML Turtle"
                 />
               ) : (
@@ -1452,7 +1504,7 @@ export function ProposalDetailPage() {
               headerText="Ontology Source (Turtle)"
               defaultExpanded={false}
               headerActions={
-                !isTerminal && (
+                !isReadOnly && (
                   <Button
                     variant="inline-link"
                     onClick={() => {
@@ -1476,7 +1528,7 @@ export function ProposalDetailPage() {
                     value={turtleDraft ?? ""}
                     onChange={({ detail }) => setTurtleDraft(detail.value)}
                     rows={25}
-                    disabled={isTerminal}
+                    disabled={isReadOnly}
                     ariaLabel="Ontology Turtle"
                   />
                   <SpaceBetween direction="horizontal" size="xs">
@@ -1490,7 +1542,7 @@ export function ProposalDetailPage() {
                     </Button>
                     <Button
                       variant="primary"
-                      disabled={isTerminal || turtleDraft === editedTurtle}
+                      disabled={isReadOnly || turtleDraft === editedTurtle}
                       onClick={() => {
                         if (turtleDraft != null) {
                           setEditedTurtle(turtleDraft);
@@ -1513,10 +1565,10 @@ export function ProposalDetailPage() {
           {/* SHACL / infer-constraints (beta): shown whenever a computed
               ontology exists. Hidden ONLY for the in-progress "inducing" stub
               and "failed" runs (nothing to show yet). Accepted/rejected/
-              cancelled show it read-only — isTerminal disables editing. */}
+              cancelled show it read-only — isReadOnly disables editing. */}
           {hasComputedOntology && (
             <ConstraintPanel
-              isTerminal={isTerminal}
+              isReadOnly={isReadOnly}
               config={md?.constraint_config as never}
               onConfigChange={(updated) => {
                 if (!proposal) return;

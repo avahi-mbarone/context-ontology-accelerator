@@ -13,14 +13,23 @@
  *   DeleteSources -> DeleteMetrics -> DeleteOntology -> DeletePlatform -> Finalize
  *   (any step's Catch -> MarkFailed -> Fail)
  *
- * DeleteSources/DeleteMetrics/DeleteOntology/DeletePlatform are steps whose
- * underlying cleanup is itself already best-effort (see cleanup.py — VKG,
- * Athena, DataZone, ontology-engine, S3 all log-and-continue on failure) or
- * safe to retry (source/metric deletes are idempotent against a 404).  Each
- * step gets 3 retries with backoff before the chain proceeds to MarkFailed,
- * per the #213 acceptance criteria for non-critical steps.
+ * DeleteSources/DeleteMetrics/DeletePlatform are steps whose underlying
+ * cleanup is itself already best-effort (see cleanup.py — VKG, Athena,
+ * DataZone, S3 all log-and-continue on failure) or safe to retry
+ * (source/metric deletes are idempotent against a 404).  Each step gets 3
+ * retries with backoff before the chain proceeds to MarkFailed, per the #213
+ * acceptance criteria for non-critical steps.
  *
- * Finalize (namespace record + name reservation delete) is the one
+ * DeleteOntology is NOT in that best-effort group. It owns the AOSS vector
+ * index, which is one index per namespace against a collection with a hard
+ * 1000-index cap. Finalize deletes the namespace record, so an ontology
+ * teardown that "logged and continued" would orphan that index forever —
+ * nothing can target a namespace that no longer exists — until the collection
+ * hits its cap and every embedding write in the deployment fails with
+ * index_limit_breached. So delete_all_ontologies raises, the 3 retries apply,
+ * and on exhaustion the Catch lands DELETE_FAILED, which is recoverable.
+ *
+ * Finalize (namespace record + name reservation delete) is the other
  * must-succeed step — it has no continue-on-failure path, since a
  * namespace whose finalize failed needs to remain retryable via
  * DELETE_FAILED rather than silently vanish from being "mostly" deleted.
@@ -30,6 +39,7 @@ import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as lambda from "aws-cdk-lib/aws-lambda";
+import * as opensearchserverless from "aws-cdk-lib/aws-opensearchserverless";
 import * as sfn from "aws-cdk-lib/aws-stepfunctions";
 import * as tasks from "aws-cdk-lib/aws-stepfunctions-tasks";
 import { Construct } from "constructs";
@@ -55,6 +65,23 @@ export interface NamespaceDeletionPipelineProps {
   readonly sourcesApiFnName: string;
   /** metric-api Lambda function name (cross-Lambda invoke target). */
   readonly metricApiFnName: string;
+
+  /**
+   * AOSS collection endpoint + name, for dropping the namespace's GraphRAG
+   * doc-KG vector indexes (chunk, topic, and the legacy statement index).
+   *
+   * Those indexes are namespace-scoped — every doc source in a namespace shares
+   * one GraphRAG tenant id — so they become garbage only when the namespace is
+   * deleted, and DeleteSources is where "no sources remain" becomes true.
+   * Nothing deleted them before, leaving one index set per deleted namespace
+   * against a collection AOSS caps at 1000 indexes; past that every embedding
+   * write in the deployment fails with index_limit_breached.
+   *
+   * Optional so a deployment without an AOSS collection still synthesizes; the
+   * cleanup no-ops when OSS_ENDPOINT is unset.
+   */
+  readonly opensearchEndpoint?: string;
+  readonly opensearchCollectionName?: string;
 
   readonly datazoneDomainId?: string;
   /**
@@ -108,7 +135,12 @@ export class NamespaceDeletionPipeline extends Construct {
       handler:
         "coa_control_plane.namespace.deletion_pipeline.delete_sources.handler",
       timeout: cdk.Duration.minutes(10),
-      environment: { SOURCES_API_FN_NAME: props.sourcesApiFnName },
+      environment: {
+        SOURCES_API_FN_NAME: props.sourcesApiFnName,
+        ...(props.opensearchEndpoint && {
+          OSS_ENDPOINT: props.opensearchEndpoint,
+        }),
+      },
     });
     deleteSourcesFn.addToRolePolicy(
       new iam.PolicyStatement({
@@ -118,6 +150,50 @@ export class NamespaceDeletionPipeline extends Construct {
         ],
       }),
     );
+
+    // Drop the namespace's GraphRAG doc-KG indexes after its sources are gone.
+    // AOSS needs BOTH an IAM action and a data-access policy naming the role;
+    // either alone yields 403. The data-access policy is declared here rather
+    // than added to the sources stack's policy so this stays a single-stack
+    // change with no cross-stack role-ARN dependency (AOSS permissions across
+    // multiple data-access policies are additive).
+    if (props.opensearchCollectionName) {
+      deleteSourcesFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ["aoss:APIAccessAll"],
+          resources: [`arn:aws:aoss:${region}:${account}:collection/*`],
+        }),
+      );
+      new opensearchserverless.CfnAccessPolicy(
+        this,
+        "NsDeletionGraphragIndexAccess",
+        {
+          name: props.prefixed("ns-del-graphrag"),
+          type: "data",
+          description:
+            "Allows namespace deletion to drop GraphRAG doc-KG indexes",
+          policy: JSON.stringify([
+            {
+              Rules: [
+                {
+                  ResourceType: "index",
+                  // Scoped to the GraphRAG index names this pipeline deletes —
+                  // deliberately NOT index/<collection>/* so a bug here cannot
+                  // reach the ontology or metric indexes in the same collection.
+                  Resource: [
+                    `index/${props.opensearchCollectionName}/chunk_*`,
+                    `index/${props.opensearchCollectionName}/topic_*`,
+                    `index/${props.opensearchCollectionName}/statement_*`,
+                  ],
+                  Permission: ["aoss:DescribeIndex", "aoss:DeleteIndex"],
+                },
+              ],
+              Principal: [deleteSourcesFn.role!.roleArn],
+            },
+          ]),
+        },
+      );
+    }
 
     // ── DeleteMetrics ────────────────────────────────────────────────
     const deleteMetricsFn = new lambda.Function(this, "DeleteMetricsFn", {

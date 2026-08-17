@@ -724,14 +724,27 @@ def list_proposals(
 def get_proposal(proposal_id: str, namespace: str = "default"):
     """Get a single proposal.
 
-    The Turtle artifacts (``ontology_turtle``/``r2rml_turtle``) are NOT inlined:
-    a large induced ontology (6+ MB) would blow past the 6 MB API Gateway /
-    Lambda response limit and 500 the call. Instead the response carries
-    presigned S3 GET URLs (``ontology_url``/``r2rml_url``, ``null`` when the
-    artifact is absent) that the client fetches directly from S3 — keeping this
-    response small regardless of ontology size.
+    Large offloaded artifacts are NOT inlined — each would risk the 6 MB API
+    Gateway / Lambda response limit and 500 the call. Instead the response
+    carries presigned S3 GET URLs the client fetches directly from S3, keeping
+    this response small regardless of proposal size:
+
+    - Turtle (``ontology_url``/``r2rml_url``): a large induced ontology is 6+ MB.
+    - Grounding matches (``matches_url``): the match list is one entry per
+      grounded table, each with up to ~30 candidate classes (with definitions),
+      so a wide schema (thousands of tables) can exceed the cap on its own.
+
+    Each URL is ``null`` when the artifact is absent. ``hydrate_matches=False``
+    also spares an S3 read on every poll of this endpoint.
+
+    Legacy proposals that predate the matches offload carry a small (formerly
+    ``[:50]``-capped) match list inline in ``metadata.matches`` and have no S3
+    object; for those ``matches_url`` is ``null`` and the inline list is left in
+    place so the client's inline-else-URL fallback still renders their grounding.
     """
-    item = dynamo_store.get_proposal_by_id(proposal_id, namespace=namespace, hydrate_turtle=False)
+    item = dynamo_store.get_proposal_by_id(
+        proposal_id, namespace=namespace, hydrate_turtle=False, hydrate_matches=False
+    )
     if not item:
         raise HTTPException(404, f"Proposal '{proposal_id}' not found")
     # Serve Turtle out-of-band via presigned S3 URLs rather than inlining it.
@@ -739,6 +752,14 @@ def get_proposal(proposal_id: str, namespace: str = "default"):
     item.pop("r2rml_turtle", None)
     item["ontology_url"] = dynamo_store.presign_proposal_artifact(namespace, proposal_id, "ontology")
     item["r2rml_url"] = dynamo_store.presign_proposal_artifact(namespace, proposal_id, "r2rml")
+    # Serve grounding matches out-of-band the same way. Only strip an inline copy
+    # when an S3 object exists (modern offloaded proposals): the inline copy is
+    # already absent there, so this is defensive. Legacy inline-only proposals
+    # (no S3 key -> matches_url is None) keep their small inline list.
+    matches_url = dynamo_store.presign_proposal_matches(namespace, proposal_id)
+    item["matches_url"] = matches_url
+    if matches_url:
+        (item.get("metadata") or {}).pop("matches", None)
     return item
 
 

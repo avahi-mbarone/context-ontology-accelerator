@@ -308,6 +308,33 @@ def graphrag_chunk_index_name(namespace_id: str) -> str:
     return f"chunk_{to_graphrag_tenant_id(namespace_id)}"
 
 
+# GraphRAG vector index prefixes that have EVER been created for a namespace.
+#
+# ``chunk`` + ``topic`` are the current set (``EMBEDDING_INDEXES`` in
+# sources/documents/kg_build/graph_build.py). ``statement`` is legacy: the build
+# path stopped embedding statements, but namespaces ingested before that change
+# still have a ``statement_*`` index sitting in the collection.
+#
+# Teardown must cover the legacy name too. AOSS caps a collection at 1000
+# indexes, so an index nobody writes any more still consumes the quota that
+# eventually fails every embedding write with ``index_limit_breached``.
+# Deleting an absent index is a no-op, so listing a name that was never created
+# costs nothing.
+GRAPHRAG_INDEX_PREFIXES = ("chunk", "topic", "statement")
+
+
+def graphrag_index_names(namespace_id: str) -> list[str]:
+    """Return every GraphRAG vector index name belonging to a namespace.
+
+    These indexes are NAMESPACE-scoped, not source-scoped: all doc sources in a
+    namespace share one tenant id (see :func:`to_graphrag_tenant_id`), so they
+    become garbage only when the namespace itself goes away — which is why
+    namespace teardown owns deleting them and source deletion does not.
+    """
+    tenant = to_graphrag_tenant_id(namespace_id)
+    return [f"{prefix}_{tenant}" for prefix in GRAPHRAG_INDEX_PREFIXES]
+
+
 def canonical_col(name: str) -> str:
     """Convert a column name to a valid SQL/H2 identifier for R2RML and schema.sql.
 
