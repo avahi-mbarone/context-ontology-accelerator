@@ -251,7 +251,7 @@ interface Props {
    *  document to find/rewrite ``coa:suggestedSubClassOf`` annotations. */
   fullTurtle?: string | null;
   r2rmlTurtle?: string | null;
-  isTerminal: boolean;
+  isReadOnly: boolean;
   onEditEntity: (entity: TurtleEntity, index: number) => void;
   /** Called when the user saves edits to a class's Turtle in the side panel. */
   onUpdateEntityTurtle?: (entity: TurtleEntity, updatedBody: string) => void;
@@ -279,7 +279,7 @@ export function ProposalEntitiesPanel({
   prelude,
   fullTurtle,
   r2rmlTurtle,
-  isTerminal,
+  isReadOnly,
   onEditEntity,
   onUpdateEntityTurtle,
   onUpdateTurtle,
@@ -376,7 +376,7 @@ export function ProposalEntitiesPanel({
         r2rmlMapping={mapping}
         fullTurtle={fullTurtle}
         prelude={prelude}
-        isTerminal={isTerminal}
+        isReadOnly={isReadOnly}
         groundingMatch={groundingMatch}
         pendingGroundingOverride={pendingOverride}
         onSelectGroundingCandidate={onSelectGroundingCandidate}
@@ -402,7 +402,7 @@ export function ProposalEntitiesPanel({
     onMarkGroundingNovel,
     openPanel,
     closePanel,
-    isTerminal,
+    isReadOnly,
     onUpdateEntityTurtle,
     onUpdateTurtle,
   ]);
@@ -419,7 +419,7 @@ export function ProposalEntitiesPanel({
         headerCounter={`(${groups.length} classes)`}
         headerDescription="Select a class to view its relationships, attributes, and mappings."
         headerActions={
-          !isTerminal ? (
+          !isReadOnly ? (
             <Button
               variant="inline-link"
               onClick={() => {

@@ -995,6 +995,55 @@ class TestAossNextgenPatch:
             assert "method" not in props, "engine/method block must not be sent to AOSS NEXTGEN"
             mock_client.close.assert_called_once()
 
+    def test_allow_create_false_never_creates_a_missing_index(self, mod):
+        """The DELETION path must not resurrect a graphrag index.
+
+        graphrag's VectorIndex.writeable defaults to True and its index_exists
+        creates when writeable, so a cleanup run against a tenant whose indexes
+        are already gone would recreate chunk_*/topic_* as empty shells for a
+        namespace on its way out. Nothing reclaims those and AOSS caps a
+        collection at 1000 indexes, so they accumulate until every embedding
+        write fails with index_limit_breached. Same reads-must-not-create rule
+        as OpenSearchVectorStore._read_index.
+        """
+        ovi, mock_client = self._make_ovi_stub()
+        mock_client.indices.exists.return_value = False  # index is absent
+
+        with patch.dict(sys.modules, self._graphrag_modules(ovi)):
+            mod._graphrag_aoss_patched = False
+            mod._patch_graphrag_toolkit_for_aoss_nextgen(allow_create=False)
+
+            # writeable=True is what graphrag passes by default — the point is
+            # that allow_create=False overrides it.
+            result = ovi.index_exists("endpoint", "chunk_deadtenant", 1024, True)
+
+            assert result is False, "a missing index must report absent, not be created"
+            mock_client.indices.create.assert_not_called()
+
+    def test_allow_create_false_still_reports_an_existing_index(self, mod):
+        """Deletion must still find and operate on indexes that DO exist."""
+        ovi, mock_client = self._make_ovi_stub()
+        mock_client.indices.exists.return_value = True
+
+        with patch.dict(sys.modules, self._graphrag_modules(ovi)):
+            mod._graphrag_aoss_patched = False
+            mod._patch_graphrag_toolkit_for_aoss_nextgen(allow_create=False)
+
+            assert ovi.index_exists("endpoint", "chunk_livetenant", 1024, True) is True
+            mock_client.indices.create.assert_not_called()
+
+    def test_build_path_still_creates(self, mod):
+        """The build/ingest path must keep creating — it is the only writer."""
+        ovi, mock_client = self._make_ovi_stub()
+        mock_client.indices.exists.return_value = False
+
+        with patch.dict(sys.modules, self._graphrag_modules(ovi)):
+            mod._graphrag_aoss_patched = False
+            mod._patch_graphrag_toolkit_for_aoss_nextgen()  # default allow_create=True
+
+            assert ovi.index_exists("endpoint", "chunk_newtenant", 1024, True) is True
+            mock_client.indices.create.assert_called_once()
+
     def test_patch_is_idempotent(self, mod):
         """Calling the patch twice must not fail and must not double-wrap index_exists."""
         ovi, _ = self._make_ovi_stub()

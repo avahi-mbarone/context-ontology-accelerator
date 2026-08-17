@@ -29,11 +29,18 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     Input: {"namespaceId": str}
     Output: {"namespaceId": str}
 
-    Both underlying calls are already best-effort (log + swallow) since they
-    call external services (ontology-engine HTTP, S3) that this pipeline
-    does not own the retry semantics of at a finer grain than "retry the
-    whole step". Errors inside are logged, not raised, matching the
-    non-critical/continue-on-failure classification for this step.
+    ``delete_all_ontologies`` RAISES on failure and is not caught here: it owns
+    the AOSS vector index, which is one index per namespace against a
+    collection with a hard 1000-index cap. Because a later step deletes the
+    namespace record, a swallowed failure here orphans that index forever —
+    nothing can target a namespace that no longer exists — and the deployment
+    eventually fails every embedding write with ``index_limit_breached``.
+    Letting it raise means the step's own retry policy retries it and, on
+    exhaustion, the pipeline catch lands the namespace in DELETE_FAILED, which
+    is recoverable. A silent, unreclaimable leak is not.
+
+    ``delete_ontology_artifacts`` (S3) stays best-effort — orphaned S3 objects
+    cost storage but consume no quota that can wedge the deployment.
     """
     namespace_id = event["namespaceId"]
     delete_all_ontologies(namespace_id)

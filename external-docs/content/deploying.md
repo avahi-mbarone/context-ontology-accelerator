@@ -44,6 +44,12 @@ Raising it (`L-B99A9384`) opens an AWS Support case rather than being granted
 immediately, so if you are on a reduced-quota account and want to deploy now,
 disable the reservations with `SCL_LAMBDA_RESERVED_CONCURRENCY=0`.
 
+These two are the only quotas the preflight check validates. Several others —
+OpenSearch Serverless OCUs, Bedrock per-model invocation limits, Fargate vCPU,
+ENIs, S3 buckets — can still block a deploy on a new or sandbox account. See
+[Appendix A: Quotas to check](#a3-quotas-to-check-before-deploying) for the
+fuller list and why each one matters here.
+
 ### Region Selection
 
 Context Ontology Accelerator defaults to `us-east-1` if no region is set. To deploy to a different region, export `AWS_DEFAULT_REGION` (used by the AWS CLI and preflight checks) **and** `CDK_DEFAULT_REGION` (used by CDK/`bin/app.ts` for AZ resolution and region-specific config) before running any deploy command:
@@ -83,7 +89,9 @@ constraints in practice — if either is missing, the region is not usable.
 
 The remaining services the solution uses — Lambda, API Gateway, ECS on Fargate, S3, DynamoDB,
 Cognito, CloudFront, WAF, Glue, Step Functions, SSM, CloudWatch — are available in effectively all
-commercial regions and are not usually the limiting factor.
+commercial regions and are not usually the limiting factor. That list is not exhaustive; for the
+complete inventory, including the services that are only called at run time rather than provisioned
+by the deploy, see [Appendix A: AWS Service Inventory](#appendix-a-aws-service-inventory-quotas-and-considerations).
 
 !!! warning "GovCloud and China regions are not supported"
     These partitions lack several required dependencies, and the stacks assume the `aws` partition in
@@ -716,3 +724,188 @@ aws cloudformation list-stacks --region <REGION> \
 ```
 
 This should return nothing.
+
+## Appendix A — AWS Service Inventory, Quotas, and Considerations
+
+This appendix consolidates every AWS service the solution touches, the account
+quotas worth checking before a deploy, and the non-obvious considerations behind
+specific resource choices. It is scoped to the **single-account, single-region
+evaluation deployment** this guide describes.
+
+It complements rather than repeats the sections above — see
+[Service Quotas](#service-quotas) for the two quotas the preflight check
+validates, [Region Prerequisites](#region-prerequisites) for regional
+availability, and [API Request Limits](#api-request-limits-and-rate-limiting)
+for inbound throttling.
+
+### A.1 Services provisioned by CDK
+
+Every service below is created by `make deploy-dev`. "Owning stacks" uses the
+default `coa-dev-` prefix; substitute your own `SCL_PREFIX`. Derived from the
+CDK module imports under `infra/lib/stacks/` — grep there for the current
+mapping if a stack has since been refactored.
+
+| Service | Used for | Owning stack(s) |
+|---------|----------|-----------------|
+| **Amazon VPC** (EC2) | Private networking for all compute; Lambdas and tasks are VPC-bound | `network`, and every service stack |
+| **AWS Lambda** | API handlers, workers, custom resources, ontology reload | `api`, `data-layer`, `sources`, `ontology`, `vkg`, `namespace`, `metric-service`, `serve` |
+| **Amazon ECS on Fargate** | Long-running containers: enrichment, doc ingestion, Ontop VKG | `sources`, `ontology`, `vkg` |
+| **Amazon Neptune** | Knowledge-graph store (RDF/SPARQL) | `storage` |
+| **Amazon OpenSearch Serverless** | Vector search for retrieval and grounding | `storage` (collection); `sources`, `ontology`, `serve`, `metric-service` (access policies) |
+| **Amazon DynamoDB** | Job/proposal state, roles, grants, Cedar policies, sessions | `authnz`, `api`, `sources`, `ontology`, `namespace`, `metric-service`, `serve`, `mcp` |
+| **Amazon S3** | Ontology artifacts, staged documents, web assets, access logs | `storage`, `sources`, `ontology`, `vkg`, `metric-service`, `web` |
+| **Amazon Bedrock** | All LLM and embedding inference | Called by `ontology`, `sources`, `serve`, `mcp` |
+| **Bedrock Guardrails** | Content/PII filtering on guarded calls | `guardrail` |
+| **Bedrock AgentCore Runtime** | Hosts the Serve and MCP runtimes | `serve`, `mcp` |
+| **Amazon DataZone** / SageMaker Unified Studio | Namespace domain, projects, data-asset catalog | `namespace` |
+| **Amazon API Gateway** | REST API surface, authorizer, per-route throttles | `api` |
+| **Amazon Cognito** | Default identity provider (skipped in OIDC mode) | `auth` |
+| **AWS WAF** (WAFv2) | Per-IP rate limiting at the edge and API stage | `api`, `edge-waf` |
+| **Amazon CloudFront** | Web-app CDN and TLS termination | `web` |
+| **AWS Step Functions** | Source-scan orchestration, namespace-deletion pipeline | `sources`, `namespace` |
+| **Amazon SQS** | Review queue, bulk-review worker continuations, async work | `api`, `sources`, `metric-service` |
+| **Amazon EventBridge** | Scan/ingest event routing and scheduled rules | `sources`, `ontology`, `vkg` |
+| **AWS Cloud Map** (servicediscovery) | Per-namespace VKG service discovery | `network`, `ontology`, `vkg` |
+| **Amazon ECR** | Container images for Fargate tasks and AgentCore | `sources`; image assets in `serve`, `mcp` |
+| **AWS Systems Manager** (SSM) | Cross-stack parameters and deploy config | Every stack |
+| **Amazon CloudWatch** + Logs | Metrics, log groups, dashboards | `api`, `ontology`, `vkg`, `sources` |
+| **AWS IAM** | Task/function roles, least-privilege grants | Every stack |
+| **AWS Certificate Manager** | TLS certs for custom API/UI domains (optional) | `api`, `web` |
+| **Amazon Route 53** | DNS records for custom domains (optional) | `api`, `web` |
+
+### A.2 Services called at runtime but not provisioned
+
+These are invoked by application code via the AWS SDK. They are **not created by
+the deploy**, so they either already exist in your account, are created
+per-source when you onboard data, or must be provisioned separately. This is the
+group most easily missed when scoping IAM permissions or regional availability.
+
+| Service | Used for | Called from |
+|---------|----------|-------------|
+| **Amazon Athena** | SQL over mapped data sources; table sampling; namespace cleanup | `packages/context-manager/.../clients/athena.py`, `packages/sources/.../database/connectors/athena_sampler.py`, `packages/control-plane/.../namespace/` |
+| **AWS Glue** | Data Catalog reads; JDBC connection provisioning for scans | `packages/sources/.../database/connectors/glue_catalog.py`, `glue_connection_provisioner.py` |
+| **AWS Lake Formation** | Permission grants when provisioning Glue connections | `packages/sources/.../database/connectors/glue_connection_provisioner.py` |
+| **Amazon Textract** | OCR for scanned/PDF documents during preprocessing | `packages/sources/.../documents/preprocessing/handler.py` |
+| **Amazon Redshift Data API** | Querying Redshift-backed sources | `packages/context-manager/.../clients/redshift_data.py` |
+| **AWS Secrets Manager** | Data-source credentials (e.g. JDBC) | `packages/sources`, `packages/context-manager` |
+| **AWS STS** | Role assumption and caller identity across services | Widely used (~10 modules) |
+
+
+### A.3 Quotas to check before deploying
+
+The preflight check (`scripts/preflight-deploy.sh`) validates only the first two.
+The rest are listed because they are plausible blockers on a **new or sandbox
+account**, where reduced default quotas are common. Confirm the ones relevant to
+your usage rather than requesting increases for all of them.
+
+Quota codes and the AWS defaults below were read from
+`service-quotas list-aws-default-service-quotas`. Defaults change over time and
+your account may already differ — treat them as a starting point and check your
+own applied values with the commands that follow.
+
+| Service | Quota (code) | AWS default | Why it matters here |
+|---------|--------------|-------------|---------------------|
+| **VPC** | VPCs per Region (`L-F678F1CE`) | 5 | Deploy creates one VPC unless `SCL_VPC_ID` is set. Preflight-checked — see [Service Quotas](#service-quotas) |
+| **Lambda** | Concurrent executions (`L-B99A9384`) | 1,000 (10 on some new accounts) | Two functions reserve concurrency (default 5 each). Preflight-checked — see [Lambda reserved concurrency](#lambda-reserved-concurrency) |
+| **ECS / Fargate** | Fargate On-Demand vCPU resource count (`L-3032A538`) | **6** | **The tightest fit here.** Tasks are 2 vCPU / 8 GB and 4 vCPU / 16 GB, and VKG runs one service **per namespace** — so a single enrichment task plus two namespaces' VKG services can exhaust the default |
+| **OpenSearch Serverless** | Indexing max OCU (`L-50FA809B`), search max OCU (`L-4E98D4EB`) | 10 each | The collection runs with standby replicas enabled, which roughly doubles OCU consumption — see [A.4](#a4-considerations) |
+| **Amazon Bedrock** | Per-model invocation TPM / RPM — one quota per model **per inference profile** (e.g. `L-CCA5DF70`, cross-region RPM for Claude Haiku 4.5) | Varies widely by model (hundreds of thousands to hundreds of millions of tokens/min) | Induction throughput is bounded by model tokens-per-minute far more often than by compute; a large scan can hit it. Look up the four models in [Bedrock model availability](#bedrock-model-availability) for the profile you actually invoke |
+| **Amazon Athena** | Active DML queries (`L-FC5F6546`) | 200 | Concurrent structured queries at serve time share this pool |
+| **Amazon Neptune** | DB instances (`L-368A3E00`) | 40 | Deploy creates one instance. The more likely constraint is not the count but whether the `db.r8g.large` Graviton class is offered in your region and AZ |
+| **Amazon Textract** | `DetectDocumentText` TPS (`L-75788A8B`) | 25 | Only relevant if ingesting scanned documents at volume |
+
+Quotas that are **not** worth checking, having confirmed the headroom: the deploy
+creates 16 CloudFormation stacks against a default of 2,000 (`L-0485CB21`), about
+11 S3 buckets against a far higher bucket limit, and consumes ENIs against a
+default of 5,000 per Region (`L-DF5E4CA3`). A single NAT gateway
+(`natGateways: 1`, `maxAzs: 2`) means one Elastic IP. AgentCore's slow ENI
+release after teardown is a real problem, but it is a *timing* issue rather than a
+quota one — see [AgentCore ENI wait](#agentcore-eni-wait-can-take-hours).
+
+Check a specific quota's default and your account's applied value with:
+
+```bash
+# Find the code for a quota (search by name within a service)
+aws service-quotas list-aws-default-service-quotas --service-code fargate \
+  --query "Quotas[?contains(QuotaName, 'vCPU')].[QuotaCode,QuotaName,Value]" --output table
+
+# Your account's applied value, which includes any increases already granted
+aws service-quotas get-service-quota --service-code fargate --quota-code L-3032A538 \
+  --query 'Quota.[QuotaName,Value]' --output text
+```
+
+!!! warning "Quota increases are not always immediate"
+    Some increases are auto-approved; others (notably Lambda concurrent
+    executions, `L-B99A9384`) open an AWS Support case. If you are on a
+    reduced-quota account and need to deploy today, prefer the documented
+    workarounds — e.g. `SCL_LAMBDA_RESERVED_CONCURRENCY=0` — over waiting on an
+    increase.
+
+### A.4 Considerations
+
+Non-obvious choices and consequences worth knowing before you deploy. Ordered
+roughly by how likely each is to surprise you.
+
+**Bedrock model quotas are the real throughput ceiling.** Induction and
+enrichment are LLM-bound, not CPU-bound. A database scan calls Bedrock once per
+discovered table, which is why the enrichment step has a 120-minute deadline
+(see [Database scan enrichment timeout](#database-scan-enrichment-timeout)). If
+scans fail on that deadline against a large source, check per-model TPM
+throttling before raising the timeout — more time does not help if you are being
+throttled.
+
+**OpenSearch Serverless has a cost and OCU floor.** The collection is
+`VECTORSEARCH` type inside a `NEXTGEN` collection group, which requires
+`standbyReplicas: ENABLED` (see `infra/lib/stacks/foundation/storage-stack.ts`).
+Standby replicas roughly double OCU consumption versus a single-AZ
+configuration, and Serverless bills a minimum OCU allocation whether or not you
+are querying — so an idle evaluation deployment still accrues cost here. This is
+a durability/availability requirement of the collection group type, not a tunable
+knob.
+
+**Neptune runs a single provisioned instance, not Serverless.** One
+`db.r8g.large` primary with no read replica, IAM (SigV4) auth, encryption at
+rest, and 7-day backups. Deletion protection is enabled **only** when
+`envName === "prod"`. Two consequences for a `dev` deploy: there is no
+availability guarantee from a second instance, and the cluster is deletable — so
+`make destroy-dev` will remove the graph and its data irreversibly.
+
+**Neptune and OpenSearch dominate deploy time.** They, plus AgentCore Runtime
+setup and cross-stack SSM waits, are why a fresh deploy takes ~1.5 hours. A
+deploy that looks stuck is usually waiting on one of them — check
+`aws cloudformation list-stacks` before intervening.
+
+**Teardown is not symmetric with deploy.** AgentCore Runtime provisions ENIs
+outside CloudFormation and can hold them for hours to days after runtime
+deletion, blocking security-group deletion. VKG creates ECS services outside
+CloudFormation (one per namespace), and DataZone domains need a force-delete.
+`make destroy-dev` handles all three; a bare `cdk destroy` does not. Budget for
+teardown taking longer than deploy, and see [Tearing Down](#tearing-down).
+
+**Per-namespace resources scale with tenant count.** VKG runs one ECS service
+per namespace, created by the ontology-reload Lambda rather than CloudFormation.
+Fargate task count, ENIs, and Cloud Map registrations therefore grow as
+namespaces are added — relevant to the Fargate vCPU and ENI quotas in
+[A.3](#a3-quotas-to-check-before-deploying), and the reason those quotas are
+worth checking against your expected namespace count rather than against a
+single-namespace evaluation.
+
+**Runtime-only services expand the IAM and regional surface.** The services in
+[A.2](#a2-services-called-at-runtime-but-not-provisioned) — Athena, Glue, Lake
+Formation, Textract, Redshift Data API, Secrets Manager — are not created by the
+deploy but are called by it. Athena and Glue are exercised by any structured
+source; Textract only by scanned-document ingestion; Redshift Data API only by
+Redshift-backed sources. If you deploy to a region missing one of the services
+you actually use, the failure appears at feature-use time rather than at deploy
+time.
+
+**`us-east-1` is always in the picture.** Even for a non-`us-east-1` deployment:
+the CloudFront-scope WAF WebACL and the UI ACM certificate must live in
+`us-east-1`, and ECR Public (build-time image pulls) is `us-east-1`-only. See
+[Cross-region and AZ constraints](#cross-region-and-az-constraints).
+
+**Availability Zones matter, not just regions.** AgentCore Runtime and the
+OpenSearch Serverless VPC endpoint support different AZ subsets within
+`us-east-1`, so `bin/app.ts` pins the VPC to their intersection via
+`infra/lib/utils/agentcore-az.ts`. A service being listed as available in your
+region does not mean it is available in every AZ of it.

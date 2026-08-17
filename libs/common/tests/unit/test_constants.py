@@ -10,6 +10,7 @@ import pytest
 from coa_common.constants import (
     canonical_col,
     graphrag_chunk_index_name,
+    graphrag_index_names,
     ontology_artifact_s3_key,
     ontology_vector_index_name,
     sql_ident,
@@ -233,3 +234,40 @@ class TestBrandTokensIndependentOfResourcePrefix:
         finally:
             monkeypatch.undo()
             importlib.reload(mod)
+
+
+class TestGraphragIndexNames:
+    """The full set of GraphRAG vector indexes a namespace can own.
+
+    Namespace teardown deletes exactly these, so the list must stay in step with
+    what the build path creates (``EMBEDDING_INDEXES`` in graph_build.py) plus
+    any name that was ever created historically. A name missing here is an index
+    that survives its namespace forever, and AOSS caps a collection at 1000.
+    """
+
+    def test_covers_current_and_legacy_prefixes(self):
+        ns = "550e8400-e29b-41d4-a716-446655440000"
+        tenant = to_graphrag_tenant_id(ns)
+        assert graphrag_index_names(ns) == [
+            f"chunk_{tenant}",
+            f"topic_{tenant}",
+            # Legacy: statements are no longer embedded, but namespaces ingested
+            # before that change still have this index consuming quota.
+            f"statement_{tenant}",
+        ]
+
+    def test_chunk_name_agrees_with_the_single_name_helper(self):
+        """Two helpers derive the chunk index name; they must not drift."""
+        ns = "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+        assert graphrag_chunk_index_name(ns) in graphrag_index_names(ns)
+
+    def test_namespace_scoped_not_source_scoped(self):
+        """All doc sources in a namespace share one index set — which is why
+        namespace deletion owns these and source deletion does not."""
+        ns = "550e8400-e29b-41d4-a716-446655440000"
+        assert graphrag_index_names(ns) == graphrag_index_names(ns)
+
+    def test_distinct_namespaces_get_distinct_indexes(self):
+        a = graphrag_index_names("550e8400-e29b-41d4-a716-446655440000")
+        b = graphrag_index_names("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+        assert not set(a) & set(b)

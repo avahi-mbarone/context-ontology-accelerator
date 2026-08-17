@@ -17,6 +17,7 @@ members = [
     "coa-control-plane",
     "coa-control-plane-server",
     "coa-data-layer",
+    "coa-data-layer-server",
     "coa-mcp",
     "coa-metrics",
     "coa-ontology",
@@ -685,6 +686,7 @@ dependencies = [
     { name = "coa-common" },
     { name = "coa-control-plane-server" },
     { name = "mypy-boto3-datazone" },
+    { name = "opensearch-py" },
     { name = "pydantic" },
     { name = "structlog" },
 ]
@@ -696,6 +698,7 @@ requires-dist = [
     { name = "coa-common", editable = "libs/common" },
     { name = "coa-control-plane-server", editable = "smithy-generated/control-plane-python-server" },
     { name = "mypy-boto3-datazone", specifier = ">=1.35.0" },
+    { name = "opensearch-py", specifier = ">=2.5" },
     { name = "pydantic", specifier = ">=2.13.4" },
     { name = "structlog", specifier = ">=24.0" },
 ]
@@ -721,6 +724,17 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "coa-common", editable = "libs/common" }]
+
+[[package]]
+name = "coa-data-layer-server"
+version = "0.0.1"
+source = { editable = "smithy-generated/data-layer-python-server" }
+dependencies = [
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pydantic", specifier = ">=2.0" }]
 
 [[package]]
 name = "coa-mcp"

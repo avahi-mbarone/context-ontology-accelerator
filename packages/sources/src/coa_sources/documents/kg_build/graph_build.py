@@ -289,12 +289,25 @@ def _load_staged_documents(bucket: str, staging_prefix: str) -> tuple[list, int]
 _graphrag_aoss_patched = False
 
 
-def _patch_graphrag_toolkit_for_aoss_nextgen() -> None:
+def _patch_graphrag_toolkit_for_aoss_nextgen(*, allow_create: bool = True) -> None:
     """Patch graphrag_toolkit's index_exists to drop the unsupported 'engine' field.
 
     AOSS NEXTGEN rejects knn_vector mappings with a 'method.engine' key.
     Same fix as opensearch_vector.py commit 2261418. No-op in unit tests
     (stubs don't expose the full module path).
+
+    ``allow_create=False`` makes the patch never create a missing index, only
+    report whether it exists. The DELETION task passes this: graphrag's
+    ``VectorIndex.writeable`` defaults to True and its ``index_exists`` creates
+    when writeable, so a cleanup run against an already-empty tenant would
+    RECREATE ``chunk_*``/``topic_*`` as empty shells. Nothing ever reclaims
+    those (the namespace they belong to is being deleted), and AOSS caps a
+    collection at 1000 indexes, so they accumulate until every embedding write
+    in the deployment fails with ``index_limit_breached``. Same
+    reads-must-not-create rule the ontology vector store follows — see
+    ``OpenSearchVectorStore._read_index``. With no index there are no
+    embeddings to delete, so graphrag falls back to its
+    ``DummyOpensearchVectorClient`` and the delete is correctly a no-op.
     """
     global _graphrag_aoss_patched
     if _graphrag_aoss_patched:
@@ -315,7 +328,7 @@ def _patch_graphrag_toolkit_for_aoss_nextgen() -> None:
         index_exists = False
         try:
             index_exists = client.indices.exists(index=index_name)
-            if not index_exists and writeable:
+            if not index_exists and writeable and allow_create:
                 client.indices.create(index=index_name, body=idx_conf)
                 index_exists = True
         except _RequestError as e:

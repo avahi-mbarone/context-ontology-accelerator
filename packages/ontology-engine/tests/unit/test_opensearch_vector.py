@@ -28,6 +28,8 @@ def _store_with_client(client: MagicMock, index: str = "idx-ns1") -> OpenSearchV
     # ensure_index just echoes the resolved index name; bypass it deterministically.
     client.ensure_index.side_effect = lambda idx: idx
     store._ensure_index = lambda namespace=None: index
+    # Reads resolve the index WITHOUT creating it (see _read_index docstring).
+    store._read_index = lambda namespace=None: index
     return store
 
 
@@ -223,3 +225,78 @@ class TestDeletesAndHealth:
         store = OpenSearchVectorStore(namespace="ns1")
         store._client = client
         assert store.health_check() == {"status": "ok", "index": "idx-ns1"}
+
+
+# ── read paths must not create indexes (AOSS 1000-index quota) ───────────
+
+
+class TestReadsDoNotCreateIndex:
+    """Reads must never ``ensure_index``.
+
+    Creating an index on the read path resurrects an empty shell for a
+    namespace whose index was already dropped by namespace teardown. Nothing
+    reclaims those shells and AOSS caps a collection at 1000 indexes, so they
+    accumulate until every write fails with ``index_limit_breached`` (observed
+    live: 454 leaked empty indexes filled the dev collection to 1000/1000 and
+    broke four integ suites).
+    """
+
+    def _store(self, client: MagicMock) -> OpenSearchVectorStore:
+        # Deliberately do NOT stub _read_index — we want the real resolver, and
+        # we assert that resolving for a read never touches ensure_index.
+        store = OpenSearchVectorStore(namespace="ns1")
+        store._client = client
+        return store
+
+    def test_search_nearest_does_not_ensure_index(self):
+        client = MagicMock()
+        client.knn_search.return_value = []
+        store = self._store(client)
+        store.search_nearest([0.1], "lexical", "titan")
+        client.ensure_index.assert_not_called()
+
+    def test_get_embeddings_for_entity_does_not_ensure_index(self):
+        client = MagicMock()
+        client.filter_search.return_value = []
+        store = self._store(client)
+        store.get_embeddings_for_entity("http://x/A")
+        client.ensure_index.assert_not_called()
+
+    def test_list_embeddings_for_ontology_does_not_ensure_index(self):
+        client = MagicMock()
+        client.filter_search.return_value = []
+        store = self._store(client)
+        store.list_embeddings_for_ontology("ont-1")
+        client.ensure_index.assert_not_called()
+
+    def test_list_searchable_entity_uris_does_not_ensure_index(self):
+        client = MagicMock()
+        client.iter_source_field.return_value = []
+        store = self._store(client)
+        store.list_searchable_entity_uris("ont-1")
+        client.ensure_index.assert_not_called()
+
+    def test_delete_embeddings_does_not_ensure_index(self):
+        client = MagicMock()
+        client.delete_by_term.return_value = 0
+        store = self._store(client)
+        store.delete_embeddings_for_ontology("ont-1")
+        client.ensure_index.assert_not_called()
+
+    def test_writes_still_ensure_index(self):
+        """The write path is the ONLY place an index may be created."""
+        client = MagicMock()
+        client.ensure_index.side_effect = lambda idx: idx
+        store = self._store(client)
+        store.store_embedding(
+            {"entity_uri": "http://x/A", "embedding_type": "lexical", "model_id": "titan", "vector": [0.1]}
+        )
+        client.ensure_index.assert_called_once()
+
+    def test_read_index_matches_ensure_index_name(self):
+        """Reads and writes must resolve the SAME index name, or reads go blind."""
+        store = OpenSearchVectorStore(namespace="ns1")
+        store._client = MagicMock()
+        store._client.ensure_index.side_effect = lambda idx: idx
+        assert store._read_index() == store._ensure_index()
+        assert store._read_index("other-ns") == store._ensure_index("other-ns")

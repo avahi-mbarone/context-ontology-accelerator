@@ -7,6 +7,7 @@ import {
   extractOffenders,
   groupOffenders,
   proposalHasComputedOntology,
+  proposalIsReadOnly,
 } from "./ProposalDetail";
 import {
   isAcceptTerminalFailure,
@@ -106,7 +107,7 @@ describe("isAcceptTerminalFailure — when the accept poll stops on a failure", 
 
 describe("proposalHasComputedOntology — gates the SHACL / infer-constraints panel", () => {
   // Statuses with a computed ontology → panel shown (accepted/rejected/
-  // cancelled show it read-only via isTerminal; pending/updated allow editing).
+  // cancelled show it read-only via isReadOnly; pending/updated allow editing).
   it.each([
     "pending",
     "updated",
@@ -129,6 +130,35 @@ describe("proposalHasComputedOntology — gates the SHACL / infer-constraints pa
     "failed", // induction errored; no ontology produced
   ])("hides the panel for %s (no ontology yet)", (status) => {
     expect(proposalHasComputedOntology(status)).toBe(false);
+  });
+});
+
+describe("proposalIsReadOnly — statuses that disable every edit + accept control", () => {
+  // Terminal statuses have no more transitions AND "inducing" has no ontology
+  // to act on yet. Both disable every edit + accept control on the page.
+  // #909: a failed or in-progress induction must NOT be acceptable.
+  it.each([
+    "accepted", // already merged — no more edits
+    "rejected", // explicitly rejected — terminal
+    "cancelled", // explicitly cancelled — terminal
+    "failed", // induction errored; no ontology to accept (#909)
+    "inducing", // worker still running; ontology not ready yet (#909)
+  ])("disables edits for %s", (status) => {
+    expect(proposalIsReadOnly(status)).toBe(true);
+  });
+
+  // These statuses have a proposal a user can still act on. "accept_failed" is
+  // the important case — the ontology still exists and the user can retry the
+  // accept (#456/#466/#467), so the Accept button must re-enable.
+  it.each([
+    "pending", // awaiting review
+    "updated", // edits saved, not yet accepted
+    "accept_failed", // accept failed but re-acceptable
+    "accepting", // in-flight accept — the button is gated separately by isAccepting
+    "embeddings_sync", // in-flight accept, later step — same
+    "", // unknown/absent status defaults to editable (matches proposalHasComputedOntology)
+  ])("keeps edits enabled for %s", (status) => {
+    expect(proposalIsReadOnly(status)).toBe(false);
   });
 });
 

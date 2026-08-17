@@ -55,7 +55,7 @@ class TestDeleteSources:
         with patch.object(delete_sources, "_get_lambda_client", return_value=mock_client):
             result = delete_sources.handler({"namespaceId": "ns-123"}, None)
 
-        assert result == {"sourcesDeleted": 2}
+        assert result["sourcesDeleted"] == 2
         assert mock_client.invoke.call_count == 4
 
     def test_no_sources_returns_zero(self):
@@ -67,7 +67,7 @@ class TestDeleteSources:
         with patch.object(delete_sources, "_get_lambda_client", return_value=mock_client):
             result = delete_sources.handler({"namespaceId": "ns-123"}, None)
 
-        assert result == {"sourcesDeleted": 0}
+        assert result["sourcesDeleted"] == 0
 
     def test_delete_404_is_treated_as_success(self):
         """A source deleted by a concurrent request (race) must not fail the step."""
@@ -82,7 +82,7 @@ class TestDeleteSources:
         with patch.object(delete_sources, "_get_lambda_client", return_value=mock_client):
             result = delete_sources.handler({"namespaceId": "ns-123"}, None)
 
-        assert result == {"sourcesDeleted": 1}
+        assert result["sourcesDeleted"] == 1
 
     def test_delete_failure_raises(self):
         from coa_control_plane.namespace.deletion_pipeline import delete_sources

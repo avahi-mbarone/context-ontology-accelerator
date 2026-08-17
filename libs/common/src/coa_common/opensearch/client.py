@@ -242,10 +242,26 @@ class AossVectorClient:
         return self._c()
 
     def _search(self, index: str, body: dict) -> dict:
-        """Execute a search body via the proxy transport or the direct client."""
-        if self._transport is not None:
-            return self._transport("search", index, body)
-        return self._c().search(index=index, body=body)
+        """Execute a search body via the proxy transport or the direct client.
+
+        A missing index reads as "no data" rather than an error: every read
+        helper funnels through here, so this one guard lets callers query an
+        index that was never created (or was torn down with its namespace)
+        without first calling :meth:`ensure_index`. That matters because an
+        ``ensure_index`` on the READ path resurrects an empty index for a
+        deleted namespace, and nothing ever reclaims it — AOSS caps a
+        collection at 1000 indexes, so leaked shells eventually break every
+        write with ``index_limit_breached``.
+        """
+        try:
+            if self._transport is not None:
+                return self._transport("search", index, body)
+            return self._c().search(index=index, body=body)
+        except Exception as e:
+            if _is_index_not_found(e):
+                log.debug("search on missing index %s — returning empty result", index)
+                return {"hits": {"hits": [], "total": {"value": 0}}}
+            raise
 
     # ── index admin (direct only) ──────────────────────────────────────
 
@@ -315,12 +331,15 @@ class AossVectorClient:
         stall_deadline = time.perf_counter() + _DELETE_VERIFY_STALL_TIMEOUT_S
 
         while True:
-            # 1. Fetch a page of matching doc ids and delete them.
-            resp = c.search(
-                index=index,
-                body={"size": page, "_source": False, "query": {"term": {field: value}}},
+            # 1. Fetch a page of matching doc ids and delete them. Goes through
+            #    _search so a missing index reads as zero hits (nothing to
+            #    delete) instead of raising — callers no longer ensure_index on
+            #    the delete path, since doing so resurrected empty shells.
+            resp = self._search(
+                index,
+                {"size": page, "_source": False, "query": {"term": {field: value}}},
             )
-            hits = resp["hits"]["hits"]
+            hits = _hits(resp)
             deleted_this_pass = 0
             for h in hits:
                 try:
@@ -428,8 +447,8 @@ class AossVectorClient:
         """Project one ``field`` across all matching docs.
 
         Pages with ``search_after`` (AOSS has no scroll API). Sorts on ``field`` (keyword).
+        Goes through :meth:`_search`, so a missing index yields ``[]``.
         """
-        c = self._c()
         query = _filter_clause(filters) or {"match_all": {}}
         values: list[Any] = []
         search_after: list[Any] | None = None
@@ -442,8 +461,8 @@ class AossVectorClient:
             }
             if search_after is not None:
                 body["search_after"] = search_after
-            resp = c.search(index=index, body=body)
-            hits = resp["hits"]["hits"]
+            resp = self._search(index, body)
+            hits = _hits(resp)
             if not hits:
                 break
             for h in hits:

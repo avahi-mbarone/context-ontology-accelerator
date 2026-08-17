@@ -122,6 +122,20 @@ export function parseConceptMatches(value: unknown): ConceptMatch[] {
     .filter((m): m is ConceptMatch => m !== null);
 }
 
+/**
+ * Narrow the payload fetched from ``Proposal.matches_url`` into
+ * ``ConceptMatch[]``. The S3 object is an envelope ``{ "matches": [...] }``
+ * (written by ``put_proposal_matches_s3``), whereas the legacy inline
+ * ``metadata.matches`` is the bare array — this accepts either shape so callers
+ * do not have to know which source the value came from. Anything else yields
+ * ``[]``.
+ */
+export function parseConceptMatchesEnvelope(value: unknown): ConceptMatch[] {
+  if (Array.isArray(value)) return parseConceptMatches(value);
+  if (isRecord(value)) return parseConceptMatches(value.matches);
+  return [];
+}
+
 export function localName(uri: string): string {
   return uri.split(/[#/]/).pop() ?? uri;
 }

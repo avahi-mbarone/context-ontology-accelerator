@@ -12,6 +12,7 @@ dependencies = [
     "mypy-boto3-datazone>=1.35.0",
     "pydantic>=2.13.4",
     "structlog>=24.0",
+    "opensearch-py>=2.5",
 ]
 
 [build-system]

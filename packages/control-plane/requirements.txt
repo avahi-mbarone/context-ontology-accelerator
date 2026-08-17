@@ -5,3 +5,10 @@ structlog>=24.4.0
 cryptography>=50.0.0
 PyJWT>=2.13.0
 requests>=2.34.2
+# Namespace teardown drops the namespace's AOSS indexes via
+# coa_common.opensearch.AossVectorClient (imported by namespace/cleanup.py, which
+# every deletion_pipeline handler imports). coa-common declares this, but this
+# file is the Lambda bundle's install list and is not resolved transitively — a
+# missing entry here is a Runtime.ImportModuleError at invoke time, not a build
+# failure. Keep in step with metric-service/ontology-engine.
+opensearch-py>=2.8.0

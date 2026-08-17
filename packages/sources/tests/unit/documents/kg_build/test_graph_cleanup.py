@@ -446,10 +446,113 @@ class TestGraphragPatchesApplied:
         )[1]
 
         with (
-            patch.object(mod, "_patch_graphrag_toolkit_for_aoss_nextgen", side_effect=lambda: calls.append("patch")),
+            patch.object(
+                mod,
+                "_patch_graphrag_toolkit_for_aoss_nextgen",
+                side_effect=lambda **k: calls.append(("patch", k)),
+            ) as mock_patch,
             patch.object(mod, "_patch_graphrag_paginated_search_retry"),
             patch.object(mod, "_patch_graphrag_bulk_ingest_retry"),
         ):
             mod.main()
 
-        assert calls.index("patch") < calls.index("vector_store"), f"patch must precede store build, got {calls}"
+        patch_idx = next(i for i, c in enumerate(calls) if c[0] == "patch" if isinstance(c, tuple))
+        assert patch_idx < calls.index("vector_store"), f"patch must precede store build, got {calls}"
+        # The deletion task must install the NON-creating variant, or cleaning an
+        # already-empty tenant recreates chunk_*/topic_* as unreclaimable shells.
+        mock_patch.assert_called_once_with(allow_create=False)
+
+
+# ---------------------------------------------------------------------------
+# Embedding-index existence filter
+# ---------------------------------------------------------------------------
+
+
+class TestExistingEmbeddingIndexFilter:
+    """Deletion must never be handed an index name that no longer exists.
+
+    graphrag's ``delete_embeddings`` reads "found no documents for these ids" as
+    replication lag and sleeps in a 70-second retry loop PER BATCH before giving
+    up. With a missing index the id map is always empty (the vector client is
+    graphrag's dummy, so ``paginated_search`` yields nothing), so every batch
+    burns the full 70s — the module docstring's "36-source deletion burned 10
+    hours ... left the source DELETE_FAILED".
+
+    A missing index is now normal: namespace teardown drops chunk/topic once the
+    last source is deleted, and these ECS tasks can still be running then.
+    """
+
+    def _client(self, mod, exists_map):
+        client = MagicMock()
+        client.indices.exists.side_effect = lambda index: exists_map.get(index, False)
+        avc = MagicMock()
+        avc.return_value.raw_client.return_value = client
+        return patch.object(mod, "AossVectorClient", avc), client
+
+    def test_absent_index_is_filtered_out(self, mod):
+        ctx, client = self._client(mod, {"chunk_t1": True, "topic_t1": False})
+        with ctx:
+            assert mod._existing_embedding_indexes(["chunk", "topic"], "t1") == ["chunk"]
+        assert client.indices.exists.call_count == 2
+
+    def test_all_absent_returns_empty(self, mod):
+        ctx, _ = self._client(mod, {})
+        with ctx:
+            assert mod._existing_embedding_indexes(["chunk", "topic"], "t1") == []
+
+    def test_all_present_keeps_everything(self, mod):
+        ctx, _ = self._client(mod, {"chunk_t1": True, "topic_t1": True})
+        with ctx:
+            assert mod._existing_embedding_indexes(["chunk", "topic"], "t1") == ["chunk", "topic"]
+
+    def test_probe_failure_keeps_the_prefix(self, mod):
+        """Best-effort: a transient AOSS fault must not silently skip a delete
+        that was actually needed — degrade to the old (slow) path instead."""
+        client = MagicMock()
+        client.indices.exists.side_effect = RuntimeError("AOSS 429")
+        avc = MagicMock()
+        avc.return_value.raw_client.return_value = client
+        with patch.object(mod, "AossVectorClient", avc):
+            assert mod._existing_embedding_indexes(["chunk"], "t1") == ["chunk"]
+
+    def test_no_prefixes_short_circuits_without_a_client(self, mod):
+        avc = MagicMock()
+        with patch.object(mod, "AossVectorClient", avc):
+            assert mod._existing_embedding_indexes([], "t1") == []
+        avc.assert_not_called()
+
+
+class TestMainPassesOnlyExistingIndexes:
+    @patch(_P_IDX)
+    @patch(_P_GSF)
+    @patch(_P_VSF)
+    def test_filtered_list_reaches_the_vector_store_factory(self, mock_vsf, mock_gsf, mock_idx_cls, mod):
+        _make_store_mocks(mock_gsf, mock_vsf)
+        _make_graph_index(mock_idx_cls, [])
+
+        with patch.object(mod, "_existing_embedding_indexes", return_value=["chunk"]):
+            mod.main()
+
+        assert mock_vsf.for_vector_store.call_args.kwargs["index_names"] == ["chunk"]
+
+    @patch(_P_IDX)
+    @patch(_P_GSF)
+    @patch(_P_VSF)
+    def test_empty_list_is_passed_explicitly_not_omitted(self, mock_vsf, mock_gsf, mock_idx_cls, mod):
+        """Passing nothing is NOT equivalent to passing [].
+
+        ``VectorStoreFactory.for_vector_store`` defaults ``index_names`` to the
+        toolkit's DEFAULT_EMBEDDING_INDEXES, which includes ``statement`` — an
+        index this pipeline never creates, and therefore the exact 70s-per-batch
+        stall we are avoiding. An explicit empty list keeps the default from
+        kicking in and makes every get_index() return a no-op DummyVectorIndex.
+        """
+        _make_store_mocks(mock_gsf, mock_vsf)
+        _make_graph_index(mock_idx_cls, [])
+
+        with patch.object(mod, "_existing_embedding_indexes", return_value=[]):
+            mod.main()
+
+        kwargs = mock_vsf.for_vector_store.call_args.kwargs
+        assert "index_names" in kwargs, "index_names must be passed explicitly"
+        assert kwargs["index_names"] == []
