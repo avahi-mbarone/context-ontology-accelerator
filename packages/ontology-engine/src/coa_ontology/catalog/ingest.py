@@ -490,15 +490,43 @@ def ingest_ontology(
         )
 
     mapped_class_count = sum(1 for cls_uri in classes if str(cls_uri) in class_to_datasource)
-    for cls_uri in classes:
-        graph_store.store_class(
-            ontology_uri=ontology_id,
-            class_uri=str(cls_uri),
-            labels=[str(o) for o in g.objects(cls_uri, RDFS.label)],
-            comments=_definitions(g, cls_uri),
-            super_classes=[str(o) for o in g.objects(cls_uri, RDFS.subClassOf) if o in classes],
-            is_mapped=str(cls_uri) in class_to_datasource,
-        )
+    # Batch the class projection into a few chunked INSERTs when the backend
+    # supports it (Neptune DB), instead of one HTTP round-trip per class. Falls
+    # back to per-class store_class for backends without the batch method (NA).
+    class_specs: list[dict[str, Any]] = [
+        {
+            "class_uri": str(cls_uri),
+            "labels": [str(o) for o in g.objects(cls_uri, RDFS.label)],
+            "comments": _definitions(g, cls_uri),
+            "super_classes": [str(o) for o in g.objects(cls_uri, RDFS.subClassOf) if o in classes],
+            "is_mapped": str(cls_uri) in class_to_datasource,
+        }
+        for cls_uri in classes
+    ]
+    # Roll back the ontology on any class/property projection failure — but ONLY
+    # on a fresh ingest (an append's pre-existing state is live and must not be
+    # wiped on a transient failure). Neptune DB has no multi-statement
+    # transaction, so a batch that fails on chunk 2 of 3 (or a per-item loop that
+    # throws partway) leaves earlier writes committed; without this the graph is
+    # left with a partial class/property set. This mirrors the load_turtle
+    # rollback below. NOTE: this no-rollback-on-partial-projection gap is
+    # PRE-EXISTING — the previous per-class store_class loop had the same
+    # exposure; batching only changed the granularity of what's already
+    # committed at the point of failure, so this fix closes a latent gap rather
+    # than one introduced by batching.
+    try:
+        if hasattr(graph_store, "store_classes_batch"):
+            graph_store.store_classes_batch(ontology_uri=ontology_id, classes=class_specs)
+        else:
+            for spec in class_specs:
+                graph_store.store_class(ontology_uri=ontology_id, **spec)
+    except Exception as e:
+        if not appending:
+            try:
+                graph_store.delete_ontology(ontology_id)
+            except Exception:  # pragma: no cover — best effort
+                log.exception("cleanup delete_ontology after class projection failure")
+        raise IngestStoreError(f"class projection failed: {e}") from e
     # Observability for the Tier-2 answerability marker. A class is hidden from
     # the structured-query path unless it is mapped, so a mismatch here is the
     # single signal that a namespace will be (partly or wholly) "dark" to Tier-2.
@@ -524,16 +552,34 @@ def ingest_ontology(
             namespace,
         )
 
+    prop_specs: list[dict[str, Any]] = []
     for prop_uri in obj_props | dt_props:
         prop_defs = _definitions(g, prop_uri)
-        graph_store.store_property(
-            ontology_uri=ontology_id,
-            prop_uri=str(prop_uri),
-            label=str(next(g.objects(prop_uri, RDFS.label), "")),
-            comment=prop_defs[0] if prop_defs else "",
-            domains=[str(o) for o in g.objects(prop_uri, RDFS.domain) if o in classes],
-            ranges=[str(o) for o in g.objects(prop_uri, RDFS.range) if o in classes],
+        prop_specs.append(
+            {
+                "prop_uri": str(prop_uri),
+                "label": str(next(g.objects(prop_uri, RDFS.label), "")),
+                "comment": prop_defs[0] if prop_defs else "",
+                "domains": [str(o) for o in g.objects(prop_uri, RDFS.domain) if o in classes],
+                "ranges": [str(o) for o in g.objects(prop_uri, RDFS.range) if o in classes],
+            }
         )
+    # Same fresh-ingest rollback as the class projection above: a partial
+    # property write (batch chunk or per-item loop failing partway) must not
+    # leave a half-projected ontology behind.
+    try:
+        if hasattr(graph_store, "store_properties_batch"):
+            graph_store.store_properties_batch(ontology_uri=ontology_id, properties=prop_specs)
+        else:
+            for spec in prop_specs:
+                graph_store.store_property(ontology_uri=ontology_id, **spec)
+    except Exception as e:
+        if not appending:
+            try:
+                graph_store.delete_ontology(ontology_id)
+            except Exception:  # pragma: no cover — best effort
+                log.exception("cleanup delete_ontology after property projection failure")
+        raise IngestStoreError(f"property projection failed: {e}") from e
 
     log.info(
         "ingest: step1 catalog projection %.0fms (classes=%d props=%d)",

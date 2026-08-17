@@ -11,11 +11,22 @@ The retry is capped (``SERVE_NL2SQL_MAX_SHOTS``, default 2) so worst-case latenc
 is bounded at two LLM calls + two executions — recovering the accuracy of an
 agentic self-correction loop without its open-ended turn count. Retrieval and
 embedding happen once (first shot only); the correction reuses that context.
+
+A clean execution that returns ZERO rows is handled by WHERE the filter value
+came from. If a WHERE literal was taken straight from the user's question, the
+empty result is the correct "no such entity" ANSWER and is returned as-is — the
+correction shot is NOT allowed to loosen/re-case/substitute it, because that
+turns a correct "no such entity → 0 rows" into fabricated rows for a DIFFERENT,
+real value (a silent wrong answer that flips nondeterministically across runs).
+If no user-supplied literal is involved, a zero-row result may instead be a
+genuinely wrong query (bad JOIN, over-restrictive derived filter) and still gets
+one correction shot. Correction likewise fires on a true execution error.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import time
 
 import structlog
@@ -42,6 +53,40 @@ def _resolve_max_shots() -> int:
         return max(1, int(os.environ.get("SERVE_NL2SQL_MAX_SHOTS", str(_DEFAULT_MAX_SHOTS))))
     except (TypeError, ValueError):
         return _DEFAULT_MAX_SHOTS
+
+
+# Single-quoted SQL string literals, handling the '' escape (e.g. 'O''Brien').
+_SQL_STRING_LITERAL = re.compile(r"'((?:[^']|'')*)'")
+# Shortest literal we treat as a "user value". A 1-char filter is too likely to
+# be an incidental substring of the question to protect from correction.
+_MIN_USER_LITERAL_LEN = 2
+
+
+def _user_supplied_literal_in_sql(sql: str, query: str) -> bool:
+    """True if a string literal filtered on in ``sql`` came from the user's ``query``.
+
+    Used to decide, on a ZERO-row result, whether the filter value was taken
+    straight from the user's question. If so, an empty result is the correct
+    "no such entity" answer and the self-correction shot must NOT be allowed to
+    loosen/re-case/substitute that value — doing so fabricates rows for a
+    different, real entity (the reported bug). If no user-supplied literal is
+    involved, an empty result may be a genuinely wrong query (bad JOIN,
+    over-restrictive derived filter) that still warrants correction.
+
+    Scope: single-quoted STRING literals only — the reported failure is
+    proper-noun / categorical entity values. Numeric literals are intentionally
+    not protected (they are far more likely to be incidental and rarely cause a
+    fabricated-entity substitution). Match is case-insensitive substring, since
+    the model may re-case a value (e.g. user "acme" → SQL 'ACME').
+    """
+    if not sql or not query:
+        return False
+    q = query.lower()
+    for raw in _SQL_STRING_LITERAL.findall(sql):
+        value = raw.replace("''", "'").strip()
+        if len(value) >= _MIN_USER_LITERAL_LEN and value.lower() in q:
+            return True
+    return False
 
 
 class NLtoSQLStrategy:
@@ -161,19 +206,19 @@ class NLtoSQLStrategy:
             trace.record(StepId.T2_SQL_EXECUTE, "skipped", 0, detail="no query_executor configured")
             return None
 
-        # ── Two-shot loop: generate → firewall → execute; on execution error,
-        # regenerate ONCE against the same schema with the error fed back. ──────
+        # ── Two-shot loop: generate → firewall → execute; regenerate ONCE on an
+        # execution ERROR, or on a zero-row result whose filter value did NOT come
+        # from the user's question. A zero-row result that filters on a
+        # user-supplied literal is a legitimate "no such entity" answer and is
+        # returned as-is — see the empty-result handling below and the docstring. ─
         sql = nl_to_sql_result.sql
         confidence = nl_to_sql_result.confidence
         data_source_id = nl_to_sql_result.data_source_id or options.get("dataSourceId", "")
         last_error: str | None = None
 
-        # Best empty-but-valid result seen so far. A query that executes cleanly
-        # but returns zero rows is a WEAK signal — it may be the true answer, or
-        # (far more often in text-to-SQL) a subtly wrong query (bad JOIN, wrong
-        # literal casing, over-restrictive filter). We spend the correction shot
-        # trying to do better, but keep this as a fallback so we never downgrade a
-        # clean empty result to a hard miss.
+        # Best clean-but-empty result seen so far. A zero-row result is NEVER
+        # downgraded to a miss: if a correction shot also comes back empty (or
+        # fails), we return this instead of None.
         empty_fallback: StrategyResult | None = None
 
         for shot in range(1, self._max_shots + 1):
@@ -181,7 +226,7 @@ class NLtoSQLStrategy:
             # because each shot produces distinct SQL that must be authorized.
             fw_result = self._firewall_check(sql, profile, namespace, trace)
             if fw_result is None:
-                return empty_fallback  # unsafe SQL — keep any prior clean result
+                return None  # unsafe SQL — abandon the strategy
 
             exec_start = time.perf_counter()
             try:
@@ -193,19 +238,6 @@ class NLtoSQLStrategy:
                     timeout_seconds=35,
                 )
                 exec_ms = int((time.perf_counter() - exec_start) * 1000)
-                trace.record(
-                    StepId.T2_SQL_EXECUTE,
-                    "success",
-                    exec_ms,
-                    detail={
-                        "rowCount": exec_result.row_count,
-                        "tables": nl_to_sql_result.expanded_tables or nl_to_sql_result.retrieved_tables or [],
-                        "truncated": getattr(exec_result, "truncated", False),
-                        "shot": shot,
-                        # Executing engine — athena | redshift | jdbc.
-                        "engine": getattr(exec_result, "engine", "") or "unknown",
-                    },
-                )
                 result = StrategyResult(
                     sql=fw_result.authorized_sql,
                     rows=exec_result.rows,
@@ -219,17 +251,53 @@ class NLtoSQLStrategy:
                     expanded_tables=nl_to_sql_result.expanded_tables,
                     data_source_id=nl_to_sql_result.data_source_id or "",
                 )
-                # Non-empty → done. Empty → stash as fallback and, if shots
-                # remain, attempt one corrective regeneration (the empty result
-                # is the "error signal" fed back to the model).
-                if exec_result.row_count > 0 or shot >= self._max_shots:
+                tables = nl_to_sql_result.expanded_tables or nl_to_sql_result.retrieved_tables or []
+
+                # Decide whether a ZERO-row result is a legitimate, deterministic
+                # answer or a signal worth one corrective regeneration. A
+                # non-empty result is always final. For zero rows the question is
+                # WHERE the filter value came from: if a WHERE literal was taken
+                # straight from the user's question, an empty result is the CORRECT
+                # "no such entity" answer — coaxing the model to loosen/re-case it
+                # only fabricates rows for a DIFFERENT, real value. If NO
+                # user-supplied literal is involved, an empty result may instead be
+                # a genuinely wrong query (bad JOIN / over-restrictive derived
+                # filter), which still gets the one correction shot.
+                user_value_filter = exec_result.row_count == 0 and _user_supplied_literal_in_sql(
+                    fw_result.authorized_sql, query
+                )
+                final_empty = exec_result.row_count == 0 and (user_value_filter or shot >= self._max_shots)
+                trace.record(
+                    StepId.T2_SQL_EXECUTE,
+                    "success",
+                    exec_ms,
+                    detail={
+                        "rowCount": exec_result.row_count,
+                        "tables": tables,
+                        "truncated": getattr(exec_result, "truncated", False),
+                        "shot": shot,
+                        # Executing engine — athena | redshift | jdbc.
+                        "engine": getattr(exec_result, "engine", "") or "unknown",
+                        # A verified-empty result returned AS the answer (not a
+                        # retry trigger) — surfaced so the decision is observable.
+                        "deterministicEmpty": final_empty,
+                        # Empty result protected because a WHERE literal came from
+                        # the user's question (vs. simply out of correction shots).
+                        "userValueFilter": user_value_filter,
+                    },
+                )
+                if exec_result.row_count > 0 or final_empty:
                     return result if exec_result.row_count > 0 else (empty_fallback or result)
+                # Zero rows, no user-supplied literal, a shot remains: keep the
+                # clean empty result as a fallback (never downgraded to a miss) and
+                # ask for ONE correction — steered at JOINs/structure, explicitly
+                # NOT at inventing or altering a specific entity value.
                 empty_fallback = empty_fallback or result
                 last_error = (
-                    "The query executed successfully but returned ZERO rows. For this question a "
-                    "non-empty answer is expected, so the query is likely wrong — e.g. an over-restrictive "
-                    "WHERE filter, a string literal with the wrong case/spelling, or an incorrect JOIN. "
-                    "Reconsider the filters and joins and produce a corrected query."
+                    "The query executed successfully but returned ZERO rows, and no value from the "
+                    "user's question was used as a filter. The JOINs or non-value filters may be "
+                    "over-restrictive or incorrect — reconsider the JOINs and structural filters and "
+                    "produce a corrected query. Do NOT invent or alter a specific entity/identifier value."
                 )
             except Exception as e:
                 exec_ms = int((time.perf_counter() - exec_start) * 1000)
@@ -250,9 +318,10 @@ class NLtoSQLStrategy:
                 if shot >= self._max_shots:
                     break
 
-            # A shot remains: ask the LLM to correct the SQL from the feedback
-            # (verbatim engine error, or the empty-result signal) — model-driven,
-            # no rule catalogue — reusing the already-retrieved schema context.
+            # A shot remains (reached on an execution ERROR, or a zero-row result
+            # with no user-supplied filter value): ask the LLM to correct the SQL
+            # from the feedback in ``last_error`` — model-driven, no rule
+            # catalogue — reusing the already-retrieved schema context.
             correct_start = time.perf_counter()
             try:
                 sql, confidence = await self._sql_generator.correct(
@@ -266,6 +335,13 @@ class NLtoSQLStrategy:
                 correct_ms = int((time.perf_counter() - correct_start) * 1000)
                 if not sql:
                     logger.warning("nl_to_sql_correction_empty", shot=shot)
+                    trace.record(
+                        StepId.T2_SQL_GENERATE,
+                        "error",
+                        correct_ms,
+                        detail={"correction_shot": shot + 1, "error": "empty SQL returned"},
+                        tool_used="bedrock",
+                    )
                     break
                 trace.record(
                     StepId.T2_SQL_GENERATE,
@@ -275,10 +351,20 @@ class NLtoSQLStrategy:
                     tool_used="bedrock",
                 )
             except Exception as e:
+                correct_ms = int((time.perf_counter() - correct_start) * 1000)
                 logger.warning("nl_to_sql_correction_failed", error=type(e).__name__, shot=shot)
+                trace.record(
+                    StepId.T2_SQL_GENERATE,
+                    "error",
+                    correct_ms,
+                    detail={"correction_shot": shot + 1, "error": type(e).__name__},
+                    tool_used="bedrock",
+                )
                 break
 
-        # Every shot failed to execute; return any clean empty result we saw.
+        # Every remaining shot ended in an execution ERROR (a clean result — rows,
+        # or a verified/exhausted empty — returns inside the loop). Return any
+        # clean empty result we saw; otherwise None so the next strategy can try.
         return empty_fallback
 
     def _firewall_check(self, sql: str, profile: dict, namespace: str, trace) -> FirewallResult | None:
