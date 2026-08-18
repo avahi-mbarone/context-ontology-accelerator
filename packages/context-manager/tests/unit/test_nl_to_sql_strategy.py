@@ -296,56 +296,53 @@ class TestNLtoSQLStrategyResolve:
         assert query_executor.execute.call_count == 1
 
     @pytest.mark.asyncio
-    async def test_empty_result_triggers_correction_and_recovers(
+    async def test_zero_rows_returned_deterministically_no_correction(
         self, strategy, sql_generator, firewall, query_executor
     ):
-        # Shot 1 executes cleanly but returns ZERO rows (weak "likely wrong"
-        # signal in text-to-SQL) → correction shot produces SQL that returns
-        # rows. The non-empty corrected result wins.
-        sql_generator.generate.return_value = _make_nl_to_sql_result(sql="SELECT * FROM orders WHERE region='xx'")
-        sql_generator.correct.return_value = ("SELECT * FROM orders WHERE region='XX'", 0.8)
-        firewall.evaluate.side_effect = [
-            _make_firewall_result(authorized_sql="SELECT * FROM orders WHERE region='xx'"),
-            _make_firewall_result(authorized_sql="SELECT * FROM orders WHERE region='XX'"),
-        ]
-        query_executor.execute.side_effect = [
-            _make_exec_result(rows=[], row_count=0),
-            _make_exec_result(rows=[{"id": 1}], row_count=3),
-        ]
+        # A clean execution that returns ZERO rows is a deterministic ANSWER, not
+        # an error signal. The strategy must return it as-is and must NOT spend a
+        # correction shot trying to coax rows out of it.
+        sql_generator.generate.return_value = _make_nl_to_sql_result(sql="SELECT * FROM orders WHERE region='XX'")
+        firewall.evaluate.return_value = _make_firewall_result(authorized_sql="SELECT * FROM orders WHERE region='XX'")
+        query_executor.execute.return_value = _make_exec_result(rows=[], row_count=0)
         context = _make_context()
 
         result = await strategy.resolve("orders in XX?", "ns1", context)
 
         assert result is not None
-        assert result.row_count == 3
-        sql_generator.correct.assert_called_once()
-        # The empty-result feedback (not a DB exception) was fed to correct().
-        _, kwargs = sql_generator.correct.call_args
-        assert "ZERO rows" in kwargs["execution_error"]
+        assert result.row_count == 0
+        # The whole point: no correction shot on a clean empty result.
+        sql_generator.correct.assert_not_called()
+        assert query_executor.execute.call_count == 1
+        # The empty result is surfaced as a deterministic answer in the trace.
+        exec_steps = [s for s in context.trace.steps if s.step == "t2.sql.execute" and s.status == "success"]
+        assert exec_steps and exec_steps[-1].detail.get("deterministicEmpty") is True
 
     @pytest.mark.asyncio
-    async def test_empty_result_kept_as_fallback_when_correction_still_empty(
+    async def test_nonexistent_entity_value_is_not_coaxed_into_rows(
         self, strategy, sql_generator, firewall, query_executor
     ):
-        # Both shots return zero rows → the clean empty result is preserved
-        # (never downgraded to a hard miss), so a genuinely-empty answer stands.
-        sql_generator.generate.return_value = _make_nl_to_sql_result(sql="SELECT * FROM orders WHERE 1=0")
-        sql_generator.correct.return_value = ("SELECT * FROM orders WHERE 2=0", 0.7)
-        firewall.evaluate.side_effect = [
-            _make_firewall_result(authorized_sql="SELECT * FROM orders WHERE 1=0"),
-            _make_firewall_result(authorized_sql="SELECT * FROM orders WHERE 2=0"),
-        ]
-        query_executor.execute.side_effect = [
-            _make_exec_result(rows=[], row_count=0),
-            _make_exec_result(rows=[], row_count=0),
-        ]
+        # Regression: a query naming a non-existent entity ('Gamma')
+        # filters to 0 rows. The strategy must NOT feed that back to the model as
+        # "likely wrong — loosen the filter", which is what fabricated rows for a
+        # different, real value ('Alpha') nondeterministically across runs. If
+        # correct() is never called, no such substitution can happen.
+        sql_generator.generate.return_value = _make_nl_to_sql_result(sql="SELECT count(*) FROM t WHERE name='Gamma'")
+        firewall.evaluate.return_value = _make_firewall_result(
+            authorized_sql="SELECT count(*) FROM t WHERE name='Gamma'"
+        )
+        # If a correction were (wrongly) attempted, it would return rows for a
+        # real value — assert we never get here.
+        sql_generator.correct.return_value = ("SELECT count(*) FROM t WHERE name='Alpha'", 0.8)
+        query_executor.execute.return_value = _make_exec_result(rows=[], row_count=0)
         context = _make_context()
 
-        result = await strategy.resolve("query", "ns1", context)
+        result = await strategy.resolve("How many records are associated with Gamma?", "ns1", context)
 
         assert result is not None
         assert result.row_count == 0
-        assert query_executor.execute.call_count == 2
+        sql_generator.correct.assert_not_called()
+        assert query_executor.execute.call_count == 1
 
     @pytest.mark.asyncio
     async def test_empty_result_no_correction_when_max_shots_one(self, sql_generator, firewall, query_executor):
@@ -367,6 +364,111 @@ class TestNLtoSQLStrategyResolve:
         assert result is not None
         assert result.row_count == 0
         sql_generator.correct.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_correction_returns_empty_sql_records_error_trace_step(
+        self, strategy, sql_generator, firewall, query_executor
+    ):
+        # Shot 1 raises a DB error → correction is attempted, but the LLM returns
+        # empty SQL. That failed correction must be visible in the trace as an
+        # error step (not just a log line), and the strategy falls through.
+        sql_generator.generate.return_value = _make_nl_to_sql_result(sql="SELECT bad FROM orders")
+        sql_generator.correct.return_value = ("", 0.0)
+        firewall.evaluate.return_value = _make_firewall_result(authorized_sql="SELECT bad FROM orders")
+        query_executor.execute.side_effect = Exception('column "bad" does not exist')
+        context = _make_context()
+
+        result = await strategy.resolve("query", "ns1", context)
+
+        assert result is None
+        gen_errors = [
+            s
+            for s in context.trace.steps
+            if s.step == "t2.sql.generate" and s.status == "error" and "empty SQL" in str(s.detail)
+        ]
+        assert gen_errors, "expected an error t2.sql.generate step when correction returns empty SQL"
+
+    @pytest.mark.asyncio
+    async def test_correction_raises_records_error_trace_step(self, strategy, sql_generator, firewall, query_executor):
+        # Shot 1 raises a DB error → the correction call itself raises. That must
+        # also surface as an error trace step (symmetry with the empty-SQL branch).
+        sql_generator.generate.return_value = _make_nl_to_sql_result(sql="SELECT bad FROM orders")
+        sql_generator.correct.side_effect = RuntimeError("bedrock throttled")
+        firewall.evaluate.return_value = _make_firewall_result(authorized_sql="SELECT bad FROM orders")
+        query_executor.execute.side_effect = Exception('column "bad" does not exist')
+        context = _make_context()
+
+        result = await strategy.resolve("query", "ns1", context)
+
+        assert result is None
+        gen_errors = [
+            s
+            for s in context.trace.steps
+            if s.step == "t2.sql.generate" and s.status == "error" and "RuntimeError" in str(s.detail)
+        ]
+        assert gen_errors, "expected an error t2.sql.generate step when the correction call raises"
+
+    @pytest.mark.asyncio
+    async def test_correction_returns_zero_rows_is_accepted(self, strategy, sql_generator, firewall, query_executor):
+        # Cross-shot determinism: shot 1 raises a DB error → correction runs →
+        # shot 2 executes cleanly but returns ZERO rows. That verified-empty
+        # correction result must be ACCEPTED deterministically (returned as-is
+        # with the deterministicEmpty marker), never re-coaxed for more rows.
+        sql_generator.generate.return_value = _make_nl_to_sql_result(sql="SELECT bad FROM orders")
+        sql_generator.correct.return_value = ("SELECT * FROM orders WHERE status='void'", 0.8)
+        firewall.evaluate.side_effect = [
+            _make_firewall_result(authorized_sql="SELECT bad FROM orders"),
+            _make_firewall_result(authorized_sql="SELECT * FROM orders WHERE status='void'"),
+        ]
+        query_executor.execute.side_effect = [
+            Exception('column "bad" does not exist'),
+            _make_exec_result(rows=[], row_count=0),
+        ]
+        context = _make_context()
+
+        result = await strategy.resolve("query", "ns1", context)
+
+        assert result is not None
+        assert result.row_count == 0
+        # Exactly one correction (shot 2); the empty shot-2 result is accepted, not re-coaxed.
+        sql_generator.correct.assert_called_once()
+        assert query_executor.execute.call_count == 2
+        exec_ok = [s for s in context.trace.steps if s.step == "t2.sql.execute" and s.status == "success"]
+        assert exec_ok and exec_ok[-1].detail.get("deterministicEmpty") is True
+
+    @pytest.mark.asyncio
+    async def test_zero_rows_without_user_literal_still_self_corrects(
+        self, strategy, sql_generator, firewall, query_executor
+    ):
+        # AC: correction must STILL fire for a genuinely-wrong query whose zero
+        # rows are NOT caused by a user-supplied value (e.g. a bad JOIN). The
+        # question names no entity; shot 1's SQL carries no literal from it, so
+        # the empty result is treated as a possibly-wrong query and corrected.
+        sql_generator.generate.return_value = _make_nl_to_sql_result(
+            sql="SELECT count(*) FROM orders o JOIN customers c ON o.id = c.id"
+        )
+        sql_generator.correct.return_value = ("SELECT count(*) FROM orders", 0.8)
+        firewall.evaluate.side_effect = [
+            _make_firewall_result(authorized_sql="SELECT count(*) FROM orders o JOIN customers c ON o.id = c.id"),
+            _make_firewall_result(authorized_sql="SELECT count(*) FROM orders"),
+        ]
+        query_executor.execute.side_effect = [
+            _make_exec_result(rows=[], row_count=0),
+            _make_exec_result(rows=[{"count": 5}], row_count=5),
+        ]
+        context = _make_context()
+
+        result = await strategy.resolve("how many orders", "ns1", context)
+
+        assert result is not None
+        assert result.row_count == 5
+        # No user literal in the filter → the zero-row result was corrected.
+        sql_generator.correct.assert_called_once()
+        assert query_executor.execute.call_count == 2
+        # The correction feedback must NOT tell the model to alter a value.
+        _, kwargs = sql_generator.correct.call_args
+        assert "ZERO rows" in kwargs["execution_error"]
+        assert "Do NOT invent or alter" in kwargs["execution_error"]
 
     @pytest.mark.asyncio
     async def test_max_shots_one_disables_correction(self, sql_generator, firewall, query_executor):

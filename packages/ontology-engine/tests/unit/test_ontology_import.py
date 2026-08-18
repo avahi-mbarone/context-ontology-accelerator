@@ -419,10 +419,15 @@ class TestUploadEndpoint:
         assert body["graph_uri"].startswith("https://")
         assert "/default/https%3A%2F%2Fexample.com%2Fonto" in body["graph_uri"]
 
-        # Catalog projection ran: create_ontology on first upload
+        # Catalog projection ran: create_ontology on first upload. Classes and
+        # properties are projected via the batched path (store_classes_batch /
+        # store_properties_batch) — one call each carrying all 2 items — instead
+        # of one store_class/store_property per item.
         assert mock_graph.create_ontology.call_count == 1
-        assert mock_graph.store_class.call_count == 2
-        assert mock_graph.store_property.call_count == 2
+        assert mock_graph.store_classes_batch.call_count == 1
+        assert len(mock_graph.store_classes_batch.call_args.kwargs["classes"]) == 2
+        assert mock_graph.store_properties_batch.call_count == 1
+        assert len(mock_graph.store_properties_batch.call_args.kwargs["properties"]) == 2
         # load_turtle received the ontology IRI as ontology_uri
         mock_graph.load_turtle.assert_called_once()
         kw = mock_graph.load_turtle.call_args.kwargs
@@ -697,15 +702,19 @@ class TestProposalMergeIntoOneOntology:
         loaded_uris = {c.kwargs["ontology_uri"] for c in mock_graph.load_turtle.call_args_list}
         assert loaded_uris == {target}
 
-        # store_class ran for 1 (A) + 2 (B) = 3 classes; store_property
-        # ran for 1 + 1 = 2 properties. They all targeted the same
-        # ontology_uri (the target).
-        assert mock_graph.store_class.call_count == 3
-        assert mock_graph.store_property.call_count == 2
-        for call in mock_graph.store_class.call_args_list:
-            assert call.kwargs["ontology_uri"] == target
-        for call in mock_graph.store_property.call_args_list:
-            assert call.kwargs["ontology_uri"] == target
+        # Classes/properties are projected via the batched path: one
+        # store_classes_batch per accept (2 accepts), together carrying
+        # 1 (A) + 2 (B) = 3 classes and 1 + 1 = 2 properties, all targeting the
+        # same ontology_uri (the target).
+        class_calls = mock_graph.store_classes_batch.call_args_list
+        prop_calls = mock_graph.store_properties_batch.call_args_list
+        assert len(class_calls) == 2  # one batch per accept
+        assert sum(len(c.kwargs["classes"]) for c in class_calls) == 3
+        assert sum(len(c.kwargs["properties"]) for c in prop_calls) == 2
+        for c in class_calls:
+            assert c.kwargs["ontology_uri"] == target
+        for c in prop_calls:
+            assert c.kwargs["ontology_uri"] == target
 
         # Registry reflects the accumulation.
         row = ddb.get_item(Key={"PK": "NAMESPACE#default", "SK": f"ONTOLOGY#{target}"})["Item"]

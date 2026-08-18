@@ -286,10 +286,13 @@ class TestProposalTurtleIngest:
         final = _final_status(dynamo)
         assert final["status"] == "accepted"
 
-        # Catalog projection ran
+        # Catalog projection ran — classes/properties via the batched path
+        # (one store_classes_batch / store_properties_batch carrying all items).
         assert mock_graph.create_ontology.call_count == 1
-        assert mock_graph.store_class.call_count == 2  # Patient, Doctor
-        assert mock_graph.store_property.call_count == 2  # treats, age
+        assert mock_graph.store_classes_batch.call_count == 1
+        assert len(mock_graph.store_classes_batch.call_args.kwargs["classes"]) == 2  # Patient, Doctor
+        assert mock_graph.store_properties_batch.call_count == 1
+        assert len(mock_graph.store_properties_batch.call_args.kwargs["properties"]) == 2  # treats, age
         # update_ontology called twice: once for class/property counts, once
         # to set file_path after the turtle is cached to local disk.
         assert mock_graph.update_ontology.call_count == 2
@@ -489,7 +492,7 @@ class TestProposalTurtleIngest:
 
         # Catalog writes happened (step 1) even though the bulk load failed.
         assert mock_graph.create_ontology.called
-        assert mock_graph.store_class.called
+        assert mock_graph.store_classes_batch.called
         # Embeddings were NOT attempted because GSP failed first.
         mock_vec.store_embeddings_batch.assert_not_called()
 
@@ -535,11 +538,14 @@ class TestAcceptProposalR2rmlWiring:
     """
 
     def _is_mapped_by_class(self, mock_graph) -> dict[str, bool]:
-        return {
-            c.kwargs["class_uri"]: c.kwargs.get("is_mapped")
-            for c in mock_graph.store_class.call_args_list
-            if "class_uri" in c.kwargs
-        }
+        # Ingest projects classes via the batched store_classes_batch(classes=[
+        # {class_uri, is_mapped, ...}]) path; read the is_mapped tag from the
+        # batch specs.
+        out: dict[str, bool] = {}
+        for call in mock_graph.store_classes_batch.call_args_list:
+            for c in call.kwargs["classes"]:
+                out[c["class_uri"]] = c.get("is_mapped")
+        return out
 
     def test_item_r2rml_threads_into_ingest_and_tags_mapped(self, accept_client):
         http, dynamo, mock_graph, _mock_vec, _mock_bedrock, _s3 = accept_client

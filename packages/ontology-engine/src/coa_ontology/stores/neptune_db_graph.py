@@ -33,6 +33,7 @@ from urllib.parse import urlparse
 import boto3
 import botocore.auth
 import botocore.awsrequest
+import botocore.exceptions
 import httpx
 from coa_common import validate_namespace_name
 from coa_common.constants import VOCAB_URI
@@ -180,7 +181,11 @@ def _sparql_update(update: str) -> None:
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
     headers.update(_sign("POST", url, body))
     _t0 = _t.perf_counter()
-    with httpx.Client(timeout=NDB_TIMEOUT) as c:
+    # Batched INSERTs (up to the per-flush byte budget) are a bulk-transfer
+    # workload, not the per-item call the 30 s default was sized for. Use the
+    # same floor the GSP turtle load uses so a large slow-committing flush
+    # doesn't spuriously time out (and trip the fresh-ingest rollback).
+    with httpx.Client(timeout=max(NDB_TIMEOUT, 120)) as c:
         r = c.post(url, content=body, headers=headers)
         elapsed_ms = (_t.perf_counter() - _t0) * 1000
         if r.status_code >= 400:
@@ -443,7 +448,7 @@ class NeptuneDBGraphStore(GraphStore):
             triples.append(f'{_iri(uri)} {_iri(WB + "domainTag")} "{_esc(tag)}" .')
         for imp in data.get("imports") or []:
             triples.append(f"{_iri(uri)} {_iri(OWL + 'imports')} {_iri(imp)} .")
-        _sparql_update(f"INSERT DATA {{ GRAPH {_iri(graph_uri)} {{\n  " + "\n  ".join(triples) + "\n}}")
+        self._emit_insert(graph_uri, triples)
         return self.get_ontology_by_uri(uri) or {"uri": uri, "id": uri}
 
     def get_ontology(self, oid: str) -> dict | None:
@@ -543,30 +548,26 @@ class NeptuneDBGraphStore(GraphStore):
 
     # ── Schema elements ───────────────────────────────────────────────
 
-    def store_class(
-        self,
-        ontology_uri,
-        class_uri,
-        labels=None,
-        comments=None,
-        super_classes=None,
-        is_mapped=False,
-    ):
-        """Project a class (and its labels, comments, superclasses) into a graph.
+    # Batching bounds for INSERT DATA. A chunk is flushed when EITHER bound would
+    # be exceeded by adding the next class/property, whichever comes first. Both
+    # keep each SPARQL UPDATE well under Neptune's 150 MB per-request hard limit
+    # (docs.aws.amazon.com/neptune/latest/userguide/limits.html — exceeding it
+    # returns HTTP 400 BadRequestException). The byte bound is the real guard
+    # (triple count is a poor proxy: one FIBO rdfs:comment can be 1-2 KB); 40 MB
+    # of raw SPARQL leaves ample headroom for `update=` URL-encoding inflation
+    # (~1.5-3x) under 150 MB. Chunking is per-class/per-property — a single
+    # element's triples are never split across two INSERTs, so a mid-batch flush
+    # failure can't leave a class half-projected (e.g. missing its coa:isMapped
+    # marker). Tunable.
+    _INSERT_BATCH_TRIPLES = 5000
+    _INSERT_BATCH_BYTES = 40 * 1024 * 1024
 
-        Args:
-            ontology_uri: URI of the owning ontology (selects the named graph).
-            class_uri: URI of the class to store.
-            labels: ``rdfs:label`` values for the class.
-            comments: ``rdfs:comment`` values (definitions) for the class.
-            super_classes: Parent class URIs; blank-node superclasses are skipped.
-            is_mapped: When True, emit the ``coa:isMapped`` Tier-2 answerability
-                marker (SQL-backed class); never emitted as false.
+    def _class_triples(self, ontology_uri, class_uri, labels, comments, super_classes, is_mapped) -> list[str]:
+        """Serialize one class's projected triples (no I/O).
 
-        Returns:
-            A dict with the stored class URI and owning ontology id.
+        Shared by :meth:`store_class` and :meth:`store_classes_batch` so the two
+        paths emit byte-identical triples.
         """
-        graph_uri = self._graph_for(ontology_uri)
         triples = [
             f"{_iri(class_uri)} {_iri(RDF + 'type')} {_iri(OWL + 'Class')} .",
             f"{_iri(class_uri)} {_iri(WB + 'definedBy')} {_iri(ontology_uri)} .",
@@ -596,8 +597,188 @@ class NeptuneDBGraphStore(GraphStore):
             if not _is_storable_iri(sup):
                 continue
             triples.append(f"{_iri(class_uri)} {_iri(RDFS + 'subClassOf')} {_iri(sup)} .")
-        _sparql_update(f"INSERT DATA {{ GRAPH {_iri(graph_uri)} {{\n  " + "\n  ".join(triples) + "\n}}")
+        return triples
+
+    def _property_triples(self, ontology_uri, prop_uri, label, comment, domains, ranges) -> list[str]:
+        """Serialize one property's projected triples (no I/O).
+
+        Shared by :meth:`store_property` and :meth:`store_properties_batch`.
+        """
+        triples = [
+            f"{_iri(prop_uri)} {_iri(WB + 'definedBy')} {_iri(ontology_uri)} .",
+        ]
+        if label:
+            triples.append(f'{_iri(prop_uri)} {_iri(RDFS + "label")} "{_esc(label)}" .')
+        if comment:
+            triples.append(f'{_iri(prop_uri)} {_iri(RDFS + "comment")} "{_esc(comment)}" .')
+        for d in domains or []:
+            # Skip blank-node domains/ranges (anonymous union/restriction
+            # class expressions) — see store_class for rationale.
+            if not _is_storable_iri(d):
+                continue
+            triples.append(f"{_iri(prop_uri)} {_iri(RDFS + 'domain')} {_iri(d)} .")
+        for r in ranges or []:
+            if not _is_storable_iri(r):
+                continue
+            triples.append(f"{_iri(prop_uri)} {_iri(RDFS + 'range')} {_iri(r)} .")
+        # Declare as a generic property unless the caller already picked a type
+        triples.append(f"{_iri(prop_uri)} {_iri(RDF + 'type')} {_iri(RDF + 'Property')} .")
+        return triples
+
+    def _flush_triple_groups(self, graph_uri: str, groups: list[list[str]]) -> None:
+        """INSERT per-element triple ``groups`` into ``graph_uri`` in bounded chunks.
+
+        Each group is one class's or property's triples. The common case keeps a
+        group whole — it is never split across two INSERT DATA calls when it fits
+        the byte budget, so a normal mid-batch flush failure cannot leave a
+        single class/property half-projected (which would e.g. drop its
+        ``coa:isMapped`` marker). A new chunk is started when adding the next
+        group would exceed ``_INSERT_BATCH_TRIPLES`` triples or
+        ``_INSERT_BATCH_BYTES`` bytes, whichever comes first.
+
+        A single group whose own triples exceed the byte budget CANNOT be emitted
+        whole without risking Neptune's 150 MB request cap (HTTP 400, which aborts
+        the whole ingest). Such a group is flushed on its own and split across
+        multiple INSERTs by ``_emit_grouped`` — trading this one element's
+        whole-group atomicity for a request that Neptune will actually accept.
+        That relaxation is safe because the caller (``ingest_ontology``) now rolls
+        the whole ontology back on any projection failure, so a partial split of
+        one oversized element never survives. Byte size is measured as UTF-8 (what
+        ``_sparql_update`` serializes and sends), not code-point count.
+        """
+        chunk: list[str] = []
+        chunk_triples = 0
+        chunk_bytes = 0
+        for group in groups:
+            if not group:
+                continue
+            group_bytes = sum(len(t.encode("utf-8")) for t in group)
+            if group_bytes > self._INSERT_BATCH_BYTES:
+                # Oversized element: flush what's pending, then emit this element
+                # on its own, split into budget-sized sub-INSERTs (not whole).
+                log.warning(
+                    "ontology projection: a single element's %d triples are %d bytes, "
+                    "exceeding the %d-byte per-INSERT budget; splitting it across multiple "
+                    "INSERTs (per-triple, not whole) to stay under Neptune's 150 MB request limit.",
+                    len(group),
+                    group_bytes,
+                    self._INSERT_BATCH_BYTES,
+                )
+                if chunk:
+                    self._emit_insert(graph_uri, chunk)
+                    chunk, chunk_triples, chunk_bytes = [], 0, 0
+                self._emit_grouped(graph_uri, group)
+                continue
+            if chunk and (
+                chunk_triples + len(group) > self._INSERT_BATCH_TRIPLES
+                or chunk_bytes + group_bytes > self._INSERT_BATCH_BYTES
+            ):
+                self._emit_insert(graph_uri, chunk)
+                chunk, chunk_triples, chunk_bytes = [], 0, 0
+            chunk.extend(group)
+            chunk_triples += len(group)
+            chunk_bytes += group_bytes
+        if chunk:
+            self._emit_insert(graph_uri, chunk)
+
+    def _emit_grouped(self, graph_uri: str, triples: list[str]) -> None:
+        """Emit one over-budget element's ``triples`` across ≤budget sub-INSERTs.
+
+        Only reached for a single element whose triples exceed
+        ``_INSERT_BATCH_BYTES`` (see ``_flush_triple_groups``). Packs triples
+        greedily up to the byte budget per INSERT. A lone triple that itself
+        exceeds the budget is emitted on its own and logged — it cannot be split
+        further, so if it also exceeds Neptune's request cap the INSERT will fail
+        loud (and the caller's rollback wipes the partial ontology).
+        """
+        sub: list[str] = []
+        sub_bytes = 0
+        for t in triples:
+            t_bytes = len(t.encode("utf-8"))
+            if t_bytes > self._INSERT_BATCH_BYTES:
+                log.warning(
+                    "ontology projection: a single triple is %d bytes, exceeding the "
+                    "%d-byte budget; emitting it alone (cannot split further).",
+                    t_bytes,
+                    self._INSERT_BATCH_BYTES,
+                )
+            if sub and sub_bytes + t_bytes > self._INSERT_BATCH_BYTES:
+                self._emit_insert(graph_uri, sub)
+                sub, sub_bytes = [], 0
+            sub.append(t)
+            sub_bytes += t_bytes
+        if sub:
+            self._emit_insert(graph_uri, sub)
+
+    def _emit_insert(self, graph_uri: str, triples: list[str]) -> None:
+        """Issue one ``INSERT DATA`` SPARQL UPDATE for ``triples``.
+
+        Wraps transport failures with the chunk's shape (triple count + byte
+        size) so a mid-batch flush failure names which INSERT died, instead of a
+        bare httpx error with no batch context.
+        """
+        update = f"INSERT DATA {{ GRAPH {_iri(graph_uri)} {{\n  " + "\n  ".join(triples) + "\n}}"
+        try:
+            _sparql_update(update)
+        except (httpx.HTTPError, botocore.exceptions.BotoCoreError) as e:
+            chunk_bytes = sum(len(t.encode("utf-8")) for t in triples)
+            raise RuntimeError(
+                f"INSERT flush failed ({len(triples)} triples, {chunk_bytes} bytes) into graph {graph_uri}: {e}"
+            ) from e
+
+    def store_class(
+        self,
+        ontology_uri,
+        class_uri,
+        labels=None,
+        comments=None,
+        super_classes=None,
+        is_mapped=False,
+    ):
+        """Project a class (and its labels, comments, superclasses) into a graph.
+
+        Args:
+            ontology_uri: URI of the owning ontology (selects the named graph).
+            class_uri: URI of the class to store.
+            labels: ``rdfs:label`` values for the class.
+            comments: ``rdfs:comment`` values (definitions) for the class.
+            super_classes: Parent class URIs; blank-node superclasses are skipped.
+            is_mapped: When True, emit the ``coa:isMapped`` Tier-2 answerability
+                marker (SQL-backed class); never emitted as false.
+
+        Returns:
+            A dict with the stored class URI and owning ontology id.
+        """
+        graph_uri = self._graph_for(ontology_uri)
+        triples = self._class_triples(ontology_uri, class_uri, labels, comments, super_classes, is_mapped)
+        self._emit_insert(graph_uri, triples)
         return {"uri": class_uri, "ontology_id": ontology_uri}
+
+    def store_classes_batch(self, ontology_uri, classes: list[dict]) -> int:
+        """Project many classes into the ontology graph in chunked INSERTs.
+
+        All classes share one named graph (``ontology_uri``), so their triples
+        are accumulated and flushed in a few SPARQL UPDATEs instead of one HTTP
+        round-trip per class. Each ``classes`` item is a dict with keys
+        ``class_uri`` and optional ``labels``/``comments``/``super_classes``/
+        ``is_mapped`` (same semantics as :meth:`store_class`).
+
+        Returns the number of classes projected.
+        """
+        graph_uri = self._graph_for(ontology_uri)
+        groups = [
+            self._class_triples(
+                ontology_uri,
+                c["class_uri"],
+                c.get("labels"),
+                c.get("comments"),
+                c.get("super_classes"),
+                c.get("is_mapped", False),
+            )
+            for c in classes
+        ]
+        self._flush_triple_groups(graph_uri, groups)
+        return len(classes)
 
     def store_property(
         self,
@@ -622,27 +803,32 @@ class NeptuneDBGraphStore(GraphStore):
             A dict with the stored property URI and owning ontology id.
         """
         graph_uri = self._graph_for(ontology_uri)
-        triples = [
-            f"{_iri(prop_uri)} {_iri(WB + 'definedBy')} {_iri(ontology_uri)} .",
-        ]
-        if label:
-            triples.append(f'{_iri(prop_uri)} {_iri(RDFS + "label")} "{_esc(label)}" .')
-        if comment:
-            triples.append(f'{_iri(prop_uri)} {_iri(RDFS + "comment")} "{_esc(comment)}" .')
-        for d in domains or []:
-            # Skip blank-node domains/ranges (anonymous union/restriction
-            # class expressions) — see store_class for rationale.
-            if not _is_storable_iri(d):
-                continue
-            triples.append(f"{_iri(prop_uri)} {_iri(RDFS + 'domain')} {_iri(d)} .")
-        for r in ranges or []:
-            if not _is_storable_iri(r):
-                continue
-            triples.append(f"{_iri(prop_uri)} {_iri(RDFS + 'range')} {_iri(r)} .")
-        # Declare as a generic property unless the caller already picked a type
-        triples.append(f"{_iri(prop_uri)} {_iri(RDF + 'type')} {_iri(RDF + 'Property')} .")
-        _sparql_update(f"INSERT DATA {{ GRAPH {_iri(graph_uri)} {{\n  " + "\n  ".join(triples) + "\n}}")
+        triples = self._property_triples(ontology_uri, prop_uri, label, comment, domains, ranges)
+        self._emit_insert(graph_uri, triples)
         return {"uri": prop_uri, "ontology_id": ontology_uri}
+
+    def store_properties_batch(self, ontology_uri, properties: list[dict]) -> int:
+        """Project many properties into the ontology graph in chunked INSERTs.
+
+        The property counterpart to :meth:`store_classes_batch`. Each
+        ``properties`` item is a dict with key ``prop_uri`` and optional
+        ``label``/``comment``/``domains``/``ranges`` (same semantics as
+        :meth:`store_property`). Returns the number of properties projected.
+        """
+        graph_uri = self._graph_for(ontology_uri)
+        groups = [
+            self._property_triples(
+                ontology_uri,
+                p["prop_uri"],
+                p.get("label", ""),
+                p.get("comment", ""),
+                p.get("domains"),
+                p.get("ranges"),
+            )
+            for p in properties
+        ]
+        self._flush_triple_groups(graph_uri, groups)
+        return len(properties)
 
     # ── Bulk Turtle ingest ────────────────────────────────────────────
 
