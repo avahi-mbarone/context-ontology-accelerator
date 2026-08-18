@@ -3,12 +3,13 @@
 
 import * as cdk from "aws-cdk-lib";
 import { Construct } from "constructs";
+import { SCLStack } from "../../constructs/scl-stack";
 
 /**
  * Service stack: Metrics collection, dashboards, and observability
  * resources for the SemanticContext platform.
  */
-export class MetricStack extends cdk.Stack {
+export class MetricStack extends SCLStack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 

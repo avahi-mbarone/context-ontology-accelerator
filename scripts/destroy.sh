@@ -39,6 +39,23 @@
 #      is what actually tears the whole tree down.
 #   6. `cdk destroy --all`, then verify no stacks remain.
 #
+# NOT torn down by any of the above: the `/${SCL_PREFIX:-coa}/config` SSM
+# parameter (e.g. `initialAdminEmail`) is created manually via
+# `aws ssm put-parameter`, outside CDK entirely (see infra/bin/app.ts's
+# getConfigFromSSM()) — no stack owns it, so it survives `cdk destroy --all`
+# and is still there on the next `make deploy-dev`. Delete it manually
+# (`aws ssm delete-parameter --name /coa/config`) if a fresh deploy should
+# NOT reuse the same admin email / auth config.
+#
+# ALSO not torn down: any bridge IAM role passed via SCL_SMUS_ADMIN_ARNS (e.g.
+# `coa-dev-smus-admin`) if you created one manually — IAM Identity Center
+# permission-set role ARNs and the account root ARN both fail as
+# NamespaceStack's DomainLoginRole trust-policy principal (see HANDOFF.md),
+# so a manually-created bridge role is often needed. It's a plain `aws iam
+# create-role`, not a stack resource, so `cdk destroy --all` leaves it behind.
+# Delete manually (`aws iam delete-role --role-name coa-dev-smus-admin`) if
+# no longer needed.
+#
 # Mirrors deploy.sh's context resolution so `make destroy-dev` tears
 # down exactly what `make deploy-dev` created.
 set -uo pipefail
@@ -66,10 +83,14 @@ fi
 if [ -n "${SCL_PROJECT_TAG:-}" ] && [[ ! "$SCL_PROJECT_TAG" =~ ^[a-zA-Z0-9_.:-]+$ ]]; then
   echo "ERROR: SCL_PROJECT_TAG contains invalid characters: $SCL_PROJECT_TAG" >&2; exit 1
 fi
+if [ -n "${SCL_APN_TAG:-}" ] && [[ ! "$SCL_APN_TAG" =~ ^[a-zA-Z0-9_.:-]+$ ]]; then
+  echo "ERROR: SCL_APN_TAG contains invalid characters: $SCL_APN_TAG" >&2; exit 1
+fi
 
 CONTEXT="--context env=$ENV"
 [ -n "${SCL_PREFIX:-}" ]      && CONTEXT="$CONTEXT --context resource_prefix=$SCL_PREFIX"
 [ -n "${SCL_PROJECT_TAG:-}" ] && CONTEXT="$CONTEXT --context project_tag=$SCL_PROJECT_TAG"
+[ -n "${SCL_APN_TAG:-}" ]     && CONTEXT="$CONTEXT --context apn_tag=$SCL_APN_TAG"
 [ -n "${SCL_VPC_ID:-}" ]      && CONTEXT="$CONTEXT --context vpc_id=$SCL_VPC_ID"
 
 ENI_WAIT_MAX_SECONDS="${SCL_ENI_WAIT_MAX_SECONDS:-600}"

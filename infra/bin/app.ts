@@ -453,6 +453,13 @@ async function deploy(): Promise<void> {
 
   // ApiStack reads /ontology-engine/api-fn-arn via SSM (CFN dynamic ref).
   api.addDependency(ontology);
+  // DataLayerStack also reads /ontology-engine/api-fn-arn via SSM (DescribeSchema
+  // proxy invoke) — same CDK-can't-infer-ordering issue as the other
+  // valueForStringParameter() reads in this file. Missing this caused a fresh-
+  // account deploy to fail with "Unable to fetch parameters
+  // [/coa/ontology-engine/api-fn-arn] from parameter store" when CDK's
+  // topological sort picked dataLayer before ontology.
+  dataLayer.addDependency(ontology);
 
   // TODO: Re-enable other service stacks as they are implemented
   // const controlPlane = new ControlPlaneStack(app, `${stackPrefix}-control-plane`);

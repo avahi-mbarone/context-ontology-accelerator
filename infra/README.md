@@ -210,8 +210,8 @@ these:
    (and fails) to delete any of them itself — this step is what actually
    tears the whole tree down.
 5. **`cdk destroy --all`** with the same context resolution as
-   `deploy.sh` (`SCL_PREFIX`, `SCL_PROJECT_TAG`, `SCL_VPC_ID` env vars
-   are honored), then verify no `${SCL_PREFIX:-coa}-dev-*` stacks remain.
+   `deploy.sh` (`SCL_PREFIX`, `SCL_PROJECT_TAG`, `SCL_APN_TAG`, `SCL_VPC_ID`
+   env vars are honored), then verify no `${SCL_PREFIX:-coa}-dev-*` stacks remain.
    If any stack is `DELETE_FAILED`, the script scans its stack events for
    two known upstream CDK `autoDeleteObjects` failure modes —
    `GetBucketTagging`/`NoSuchTagSet` (the custom resource's tag check

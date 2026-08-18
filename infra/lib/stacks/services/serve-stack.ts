@@ -19,7 +19,10 @@ import { parseEcrImageUri } from "../../utils/ecr-utils";
 import { bundlePython } from "../../utils/python-bundling";
 import { fromRoot, Paths } from "../../paths";
 import { DynamoDBTable, SCLStack, SclMonitoring } from "../../constructs";
-import { DEFAULT_BEDROCK_MODEL_ID } from "../../constants";
+import {
+  DEFAULT_BEDROCK_MODEL_ID,
+  DEFAULT_BEDROCK_CHAT_MODEL_ID,
+} from "../../constants";
 import { TABLE_NAMES } from "@coa/shared";
 
 export interface ServeStackProps extends cdk.StackProps {
@@ -540,9 +543,12 @@ export class ServeStack extends SCLStack {
             }
             return optIn ? "true" : "false";
           })(),
-          ...(props.bedrockLlmModelId && {
-            BEDROCK_MODEL_ID: props.bedrockLlmModelId,
-          }),
+          // Chat/completion model for NL-to-SQL/SPARQL + synthesis. Falls back to
+          // the ts-shared single source of truth (DEFAULT_BEDROCK_CHAT_MODEL_ID)
+          // rather than leaving this unset — an unset BEDROCK_MODEL_ID previously
+          // caused coa_serve/clients/bedrock.py to silently default to a hardcoded,
+          // never-deliberately-chosen model instead of the documented default.
+          BEDROCK_MODEL_ID: props.bedrockLlmModelId ?? DEFAULT_BEDROCK_CHAT_MODEL_ID,
           // Query embedding + graphrag lexical retriever MUST use the same model
           // doc-kg-build ingested with. Single source of truth in ts-shared.
           BEDROCK_EMBED_MODEL_ID: DEFAULT_BEDROCK_MODEL_ID,
@@ -612,6 +618,24 @@ export class ServeStack extends SCLStack {
             `arn:aws:bedrock:*::foundation-model/*`,
             `arn:aws:bedrock:${region}:${account}:guardrail/*`,
           ],
+        }),
+      );
+
+      // AWS Marketplace — required for first-time Bedrock model subscription handshake.
+      // When a task invokes a Marketplace-sourced Bedrock model for the first time in an
+      // account, Bedrock completes an account-wide subscription automatically. Without
+      // these permissions, InvokeModel/Converse fails with AccessDeniedException
+      // ("not authorized to perform the required AWS Marketplace actions") — same root
+      // cause as issue #814 (fixed for the induction path in ontology-stack.ts, but
+      // never ported to this runtime role).
+      // These actions have no resource-level ARN (IAM limitation, not a design choice).
+      runtime.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: [
+            "aws-marketplace:ViewSubscriptions",
+            "aws-marketplace:Subscribe",
+          ],
+          resources: ["*"],
         }),
       );
 

@@ -6,12 +6,14 @@ import {
   CTX_RESOURCE_PREFIX,
   CTX_ENV,
   CTX_PROJECT_TAG,
+  CTX_APN_TAG,
   CTX_GRAPH_BASE_URI,
   CTX_EVENT_SOURCE_PREFIX,
   CTX_LAMBDA_RESERVED_CONCURRENCY,
   DEFAULT_RESOURCE_PREFIX,
   DEFAULT_ENV,
   DEFAULT_PROJECT_TAG,
+  DEFAULT_APN_TAG,
   DEFAULT_GRAPH_BASE_URI,
   DEFAULT_URN_PREFIX,
   DEFAULT_VOCAB_PREFIX,
@@ -24,6 +26,7 @@ export interface ResolvedContext {
   readonly prefix: string;
   readonly envName: string;
   readonly projectTag: string;
+  readonly apnTag: string;
   readonly ssmPrefix: string;
   /** Base authority for knowledge-graph IRIs (e.g. "http://coa.amazon.com"). */
   readonly graphBaseUri: string;
@@ -49,6 +52,7 @@ export function resolveContext(node: Node): ResolvedContext {
   const envName = (node.tryGetContext(CTX_ENV) as string) ?? DEFAULT_ENV;
   const projectTag =
     (node.tryGetContext(CTX_PROJECT_TAG) as string) ?? DEFAULT_PROJECT_TAG;
+  const apnTag = (node.tryGetContext(CTX_APN_TAG) as string) ?? DEFAULT_APN_TAG;
   const graphBaseUri =
     (node.tryGetContext(CTX_GRAPH_BASE_URI) as string) ??
     DEFAULT_GRAPH_BASE_URI;
@@ -81,6 +85,7 @@ export function resolveContext(node: Node): ResolvedContext {
     prefix,
     envName,
     projectTag,
+    apnTag,
     ssmPrefix: `/${prefix}`,
     graphBaseUri,
     urnPrefix,

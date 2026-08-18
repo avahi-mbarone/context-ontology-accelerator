@@ -20,6 +20,7 @@ export {
 export const CTX_RESOURCE_PREFIX = "resource_prefix";
 export const CTX_ENV = "env";
 export const CTX_PROJECT_TAG = "project_tag";
+export const CTX_APN_TAG = "apn_tag";
 export const CTX_IDP_TYPE = "idpType";
 export const CTX_CALLBACK_URLS = "callbackUrls";
 export const CTX_LOGOUT_URLS = "logoutUrls";
@@ -28,7 +29,8 @@ export const CTX_EVENT_SOURCE_PREFIX = "event_source_prefix";
 export const CTX_LAMBDA_RESERVED_CONCURRENCY = "lambda_reserved_concurrency";
 
 /** Default values when context keys are not provided. */
-export const DEFAULT_PROJECT_TAG = "semantic-context";
+export const DEFAULT_PROJECT_TAG = "ACI-GenAI-MVP";
+export const DEFAULT_APN_TAG = "pc:13uw3s8iyvze74tlcq3o0w8r6";
 
 /**
  * Default reserved concurrency for the two Lambdas that request it

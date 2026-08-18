@@ -3,12 +3,13 @@
 
 import * as cdk from "aws-cdk-lib";
 import { Construct } from "constructs";
+import { SCLStack } from "../../constructs/scl-stack";
 
 /**
  * Service stack: Control-plane resources for tenant management,
  * configuration, and orchestration of the SemanticContext platform.
  */
-export class ControlPlaneStack extends cdk.Stack {
+export class ControlPlaneStack extends SCLStack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 

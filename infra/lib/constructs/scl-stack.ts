@@ -11,7 +11,8 @@ import { resolveContext, prefixed } from "../context";
  * ## CDK Context Variables
  *   - `resource_prefix` (default: `DEFAULT_RESOURCE_PREFIX`, i.e. `"coa"`)
  *   - `env`             (default: `"dev"`)
- *   - `project_tag`     (default: `"semantic-context"`)
+ *   - `project_tag`     (default: `DEFAULT_PROJECT_TAG`)
+ *   - `apn_tag`         (default: `DEFAULT_APN_TAG`)
  *   - `vpc_id`          (optional, on NetworkStack - import existing VPC)
  *
  * ## Resource Naming
@@ -22,6 +23,7 @@ import { resolveContext, prefixed } from "../context";
  *   Auto-applied to all resources in every stack:
  *   - `Project`     = `project_tag` context value
  *   - `Environment` = `env` context value
+ *   - `aws-apn-id`  = `apn_tag` context value
  *   - `Component`   = per-stack via `addComponentTag()`
  *
  * ## Deployment Examples
@@ -38,9 +40,10 @@ export class SCLStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
-    const { envName, projectTag } = resolveContext(this.node);
+    const { envName, projectTag, apnTag } = resolveContext(this.node);
     cdk.Tags.of(this).add("Project", projectTag);
     cdk.Tags.of(this).add("Environment", envName);
+    cdk.Tags.of(this).add("aws-apn-id", apnTag);
 
     this.envName = envName;
   }
