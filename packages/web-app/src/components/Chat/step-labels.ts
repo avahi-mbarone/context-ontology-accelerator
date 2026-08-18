@@ -190,10 +190,15 @@ export function mapTraceStatus(status: string): TraceStatusType {
     case "unknown_tool":
     case "invalid_input":
       return "warning";
+    // Both bypasses are Tier 1 declining a question it cannot fully answer — more
+    // than one metric matched, or the question carried a qualifier the matched
+    // metric's fixed SQL cannot express — so Tier 2 answered instead. Routine
+    // re-routing, not a degradation.
     case "skipped":
     case "miss":
     case "empty":
     case "multi_metric_bypass":
+    case "residual_qualifier_bypass":
       return "stopped";
     default:
       return "info";
