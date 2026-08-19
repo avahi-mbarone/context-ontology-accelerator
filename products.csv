@@ -1,0 +1,21 @@
+product_id,name,category,unit_price
+P001,Wireless Mouse,Electronics,24.99
+P002,Bluetooth Speaker,Electronics,39.50
+P003,USB-C Charging Cable,Electronics,12.99
+P004,Noise Cancelling Headphones,Electronics,89.99
+P005,Portable Power Bank,Electronics,34.75
+P006,Stainless Steel Water Bottle,Home & Kitchen,18.25
+P007,Non-Stick Frying Pan,Home & Kitchen,27.99
+P008,Ceramic Coffee Mug Set,Home & Kitchen,22.50
+P009,LED Desk Lamp,Home & Kitchen,31.00
+P010,Memory Foam Pillow,Home & Kitchen,45.99
+P011,Mechanical Keyboard,Office Supplies,59.99
+P012,Adjustable Monitor Stand,Office Supplies,29.99
+P013,Ergonomic Desk Chair,Office Supplies,149.00
+P014,Sticky Notes Pack,Office Supplies,4.99
+P015,Ballpoint Pen Set,Office Supplies,9.50
+P016,Camping Tent (2-Person),Outdoor & Sports,89.00
+P017,Insulated Cooler Bag,Outdoor & Sports,24.00
+P018,Trekking Poles (Pair),Outdoor & Sports,32.99
+P019,Sunscreen SPF 50,Health & Beauty,11.99
+P020,Electric Toothbrush,Health & Beauty,42.99

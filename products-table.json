@@ -1,0 +1,25 @@
+{
+  "Name": "products",
+  "TableType": "EXTERNAL_TABLE",
+  "Parameters": {
+    "classification": "csv",
+    "skip.header.line.count": "1"
+  },
+  "StorageDescriptor": {
+    "Columns": [
+      {"Name": "product_id", "Type": "string", "Comment": "Product identifier, e.g. P001"},
+      {"Name": "name", "Type": "string", "Comment": "Product display name"},
+      {"Name": "category", "Type": "string", "Comment": "Product category"},
+      {"Name": "unit_price", "Type": "double", "Comment": "Unit price in USD"}
+    ],
+    "Location": "s3://coa-dev-sources-data-<ACCOUNT_ID>/synthetic-test/products/",
+    "InputFormat": "org.apache.hadoop.mapred.TextInputFormat",
+    "OutputFormat": "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
+    "SerdeInfo": {
+      "SerializationLibrary": "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe",
+      "Parameters": {
+        "field.delim": ","
+      }
+    }
+  }
+}
