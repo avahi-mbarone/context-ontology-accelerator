@@ -457,7 +457,7 @@ re-register it. A `DATABASE` source's rescan is only allowed from `SCAN_FAILED`
 see plan §10), and a partially-enriched-but-`APPROVED` source can't get a second Pass-1
 attempt any other way.
 
-## Sixth issue found (not yet fixed): correct Tier-2 answers get discarded and replaced with a document-RAG refusal
+## Sixth issue found and fixed: correct Tier-2 answers get discarded and replaced with a document-RAG refusal
 
 Found while demoing multi-hop Playground queries against the American Century dataset.
 "Which funds hold debt issued by entities ultimately owned by Brookfield Corporation?"
@@ -502,19 +502,88 @@ relationship rows, zero dangling FKs) — the NL→SQL generator just doesn't re
 to hop through them for this phrasing. Not blocking; worth a prompt-engineering pass on
 `nl_to_sql/sql_generator.py` separately from the fix below.
 
-**Proposed fix** (not yet applied — needs sign-off, this is a shared orchestration path
-used by every namespace, not just this demo):
-1. In `_run_tier2`, when the confidence gate fires, don't fully discard the
-   `StrategyResult` — return it (or its `.rows`/`.sparql`) alongside the `None` response
-   so the caller still has it.
-2. Thread those rows into `_run_tier3`'s `structured_data` parameter
-   (`orchestrator.py:1071`, and the agentic call at `:999-1021` for consistency) instead
-   of a hardcoded `None`, tagged as low-confidence so the synthesizer can use-but-hedge
-   rather than never seeing them at all.
-3. Soften `_SYSTEM_INSTRUCTION_BASE` (`tier3/synthesizer.py:45-60`) so document citation
-   isn't the only path to a confident answer — `structured_data`/`graph_entities` should
-   count too.
-Workaround until fixed: pass `options.tierOverride: 2` explicitly (not exposed in the
-Playground UI, must be sent directly against the AgentCore Runtime endpoint), or prefer
-shallower-join demo questions (sub-adviser/custodian/forward-currency ones all tested
-above 0.3 confidence and answer correctly through the normal path).
+**Fix applied** (this is a shared orchestration path used by every namespace, not just
+this demo — reviewed for that blast radius before making the change):
+1. `_run_tier2` (`orchestrator.py:573-654`) no longer fully discards the `StrategyResult`
+   when the confidence gate fires. It now returns a 3-tuple
+   `(response, sparql_for_tier3_grounding, low_confidence_rows)` — the third element is
+   the discarded result's `.rows` (and its `.sparql` folds into the existing second
+   element), populated only when a result was dropped for confidence reasons.
+2. `resolve()` threads that through a new `tier2_structured_data` local into
+   `_run_tier3`'s `structured_data` parameter (the hand-rolled path's call to
+   `KnowledgeRetriever.resolve`, `orchestrator.py:1071`) instead of the old hardcoded
+   `None`. The agentic path's call was left alone — `AgenticRetriever.resolve` already
+   accepts a `structured_data` kwarg but documents it as intentionally ignored (that path
+   gathers its own rows via its structured tools), so passing it there would be a no-op.
+3. Softened `_SYSTEM_INSTRUCTION_BASE` (`tier3/synthesizer.py:45-60`) to explicitly call
+   out the `<scl_structured_*>` block as authoritative, directly-queried data equal in
+   weight to cited documents — not a fallback — so the model doesn't hedge just because
+   no document discusses the same fact.
+
+Verified: `uv run pytest tests/unit/test_orchestrator.py tests/unit/test_strategy_wiring.py
+tests/unit/test_lexical_e2e.py` (105 tests) and `mypy`/`ruff` all pass with no new issues
+(pre-existing unrelated mypy errors in `orchestrator.py` confirmed via `git stash` diff,
+not introduced by this change). Deployed via `make deploy-serve` (rebuilds the Context
+Manager's AgentCore Runtime container — a code change needs this, unlike the guardrail
+fix above which took effect instantly). See "Seventh real bug" below for a deploy-tooling
+issue hit along the way.
+
+Note: `_run_tier2`'s confidence gate still governs whether Tier 2 returns its response
+*directly* (skipping Tier 3 entirely) — this fix only changes what happens to the rows
+once the gate decides to fall through, so a genuinely bad low-confidence guess still
+doesn't short-circuit to "confident answer" on its own; it now reaches the synthesizer as
+additional context to weigh, same as a document chunk would be.
+
+## Seventh real bug hit and fixed: `deploy-serve.sh` didn't forward `SCL_SMUS_ADMIN_ARNS`
+
+Hit while redeploying `coa-dev-serve` for the sixth-issue fix above. `make deploy-serve`
+failed on a stack it doesn't even touch on purpose:
+
+```
+coa-dev-namespace | UPDATE_FAILED | AWS::IAM::Role | DomainLoginRole
+Resource handler returned message: "Invalid principal in policy: "AWS":"arn:aws:iam::<ACCOUNT_ID>:role/Admin"
+```
+
+**Root cause**: `cdk deploy <stack>` always walks and re-evaluates the full dependency
+graph, not just the named stack — so a `coa-dev-serve`-only deploy still touches
+`coa-dev-namespace` (a dependency). `namespace-stack.ts:951,975-976` defaults the
+`DomainLoginRole` trust principal to `arn:aws:iam::<account>:role/Admin` unless the CDK
+context key `smus_admin_principal_arns` is set — and this account has no `Admin` role
+(confirmed: `aws iam get-role --role-name Admin` → `NoSuchEntity`), only the real one at
+`SCL_SMUS_ADMIN_ARNS=arn:aws:iam::<ACCOUNT_ID>:role/coa-dev-smus-admin` (already in
+`.env`, set during the original deploy — see "Pre-deploy prep" above). The full
+`scripts/deploy.sh` forwards `SCL_SMUS_ADMIN_ARNS` as that context key
+(`deploy.sh:38`); the targeted `scripts/deploy-serve.sh` never did — it only forwarded
+`env`, `context_manager_image_uri`, and `resource_prefix`.
+
+No lasting damage: CloudFormation auto-rolled `coa-dev-namespace` back to
+`UPDATE_ROLLBACK_COMPLETE` (its prior stable state) within ~20s. But the deploy exited
+before ever reaching the `coa-dev-serve` stack, so the sixth-issue code fix was NOT
+actually live after this failure.
+
+**Fixed**: added the same one-line context forward to `scripts/deploy-serve.sh`
+(mirroring `deploy.sh:38`):
+```bash
+[ -n "${SCL_SMUS_ADMIN_ARNS:-}" ] && CONTEXT="${CONTEXT} --context smus_admin_principal_arns=${SCL_SMUS_ADMIN_ARNS}"
+```
+Re-ran `make deploy-serve` after this fix (Docker image already built/pushed from the
+first attempt, so this run only re-executed the fast `cdk deploy` step). `coa-dev-serve`
+updated cleanly, runtime `READY`, total deploy 202s.
+
+**Post-deploy verification**: re-ran the Brookfield question through the normal
+(non-`tierOverride`) path.
+- **Before this fix**: total refusal, citing "no document chunks containing portfolio
+  holdings, debt issuance records, or ownership structures" — zero data surfaced.
+- **After this fix**: correctly names the exact 3 funds (HIGH-YIELD FUND, STRATEGIC
+  ALLOCATION: CONSERVATIVE FUND, STRATEGIC ALLOCATION: MODERATE FUND), explicitly
+  attributed to "the structured data" — confirms the rows now reach the synthesizer.
+  It still hedges on the *why* (the Brookfield/ownership link), and that's actually
+  correct: a direct `tierOverride=2` call shows the generated SQL only ever
+  `SELECT`s `fund_id, fund_name` — even though the join traverses
+  `debt_holding`/`security`/`issuer` to filter on Brookfield, those evidence columns
+  are never selected, so the rows hitting the synthesizer genuinely don't contain
+  anything to cite for the causal claim. This is the "secondary, softer finding"
+  already noted above (NL→SQL substring-matches on issuer name instead of true
+  ownership-graph traversal, and doesn't select supporting columns) — a real
+  follow-up worth a NL→SQL prompt-engineering pass, but out of scope for this fix
+  and not a defect in the orchestration change itself.

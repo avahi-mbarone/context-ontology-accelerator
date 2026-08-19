@@ -89,6 +89,12 @@ echo "--- Deploying CDK stack ---"
 
 CONTEXT="--context env=${ENV} --context context_manager_image_uri=${IMAGE_FULL}"
 [ -n "${SCL_PREFIX:-}" ] && CONTEXT="${CONTEXT} --context resource_prefix=${SCL_PREFIX}"
+# Without this, cdk deploy's dependency-stack walk hits coa-dev-namespace's
+# DomainLoginRole, which falls back to a hardcoded `role/Admin` principal that
+# doesn't exist on accounts (like this one) that never had that role — see
+# HANDOFF.md's redeploy notes. deploy.sh already forwards this; this targeted
+# script must too since CDK always evaluates the full dependency graph.
+[ -n "${SCL_SMUS_ADMIN_ARNS:-}" ] && CONTEXT="${CONTEXT} --context smus_admin_principal_arns=${SCL_SMUS_ADMIN_ARNS}"
 
 APPROVAL="--require-approval=never"
 if [ "${ENV}" = "prod" ] || [ "${ENV}" = "production" ]; then
