@@ -557,6 +557,167 @@ class TestOrchestratorTier1:
         assert response.result.tier != 1
 
 
+# ── Tier 1: Residual-Qualifier Gate ─────────────────────────────────────
+
+
+def _qualified_match(residual: str, **overrides) -> MetricMatch:
+    """A Tier-1 hit whose question carried ``residual`` words the metric can't express."""
+    fields = {
+        "found": True,
+        "metric_id": "demo:revenue",
+        "metric_name": "revenue",
+        "sql_template": "SELECT sum(amount) FROM orders",
+        "columns": ["total"],
+        "data_source_id": "ds-orders",
+        "matched_text": "revenue",
+        "residual": residual,
+    }
+    fields.update(overrides)
+    return MetricMatch(**fields)
+
+
+@pytest.mark.unit
+class TestTier1ResidualQualifierGate:
+    """A metric match that leaves part of the question unconsumed is a PARTIAL
+    match. Tier-1 runs the metric's SQL verbatim and parses no filter/grouping/time
+    window out of the NL, so answering would return the unfiltered aggregate at
+    confidence 1.0 with nothing marking the drop. It must decline to Tier 2 instead.
+    """
+
+    @pytest.mark.asyncio
+    async def test_residual_qualifier_bypasses_tier1(self):
+        """ "What was total revenue for the Gold loyalty tier?" — the Gold filter is
+        unexpressible, so Tier-1 declines and the metric SQL never runs."""
+        orch = _make_orchestrator(metric_found=True)
+        orch._metric_resolver.match.return_value = _qualified_match("gold loyalty tier")
+        request = InvokeRequest(
+            query="What was total revenue for the Gold loyalty tier?",
+            namespace="demo",
+        )
+
+        response = await orch.resolve(request)
+
+        assert response.result.tier != 1
+        orch._query_executor.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_bypass_records_unhandled_qualifier_in_trace(self):
+        """The dropped span is named in the trace — the evidence previously missing."""
+        orch = _make_orchestrator(metric_found=True)
+        orch._metric_resolver.match.return_value = _qualified_match("last quarter")
+        request = InvokeRequest(query="What is revenue last quarter?", namespace="demo")
+
+        response = await orch.resolve(request)
+
+        step = _find_step(response.result.trace, "t1.metric_match")
+        assert step is not None
+        assert step.status == "residual_qualifier_bypass"
+        assert step.detail["unhandledQualifier"] == "last quarter"
+        assert step.detail["metricName"] == "revenue"
+        # Paired with the span that DID match, so a surprising bypass is diagnosable
+        # from the trace alone.
+        assert step.detail["matchedText"] == "revenue"
+
+    @pytest.mark.asyncio
+    async def test_bypass_records_no_tier1_success_step(self):
+        """A declined question must not also record a Tier-1 hit — the gate is
+        checked before the success trace, so there is exactly one metric_match step."""
+        orch = _make_orchestrator(metric_found=True)
+        orch._metric_resolver.match.return_value = _qualified_match("gold loyalty tier")
+        request = InvokeRequest(query="revenue for the Gold loyalty tier", namespace="demo")
+
+        response = await orch.resolve(request)
+
+        matches = [s for s in response.result.trace if s.step == "t1.metric_match"]
+        assert len(matches) == 1
+        assert matches[0].status != "success"
+
+    @pytest.mark.asyncio
+    async def test_no_residual_still_answers_from_tier1(self):
+        """Regression guard: a fully-consumed question is unaffected by the gate."""
+        orch = _make_orchestrator(metric_found=True)
+        orch._metric_resolver.match.return_value = _qualified_match("")
+        request = InvokeRequest(query="What is revenue?", namespace="demo")
+
+        response = await orch.resolve(request)
+
+        assert response.result.tier == 1
+        assert response.result.confidence.score == 1.0
+        orch._query_executor.execute.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_caller_supplied_dimensions_exempt_from_gate(self):
+        """``options.dimensions`` is the documented out-of-band filter channel, so a
+        request carrying them has already expressed its qualifier — the residual
+        words are that same intent restated in prose. Tier-1 still answers."""
+        orch = _make_orchestrator(metric_found=True)
+        orch._metric_resolver.match.return_value = _qualified_match(
+            "north region", dimensions=["region"], sql_template="SELECT sum(amount) FROM orders WHERE region = :region"
+        )
+        # substitute_dimensions is sync; the resolver mock is an AsyncMock, so it
+        # must be stubbed explicitly or the bound SQL comes back as a coroutine.
+        orch._metric_resolver.substitute_dimensions = MagicMock(
+            return_value="SELECT sum(amount) FROM orders WHERE region = 'north'"
+        )
+        request = InvokeRequest(
+            query="revenue for the north region",
+            namespace="demo",
+            options={"dimensions": {"region": "north"}},
+        )
+
+        response = await orch.resolve(request)
+
+        assert response.result.tier == 1
+        orch._query_executor.execute.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_tier1_pin_exempt_from_gate(self):
+        """``tierOverride=1`` is an explicit instruction to answer from the metric
+        path; bypassing would turn the pin into a 404. Only the AUTOMATIC path
+        re-routes."""
+        orch = _make_orchestrator(metric_found=True)
+        orch._metric_resolver.match.return_value = _qualified_match("gold loyalty tier")
+        request = InvokeRequest(
+            query="revenue for the Gold loyalty tier",
+            namespace="demo",
+            options={"tierOverride": 1},
+        )
+
+        response = await orch.resolve(request)
+
+        assert response.result.tier == 1
+        orch._query_executor.execute.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_multi_metric_bypass_takes_precedence(self):
+        """Ambiguity is reported as the multi-metric bypass even when a residual is
+        also present — that check runs first and is the more specific reason."""
+        orch = _make_orchestrator(metric_found=True)
+        orch._metric_resolver.match.return_value = _qualified_match("compare last year", match_count=2)
+        request = InvokeRequest(query="compare revenue and cost last year", namespace="demo")
+
+        response = await orch.resolve(request)
+
+        step = _find_step(response.result.trace, "t1.metric_match")
+        assert step is not None
+        assert step.status == "multi_metric_bypass"
+        orch._query_executor.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_residual_on_a_miss_is_not_a_bypass(self):
+        """No match at all is still recorded as a miss, not a residual bypass — the
+        gate only applies to a found metric."""
+        orch = _make_orchestrator(metric_found=False)
+        orch._metric_resolver.match.return_value = MetricMatch(found=False, residual="gold loyalty tier")
+        request = InvokeRequest(query="who are our Gold loyalty tier customers?", namespace="demo")
+
+        response = await orch.resolve(request)
+
+        step = _find_step(response.result.trace, "t1.metric_match")
+        assert step is not None
+        assert step.status == "miss"
+
+
 # ── Tier 3 Fallback ─────────────────────────────────────────────────────
 
 

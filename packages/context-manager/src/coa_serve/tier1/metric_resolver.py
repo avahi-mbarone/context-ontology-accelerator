@@ -102,6 +102,8 @@ class MetricMatch:
     match_source: str = ""  # "name", "synonym", or "fuzzy"
     match_count: int = 0  # number of distinct metrics matched
     match_confidence: float = 1.0  # 1.0 for exact name/synonym; <1.0 for fuzzy near-miss
+    matched_text: str = ""  # the name/synonym span the query matched on
+    residual: str = ""  # question words left over after the matched span + stop-words
 
 
 REFRESH_INTERVAL_S = 30
@@ -114,6 +116,84 @@ _METRIC_QUERY_MAX_RESULTS = 5000
 # The ``:`` form requires a non-``:`` char before it (so a Postgres ``::type`` cast
 # is not mistaken for a placeholder); the ``{}`` form is unambiguous.
 _PLACEHOLDER_RE = re.compile(r"(?<!:):([a-zA-Z_][a-zA-Z0-9_]*)|\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
+
+# ── Residual-qualifier detection ─────────────────────────────────────────────
+#
+# A Tier-1 match is a whole-question substring search: a metric whose synonym is
+# a common noun ("revenue") matches ANY question containing that word, and the
+# metric's UNFILTERED SQL is then executed verbatim — nothing in Tier-1 parses a
+# filter, group-by, or time window out of the natural language. Without this
+# gate, "what is revenue?" and "what is revenue for the Gold tier?" returned
+# byte-identical rows at confidence 1.0, with no signal that the qualifier was
+# dropped.
+#
+# The gate: after a name/synonym hit, strip the matched span and a closed list of
+# question scaffolding. Anything LEFT OVER is a qualifier Tier-1 cannot honour, so
+# Tier-1 declines the question and the cascade falls through to Tier 2, which can
+# express predicates. Tier-1 keeps its deterministic-1.0 guarantee precisely
+# because it now only claims questions it fully consumes.
+#
+# Deliberately a CLOSED stop-word list, not an LLM or POS tagger: Tier-1's whole
+# value is being deterministic and sub-millisecond. The failure mode of an
+# unlisted-but-harmless word is a fall-through to Tier 2 (a slower, still-correct
+# answer), which is strictly safer than the silent wrong answer it replaces.
+_RESIDUAL_STOP_WORD_GROUPS = (
+    # Interrogatives, copula, determiners, polite filler.
+    "a an the what whats which who how is are was were be been being have has had do does did"
+    " can could would will shall should give get show tell find report display list return fetch"
+    " calculate compute me us my our ours we you your i it its please value much many"
+    " overall just only there s very",
+    # Aggregate/measure words a metric's own SQL already encodes. Only words that
+    # describe the metric's EXISTING aggregate belong here — see the docstring for
+    # why "average"/"net" are deliberately absent.
+    "total sum count number amount aggregate figure figures metric"
+    " metrics kpi result results data stats statistic statistics",
+    # Bare prepositions (their OBJECT is what survives as residual — see docstring).
+    "of for in on at to by",
+    # Greetings and sign-offs. A chat UI wraps the question in conversational
+    # padding ("Hello. What was total revenue? Thank you"); none of these asks
+    # anything of the SQL, so omitting them let politeness alone trip the gate and
+    # pointlessly demote a fully-consumed question to Tier 2 (review ask).
+    #
+    # Only words that cannot be anything BUT padding are listed. Note the absences:
+    # "morning"/"afternoon"/"evening" are excluded despite "good morning", because
+    # standalone they are time windows ("revenue this morning") — exactly the
+    # qualifier class this gate exists to catch. A greeting that loses its second
+    # word still gates; that is the safe direction to fail.
+    "hello hi hiya hey greetings thanks thank thankyou thx cheers regards welcome",
+    # Units and currencies — "revenue in USD" asks nothing extra of the SQL.
+    "usd eur gbp jpy cad aud chf cny inr dollar dollars euro euros pound pounds yen currency percent percentage pct",
+)
+
+_RESIDUAL_STOP_WORDS = frozenset(word for group in _RESIDUAL_STOP_WORD_GROUPS for word in group.split())
+"""Question scaffolding that does NOT constrain a metric's SQL.
+
+Only words whose removal cannot change the answer belong here. Filter-bearing
+words must NOT be added: ``for``/``by``/``in`` are listed because they are bare
+prepositions that carry no constraint alone — the OBJECT they introduce
+("for the Gold tier", "by region") is what survives as residual and trips the
+gate. Adding a dimension name, a value, or a time word here would reintroduce
+the silent-wrong-answer bug this gate closes.
+
+Two categories look like scaffolding but are NOT, and are deliberately absent
+(each was listed here during review and removed after it was shown to re-open
+the bug this gate exists to close):
+
+* **Aggregate modifiers** — ``average``/``avg``/``mean``/``net``/``gross``
+  *change which aggregate is asked for*. A metric templating ``SUM(amount)``
+  answers "average revenue" with the SUM, and "net revenue" with the gross
+  figure. These are inexpressible in a fixed template, so they must survive as
+  residual. ``total``/``sum``/``count`` are safe only because they restate the
+  aggregate a metric already computes.
+* **Relative time words** — ``today``/``current``/``currently``/``now`` are time
+  windows, which a fixed SQL template cannot express. "Revenue today" is not the
+  all-time total.
+"""
+
+# Punctuation that never carries a qualifier. Tokenising on word characters alone
+# would silently drop a hyphenated or possessive qualifier, so we split on
+# non-word runs and keep every word-ish token.
+_RESIDUAL_TOKEN_RE = re.compile(r"[a-z0-9_%$]+")
 
 _FUZZY_MATCH_THRESHOLD = 0.88
 """Minimum SequenceMatcher ratio for a fuzzy metric near-miss to be accepted.
@@ -174,6 +254,55 @@ _XPATH_REGEX_META = "\\.+*?[](){}|^$"
 def _escape_xpath_regex(s: str) -> str:
     """Backslash-escape every XPath-1.0 regex metacharacter in ``s``."""
     return "".join("\\" + c if c in _XPATH_REGEX_META else c for c in s)
+
+
+def merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Collapse overlapping/adjacent ``(start, end)`` spans into disjoint ones.
+
+    A question can hit the same metric through several aliases whose spans
+    OVERLAP ("total revenue" as a synonym and "revenue" as the name both match
+    "what is total revenue"). Rendering those spans individually would repeat the
+    shared text ("total revenue revenue"), so they are merged before display.
+    """
+    if not spans:
+        return []
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def residual_tokens(query: str, matched_spans: list[tuple[int, int]]) -> list[str]:
+    """Return the query tokens left unconsumed by the metric match.
+
+    Removes the character ranges the metric name/synonym matched on, then drops
+    every token in :data:`_RESIDUAL_STOP_WORDS`. What remains is content the
+    caller asked about that Tier-1's unfiltered SQL cannot express — a filter
+    ("for the Gold tier"), a grouping ("by region"), a time window ("last
+    quarter"), or an entity that may not exist at all.
+
+    Args:
+        query: The raw natural-language question.
+        matched_spans: ``(start, end)`` character offsets, into the LOWERCASED
+            query, of each name/synonym span that matched.
+
+    Returns:
+        The unconsumed, non-stop-word tokens in query order. Empty means the
+        match consumed the whole question and Tier-1 can answer it in full.
+    """
+    lowered = query.lower()
+    # Blank the matched spans rather than slicing them out, so the surviving
+    # tokens keep their original boundaries (a span removal by concatenation
+    # could fuse two neighbouring words into a spurious token).
+    chars = list(lowered)
+    for start, end in matched_spans:
+        for i in range(max(0, start), min(len(chars), end)):
+            chars[i] = " "
+    remainder = "".join(chars)
+    return [t for t in _RESIDUAL_TOKEN_RE.findall(remainder) if t not in _RESIDUAL_STOP_WORDS]
 
 
 def _metric_list_sparql(graph_uri_template: str = "") -> str:
@@ -430,6 +559,10 @@ class MetricResolver:
         ns_lower = namespace.lower()
 
         matched_metrics: dict[str, tuple[MetricDefinition, str]] = {}
+        # Every matched span per metric, for the residual computation. A
+        # question may hit the same metric through several aliases ("total sales
+        # revenue"); all of their spans count as consumed.
+        matched_spans: dict[str, list[tuple[int, int]]] = {}
         snapshot = self._snapshot
 
         # Iterate over all pattern lists (each name may have metrics from multiple namespaces)
@@ -437,16 +570,22 @@ class MetricResolver:
             for pattern, defn in pattern_defn_list:
                 if defn.namespace and defn.namespace.lower() != ns_lower:
                     continue
-                if pattern.search(query_lower):
+                spans = [m.span() for m in pattern.finditer(query_lower)]
+                if spans:
                     matched_metrics[defn.metric_id] = (defn, "name")
+                    matched_spans.setdefault(defn.metric_id, []).extend(spans)
 
         for _syn_lower, pattern_defn_list in snapshot.synonym_patterns.items():
             for pattern, defn in pattern_defn_list:
                 if defn.namespace and defn.namespace.lower() != ns_lower:
                     continue
-                if defn.metric_id in matched_metrics:
+                spans = [m.span() for m in pattern.finditer(query_lower)]
+                if not spans:
                     continue
-                if pattern.search(query_lower):
+                # A metric already matched by NAME keeps match_source="name", but
+                # its synonym spans are still consumed text for residual purposes.
+                matched_spans.setdefault(defn.metric_id, []).extend(spans)
+                if defn.metric_id not in matched_metrics:
                     matched_metrics[defn.metric_id] = (defn, "synonym")
 
         if not matched_metrics:
@@ -454,6 +593,11 @@ class MetricResolver:
 
         first_id = next(iter(matched_metrics))
         defn, source = matched_metrics[first_id]
+
+        spans = matched_spans.get(first_id, [])
+        residual = residual_tokens(query, spans)
+        # Merged, so overlapping aliases don't repeat their shared text.
+        matched_text = " ".join(query_lower[s:e] for s, e in merge_spans(spans))
 
         return MetricMatch(
             found=True,
@@ -465,6 +609,8 @@ class MetricResolver:
             columns=defn.columns,
             match_source=source,
             match_count=len(matched_metrics),
+            matched_text=matched_text,
+            residual=" ".join(residual),
         )
 
     def fuzzy_match(self, query: str, namespace: str) -> MetricMatch:
@@ -497,42 +643,62 @@ class MetricResolver:
         # keeps the hot path cheap even with many metrics.
         matcher = difflib.SequenceMatcher(autojunk=False)
 
-        def _score(target_lc: str) -> float:
+        def _score(target_lc: str) -> tuple[float, tuple[int, int]]:
+            """Best ratio for ``target_lc`` and the winning window's token range.
+
+            The range is ``(start, end)`` indices into ``q_tokens``; the
+            whole-query window spans every token. Returned so the caller can
+            compute the residual — the question tokens the fuzzy hit did NOT
+            account for.
+            """
             matcher.set_seq2(target_lc)
             t_len = max(1, len(target_lc.split()))
-            windows = [" ".join(q_tokens[i : i + t_len]) for i in range(len(q_tokens) - t_len + 1)]
-            windows.append(whole_query)
+            # (window_text, token_range) pairs — the sliding windows first, then
+            # the whole query as a final catch-all.
+            windows = [(" ".join(q_tokens[i : i + t_len]), (i, i + t_len)) for i in range(len(q_tokens) - t_len + 1)]
+            windows.append((whole_query, (0, len(q_tokens))))
             best = 0.0
-            for window in windows:
+            best_range = (0, 0)
+            for window, token_range in windows:
                 matcher.set_seq1(window)
                 # Cheap upper bounds first; skip ratio() when it can't beat best/threshold.
                 bar = max(best, _FUZZY_MATCH_THRESHOLD)
                 if matcher.real_quick_ratio() < bar or matcher.quick_ratio() < bar:
                     continue
-                best = max(best, matcher.ratio())
-            return best
+                ratio = matcher.ratio()
+                if ratio > best:
+                    best, best_range = ratio, token_range
+            return best, best_range
 
         # Use the per-namespace index (+ namespace-agnostic metrics under "") so
         # scoring cost scales with the TARGET namespace's metric count, not the
         # whole catalog (review: a large namespace must not slow lookups in a
         # small one).
         candidates = snapshot.by_namespace.get(ns_lower, []) + snapshot.by_namespace.get("", [])
+        best_range = (0, 0)
         for defn in candidates:
             for target in (defn.name, *defn.synonyms):
                 if not target:
                     continue
-                ratio = _score(target.lower())
+                ratio, token_range = _score(target.lower())
                 if ratio > best_ratio:
-                    best_ratio, best_defn, best_target = ratio, defn, target
+                    best_ratio, best_defn, best_target, best_range = ratio, defn, target, token_range
 
         if not best_defn or best_ratio < _FUZZY_MATCH_THRESHOLD:
             return MetricMatch(found=False, match_count=0)
+
+        # Same residual gate as the exact path: a fuzzy hit also returns the metric's
+        # UNFILTERED SQL, so an unconsumed qualifier is just as wrong here. Token
+        # ranges (not char spans) because fuzzy matches windows, not literals.
+        consumed = set(range(*best_range))
+        residual = [t for i, t in enumerate(q_tokens) if i not in consumed and t not in _RESIDUAL_STOP_WORDS]
 
         logger.info(
             "metric_resolver_fuzzy_match",
             metric=best_defn.metric_id,
             matched_against=best_target,
             ratio=round(best_ratio, 3),
+            residual_token_count=len(residual),
         )
         return MetricMatch(
             found=True,
@@ -545,6 +711,8 @@ class MetricResolver:
             match_source="fuzzy",
             match_count=1,
             match_confidence=round(best_ratio, 3),
+            matched_text=" ".join(q_tokens[best_range[0] : best_range[1]]),
+            residual=" ".join(residual),
         )
 
     def lookup(self, metric_id: str) -> MetricDefinition | None:

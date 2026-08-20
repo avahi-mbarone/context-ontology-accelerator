@@ -132,6 +132,9 @@ class TestSynonymMatch:
         assert result.found
         assert result.metric_name == "total_revenue"
         assert result.match_source == "synonym"
+        # The match still resolves, but "region" is a grouping the metric's fixed
+        # SQL cannot express — reported as residual for the orchestrator's gate.
+        assert result.residual == "region"
 
     async def test_synonym_multi_word_match(self):
         resolver = _make_resolver()
@@ -157,6 +160,194 @@ class TestSynonymMatch:
         # Let's test with something that genuinely fails word boundary
         result = resolver.exact_name_synonym_match("prevenued metrics", "finance")
         assert not result.found
+
+
+@pytest.mark.unit
+class TestResidualQualifierDetection:
+    """A match must report the question text its SQL cannot honour.
+
+    Tier-1 executes a metric's SQL verbatim — it parses no filter, grouping, or
+    time window out of the question. The resolver's job here is only to REPORT
+    what the match left unconsumed; the decision to decline lives in the
+    orchestrator (see ``test_orchestrator.py``).
+    """
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "What is total_revenue?",
+            "what is the revenue?",
+            "how much revenue do we have",
+            "show me the total revenue in USD please",
+            "revenue",
+            # Aggregate/unit scaffolding the metric's own SQL already encodes.
+            # NOTE: "net"/"average" are NOT scaffolding — see
+            # test_aggregate_modifiers_are_not_scaffolding.
+            "what is our total revenue figure in usd",
+        ],
+    )
+    async def test_fully_consumed_question_has_no_residual(self, query):
+        """A bare metric question leaves nothing over → Tier-1 can answer it."""
+        resolver = _make_resolver()
+
+        result = resolver.exact_name_synonym_match(query, "finance")
+        assert result.found
+        assert result.residual == "", f"unexpected residual for {query!r}: {result.residual!r}"
+
+    @pytest.mark.parametrize(
+        ("query", "expected"),
+        [
+            # The four reported shapes: filter, non-existent value,
+            # non-existent entity, and a grouping.
+            ("What is the total revenue for the Gold loyalty tier?", "gold loyalty tier"),
+            ("What is the total revenue for orders shipped to Antarctica?", "orders shipped antarctica"),
+            ("What is the total revenue for our Decaf Reserve line?", "decaf reserve line"),
+            ("revenue by region", "region"),
+            # Time windows are equally inexpressible in a fixed SQL template.
+            ("revenue last quarter", "last quarter"),
+            ("total revenue for 2024", "2024"),
+        ],
+    )
+    async def test_unhandled_qualifier_is_reported_as_residual(self, query, expected):
+        """The exact span Tier-1 cannot honour is surfaced, not silently dropped."""
+        resolver = _make_resolver()
+
+        result = resolver.exact_name_synonym_match(query, "finance")
+        assert result.found
+        assert result.residual == expected
+
+    @pytest.mark.parametrize(
+        ("query", "expected"),
+        [
+            # Aggregate MODIFIERS change which aggregate is asked for. A metric
+            # templating SUM(amount) cannot answer "average revenue" — it would
+            # return the sum and call it an average.
+            ("average revenue", "average"),
+            ("avg revenue", "avg"),
+            ("mean revenue", "mean"),
+            ("net revenue", "net"),
+            ("gross revenue", "gross"),
+            # Relative time words are time windows — an inexpressible qualifier.
+            ("revenue today", "today"),
+            ("current revenue", "current"),
+            ("what is revenue right now", "right now"),
+        ],
+    )
+    async def test_aggregate_modifiers_and_time_words_are_not_scaffolding(self, query, expected):
+        """Words that change the aggregate or add a time window must NOT be stop-words.
+
+        Regression guard: these were all on the stop-word list during development,
+        which silently re-opened the bug — "average revenue" resolved at Tier-1
+        confidence 1.0 and returned the SUM.
+        """
+        resolver = _make_resolver()
+
+        result = resolver.exact_name_synonym_match(query, "finance")
+        assert result.found
+        assert result.residual == expected, f"{query!r} must leave {expected!r} as residual"
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            # Reviewer's case: a chat UI wraps the question in conversational padding.
+            "Hello. What was total revenue. Thank you",
+            "hi what is total revenue thanks",
+            "hey, total revenue?",
+            "what is revenue thank you",
+            "hello, revenue please",
+            "thanks, what is the total revenue",
+            "what is revenue thank you very much",
+        ],
+    )
+    async def test_greetings_and_sign_offs_do_not_trip_the_gate(self, query):
+        """Politeness is padding, not a qualifier — it must not demote a full match.
+
+        Without "hello"/"thanks" as stop-words the gate fired on conversational
+        wrapping alone, sending an otherwise fully-consumed question to Tier 2 for
+        no reason.
+        """
+        resolver = _make_resolver()
+
+        result = resolver.exact_name_synonym_match(query, "finance")
+        assert result.found
+        assert result.residual == "", f"{query!r} is fully consumed; residual was {result.residual!r}"
+
+    @pytest.mark.parametrize(
+        ("query", "expected"),
+        [
+            # "good morning" loses its greeting-hood one word at a time, and that is
+            # deliberate: standalone "morning"/"evening" are time windows, so they
+            # stay off the stop-word list even though it costs a needless Tier-2 hop
+            # on a greeting. Failing toward the gate is the safe direction.
+            ("good morning, what is revenue", "good morning"),
+            ("revenue this morning", "this morning"),
+            ("revenue yesterday evening", "yesterday evening"),
+        ],
+    )
+    async def test_time_bearing_words_in_greetings_still_gate(self, query, expected):
+        """Guard the deliberate gap: greeting stop-words must not swallow time words."""
+        resolver = _make_resolver()
+
+        result = resolver.exact_name_synonym_match(query, "finance")
+        assert result.found
+        assert result.residual == expected
+
+    async def test_matched_text_records_the_consumed_span(self):
+        """``matched_text`` names what the match consumed (trace/debug evidence)."""
+        resolver = _make_resolver()
+
+        result = resolver.exact_name_synonym_match("what is the revenue for the Gold tier?", "finance")
+        assert result.matched_text == "revenue"
+
+    async def test_matched_text_does_not_repeat_overlapping_alias_spans(self):
+        """Overlapping alias hits are merged, not concatenated.
+
+        "revenue" (synonym) and "total_revenue" (name) can both match inside one
+        phrase; rendering each span separately repeated the shared text, so the
+        trace read "total_revenue revenue".
+        """
+        resolver = _make_resolver()
+
+        result = resolver.exact_name_synonym_match("what is total_revenue for the Gold tier?", "finance")
+        assert result.matched_text == "total_revenue"
+
+    async def test_repeated_alias_spans_all_count_as_consumed(self):
+        """Every alias hit is consumed text, so a restated metric is not residual.
+
+        "revenue" and "sales total" both name the SAME metric; a question using
+        both must not treat the second as an unhandled qualifier.
+        """
+        resolver = _make_resolver()
+
+        result = resolver.exact_name_synonym_match("what is the revenue (sales total)?", "finance")
+        assert result.found
+        assert result.metric_name == "total_revenue"
+        assert result.residual == ""
+
+    async def test_fuzzy_match_also_reports_residual(self):
+        """A fuzzy hit returns unfiltered SQL too, so it needs the same signal."""
+        resolver = _make_resolver()
+
+        result = resolver.fuzzy_match("what is total_revenu for the Gold tier?", "finance")
+        assert result.found
+        assert result.match_source == "fuzzy"
+        assert result.residual == "gold tier"
+
+    async def test_fuzzy_match_clean_query_has_no_residual(self):
+        """A bare typo'd metric name is still fully consumed."""
+        resolver = _make_resolver()
+
+        result = resolver.fuzzy_match("what is total_revenu?", "finance")
+        assert result.found
+        assert result.match_source == "fuzzy"
+        assert result.residual == ""
+
+    async def test_residual_survives_punctuation_and_hyphens(self):
+        """Tokenising must not silently drop a hyphenated qualifier."""
+        resolver = _make_resolver()
+
+        result = resolver.exact_name_synonym_match("revenue for west-coast stores", "finance")
+        assert result.residual == "west coast stores"
 
 
 @pytest.mark.unit
