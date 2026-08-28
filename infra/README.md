@@ -180,10 +180,9 @@ these:
    the equivalent Terraform-side report). If they haven't detached
    within `SCL_ENI_WAIT_MAX_SECONDS` (default 600s), the script **stops
    here** rather than proceeding into `cdk destroy`, where
-   `DeleteSecurityGroup` would just fail with `DependencyViolation`.
-   **Currently disabled** in `destroy.sh` (commented out) given the wait
-   time observed in practice — re-enable once a shorter, reliable ENI
-   detach signal is confirmed.
+   `DeleteSecurityGroup` would just fail with `DependencyViolation`. If
+   that happens, the runtimes are already deleted, so re-running the
+   script later skips straight back to this wait.
 3. **Delete VKG's per-namespace ECS services** and wait for them to
    reach `INACTIVE`. These are created outside CFN by the VKG reload
    Lambda reacting to `ontology.published` events, so ECS's
@@ -223,6 +222,17 @@ these:
    explicit `DependsOn` ahead of the custom resource — this isn't a
    missing grant in this repo's code) — the script detects and guides
    through them, it doesn't prevent them.
+6. **(Opt-in, `SCL_DESTROY_MANUAL_RESOURCES=1`) Delete manually-created
+   bridge resources** that live outside CDK entirely and so are left in
+   place by default: the `/${SCL_PREFIX:-coa}/config` SSM parameter
+   (`initialAdminEmail`) and the IAM bridge role named
+   `${SCL_PREFIX:-coa}-dev-smus-admin` (by convention
+   `${resource_prefix}-${env}-smus-admin`), if one was created for SMUS
+   admin access. Left alone by default so a redeploy can reuse the same
+   admin email / bridge role; set the flag to also delete them. The role
+   is only ever deleted by this derived name, never by acting on
+   `SCL_SMUS_ADMIN_ARNS` directly, since that variable can also point at a
+   pre-existing SSO role that must not be touched.
 
 Prompts for confirmation before starting (skip with `SCL_DESTROY_YES=1`,
 e.g. in CI). Steps 1-4 are idempotent — if the script exits early (or a

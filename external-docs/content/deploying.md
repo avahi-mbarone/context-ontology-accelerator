@@ -552,10 +552,11 @@ make destroy-dev
 This runs `scripts/destroy.sh dev`, which orchestrates teardown of resources CFN can't cleanly delete on its own before running `cdk destroy --all`:
 
 1. **Deletes AgentCore Runtimes** (serve + mcp) directly via the Bedrock AgentCore API.
-2. **Waits for AgentCore-owned ENIs to detach** from their security groups — see the [AgentCore ENI wait](#agentcore-eni-wait-can-take-hours) note below. This step is currently a no-op pending a shorter, reliable detach signal.
+2. **Waits for AgentCore-owned ENIs to detach** from their security groups — see the [AgentCore ENI wait](#agentcore-eni-wait-can-take-hours) note below. If they haven't detached within the wait budget, the script stops rather than proceeding into `cdk destroy` (where the security-group delete would just fail); the runtimes are already deleted at that point, so re-running the script later picks up straight back at this wait.
 3. **Deletes VKG's per-namespace ECS services** (created outside CloudFormation by the ontology-reload Lambda) and waits for them to reach `INACTIVE`.
 4. **Force-deletes the DataZone domain** via `delete-domain --skip-deletion-check`, which cascades through every project, asset, and asset type under it — CloudFormation's own delete can't do this (see [FAQ](#why-does-namespace-stack-fail-to-delete-with-domain-not-empty)).
 5. **Runs `cdk destroy --all`**, then verifies no stacks remain.
+6. **(Opt-in, `SCL_DESTROY_MANUAL_RESOURCES=1`) Deletes manually-created bridge resources** that live outside CDK and are otherwise left in place: the `/{prefix}/config` SSM parameter and the IAM bridge role named `{prefix}-{env}-smus-admin` (if one was created for SMUS admin access). Left alone by default so a redeploy can reuse the same admin email/role; only deletes the role by this derived name, never by acting on `SCL_SMUS_ADMIN_ARNS` directly, since that variable can also point at a pre-existing SSO role that must not be touched.
 
 Same environment-variable overrides as `make deploy-dev` — pass the same `SCL_PREFIX` and region you deployed with:
 
@@ -568,9 +569,10 @@ Additional destroy-specific variables:
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `SCL_DESTROY_YES` | unset | Set to `1` to skip the interactive confirmation prompt (e.g. in CI). |
-| `SCL_ENI_WAIT_MAX_SECONDS` | `600` | Max wait for AgentCore ENI detach (step 2 — currently disabled). |
+| `SCL_ENI_WAIT_MAX_SECONDS` | `600` | Max wait for AgentCore ENI detach (step 2). |
 | `SCL_ECS_WAIT_MAX_SECONDS` | `300` | Max wait for VKG ECS services to reach `INACTIVE`. |
 | `SCL_DOMAIN_WAIT_MAX_SECONDS` | `300` | Max wait for the DataZone domain to finish deleting. |
+| `SCL_DESTROY_MANUAL_RESOURCES` | unset | Set to `1` to also delete the `/{prefix}/config` SSM parameter and the `{prefix}-{env}-smus-admin` IAM bridge role (step 6). Left in place by default. |
 
 Steps 1-4 are idempotent — if the script exits early or a step warns and continues, re-running it later picks up from an already-deleted/in-progress state.
 

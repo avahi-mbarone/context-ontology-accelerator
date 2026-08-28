@@ -38,23 +38,25 @@
 #      CFN never attempts (and fails) to delete them itself; this step
 #      is what actually tears the whole tree down.
 #   6. `cdk destroy --all`, then verify no stacks remain.
+#   7. (Opt-in, SCL_DESTROY_MANUAL_RESOURCES=1) Delete the two resources below
+#      that are created outside CDK and so are NOT touched by any of the above.
 #
-# NOT torn down by any of the above: the `/${SCL_PREFIX:-coa}/config` SSM
-# parameter (e.g. `initialAdminEmail`) is created manually via
-# `aws ssm put-parameter`, outside CDK entirely (see infra/bin/app.ts's
-# getConfigFromSSM()) — no stack owns it, so it survives `cdk destroy --all`
-# and is still there on the next `make deploy-dev`. Delete it manually
-# (`aws ssm delete-parameter --name /coa/config`) if a fresh deploy should
-# NOT reuse the same admin email / auth config.
+# NOT torn down by default: the `/${SCL_PREFIX:-coa}/config` SSM parameter
+# (e.g. `initialAdminEmail`) is created manually via `aws ssm put-parameter`,
+# outside CDK entirely (see infra/bin/app.ts's getConfigFromSSM()) — no stack
+# owns it, so it survives `cdk destroy --all` and is still there on the next
+# `make deploy-dev`. Left in place so a redeploy reuses the same admin email /
+# auth config, unless SCL_DESTROY_MANUAL_RESOURCES=1 (step 7) deletes it.
 #
-# ALSO not torn down: any bridge IAM role passed via SCL_SMUS_ADMIN_ARNS (e.g.
-# `coa-dev-smus-admin`) if you created one manually — IAM Identity Center
-# permission-set role ARNs and the account root ARN both fail as
-# NamespaceStack's DomainLoginRole trust-policy principal (see HANDOFF.md),
-# so a manually-created bridge role is often needed. It's a plain `aws iam
-# create-role`, not a stack resource, so `cdk destroy --all` leaves it behind.
-# Delete manually (`aws iam delete-role --role-name coa-dev-smus-admin`) if
-# no longer needed.
+# ALSO not torn down by default: the bridge IAM role, named by convention
+# `${STACK_PREFIX}-smus-admin` (e.g. `coa-dev-smus-admin`), if you created one
+# manually — IAM Identity Center permission-set role ARNs and the account root
+# ARN both fail as NamespaceStack's DomainLoginRole trust-policy principal
+# (see HANDOFF.md), so a manually-created bridge role is often needed. It's a
+# plain `aws iam create-role`, not a stack resource, so `cdk destroy --all`
+# leaves it behind. Step 7 (SCL_DESTROY_MANUAL_RESOURCES=1) deletes it by this
+# derived name only — never by blindly acting on SCL_SMUS_ADMIN_ARNS, since
+# that var can also point at a pre-existing SSO role this script must not touch.
 #
 # Mirrors deploy.sh's context resolution so `make destroy-dev` tears
 # down exactly what `make deploy-dev` created.
@@ -115,6 +117,11 @@ if ! command -v aws >/dev/null 2>&1 || ! aws sts get-caller-identity >/dev/null 
 fi
 ok "AWS credentials valid ($(aws sts get-caller-identity --query Account --output text 2>/dev/null))"
 
+BRIDGE_ROLE_NAME="${STACK_PREFIX}-smus-admin"
+if [ "${SCL_DESTROY_MANUAL_RESOURCES:-}" = "1" ]; then
+  info "SCL_DESTROY_MANUAL_RESOURCES=1: will also delete SSM parameter ${SSM_PREFIX}/config and IAM role $BRIDGE_ROLE_NAME (step 7/7)."
+fi
+
 if [ -t 0 ] && [ "${SCL_DESTROY_YES:-}" != "1" ]; then
   echo ""
   read -r -p "Destroy all '${STACK_PREFIX}-*' stacks in $REGION? Type 'yes' to continue: " CONFIRM
@@ -131,7 +138,7 @@ arn_id() { echo "$1" | awk -F/ '{print $NF}'; }
 
 # ── Step 1: Delete AgentCore Runtimes ──────────────────────────────────────
 echo ""
-echo "=== Step 1/6: Delete AgentCore Runtimes ==="
+echo "=== Step 1/7: Delete AgentCore Runtimes ==="
 
 RUNTIME_ARNS=()
 for PARAM in "${SSM_PREFIX}/serve/runtime-arn" "${SSM_PREFIX}/mcp/runtime-arn"; do
@@ -183,7 +190,7 @@ fi
 
 # ── Step 2: Wait for AgentCore ENIs to detach ─────────────────────────────
 echo ""
-echo "=== Step 2/6: Wait for AgentCore Runtime ENIs to detach ==="
+echo "=== Step 2/7: Wait for AgentCore Runtime ENIs to detach ==="
 
 if [ ${#AGENTCORE_SG_IDS[@]} -eq 0 ]; then
   ok "No AgentCore security groups found — nothing to wait on."
@@ -243,7 +250,7 @@ fi
 
 # ── Step 3: Delete VKG ECS services and wait ──────────────────────────────
 echo ""
-echo "=== Step 3/6: Delete VKG cluster services ==="
+echo "=== Step 3/7: Delete VKG cluster services ==="
 
 VKG_CLUSTER="${STACK_PREFIX}-vkg-cluster"
 SERVICE_ARNS=()
@@ -328,7 +335,7 @@ fi
 # ── Step 4: Delete Cloud Map services (CFN owns the namespace, not the
 # services registered inside it) ──────────────────────────────────────────
 echo ""
-echo "=== Step 4/6: Delete Cloud Map services ==="
+echo "=== Step 4/7: Delete Cloud Map services ==="
 
 # Scoped by namespace NAME, which carries the prefix and env
 # (`${this.prefixed("services")}.local` in network-stack.ts). Service names
@@ -425,7 +432,7 @@ fi
 # assets, and asset types that CFN's own DeleteDomain/DeleteProject calls
 # cannot clear on their own) ──────────────────────────────────────────────
 echo ""
-echo "=== Step 5/6: Delete DataZone domain ==="
+echo "=== Step 5/7: Delete DataZone domain ==="
 
 DOMAIN_ID=$(aws ssm get-parameter --name "${SSM_PREFIX}/smus/domain-id" \
   --region "$REGION" --query 'Parameter.Value' --output text 2>/dev/null || echo "")
@@ -519,7 +526,7 @@ fi
 
 # ── Step 5: cdk destroy --all, then verify ────────────────────────────────
 echo ""
-echo "=== Step 6/6: cdk destroy --all ==="
+echo "=== Step 6/7: cdk destroy --all ==="
 echo "CDK context: $CONTEXT"
 pnpm --filter coa-infra exec cdk destroy --all $CONTEXT --force
 DESTROY_EXIT=$?
@@ -600,4 +607,71 @@ for e in json.load(sys.stdin):
 fi
 
 echo "All '${STACK_PREFIX}-*' stacks deleted cleanly."
+
+# ── Step 7: Delete manually-created bridge resources (opt-in) ────────────
+echo ""
+echo "=== Step 7/7: Delete manually-created bridge resources ==="
+
+if [ "${SCL_DESTROY_MANUAL_RESOURCES:-}" != "1" ]; then
+  info "Skipping — SSM parameter ${SSM_PREFIX}/config and IAM role $BRIDGE_ROLE_NAME"
+  info "are left in place so a redeploy can reuse them. Set"
+  info "SCL_DESTROY_MANUAL_RESOURCES=1 to also delete them."
+else
+  CONFIG_PARAM="${SSM_PREFIX}/config"
+  if aws ssm delete-parameter --name "$CONFIG_PARAM" --region "$REGION" >/dev/null 2>&1; then
+    ok "Deleted SSM parameter $CONFIG_PARAM"
+  else
+    ok "SSM parameter $CONFIG_PARAM already gone (or never set)."
+  fi
+
+  # Only ever delete the role by this repo's own naming convention — never by
+  # blindly acting on SCL_SMUS_ADMIN_ARNS, which can also point at a
+  # pre-existing SSO permission-set role this script must not touch.
+  if ! aws iam get-role --role-name "$BRIDGE_ROLE_NAME" >/dev/null 2>&1; then
+    ok "IAM role $BRIDGE_ROLE_NAME not found — already deleted or never created."
+  else
+    info "Deleting IAM bridge role $BRIDGE_ROLE_NAME ..."
+
+    while IFS= read -r POLICY_ARN; do
+      [ -z "$POLICY_ARN" ] && continue
+      if aws iam detach-role-policy --role-name "$BRIDGE_ROLE_NAME" --policy-arn "$POLICY_ARN" >/dev/null 2>&1; then
+        info "  detached managed policy $POLICY_ARN"
+      else
+        warn "  failed to detach managed policy $POLICY_ARN"
+      fi
+    done < <(aws iam list-attached-role-policies --role-name "$BRIDGE_ROLE_NAME" \
+      --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null | tr '\t' '\n')
+
+    while IFS= read -r POLICY_NAME; do
+      [ -z "$POLICY_NAME" ] && continue
+      if aws iam delete-role-policy --role-name "$BRIDGE_ROLE_NAME" --policy-name "$POLICY_NAME" >/dev/null 2>&1; then
+        info "  deleted inline policy $POLICY_NAME"
+      else
+        warn "  failed to delete inline policy $POLICY_NAME"
+      fi
+    done < <(aws iam list-role-policies --role-name "$BRIDGE_ROLE_NAME" \
+      --query 'PolicyNames[]' --output text 2>/dev/null | tr '\t' '\n')
+
+    while IFS= read -r PROFILE_NAME; do
+      [ -z "$PROFILE_NAME" ] && continue
+      if aws iam remove-role-from-instance-profile --role-name "$BRIDGE_ROLE_NAME" \
+          --instance-profile-name "$PROFILE_NAME" >/dev/null 2>&1; then
+        info "  removed from instance profile $PROFILE_NAME"
+      else
+        warn "  failed to remove from instance profile $PROFILE_NAME"
+      fi
+    done < <(aws iam list-instance-profiles-for-role --role-name "$BRIDGE_ROLE_NAME" \
+      --query 'InstanceProfiles[].InstanceProfileName' --output text 2>/dev/null | tr '\t' '\n')
+
+    if aws iam delete-role --role-name "$BRIDGE_ROLE_NAME" >/dev/null 2>&1; then
+      ok "Deleted IAM role $BRIDGE_ROLE_NAME"
+    else
+      warn "delete-role failed for $BRIDGE_ROLE_NAME — check for remaining attachments:"
+      warn "  aws iam list-attached-role-policies --role-name $BRIDGE_ROLE_NAME"
+      warn "  aws iam list-role-policies --role-name $BRIDGE_ROLE_NAME"
+      warn "  aws iam list-instance-profiles-for-role --role-name $BRIDGE_ROLE_NAME"
+    fi
+  fi
+fi
+
 exit $DESTROY_EXIT
