@@ -208,7 +208,28 @@ these:
    `RemovalPolicy.RETAIN` in `namespace-stack.ts` so CFN never attempts
    (and fails) to delete any of them itself — this step is what actually
    tears the whole tree down.
-5. **`cdk destroy --all`** with the same context resolution as
+5. **Delete GuardDuty-managed VPC resources** in the network stack's VPC.
+   GuardDuty's extended threat detection auto-creates an interface endpoint
+   (e.g. `com.amazonaws.<region>.guardduty-data`) plus its own security
+   group in monitored VPCs, entirely outside CloudFormation, so `cdk
+   destroy` doesn't know about either — identified via the
+   `GuardDutyManaged=true` tag GuardDuty applies to both. The endpoint's
+   ENIs sit in the VPC's subnets and CFN's `DeleteSubnet` fails with "has
+   dependencies and cannot be deleted" while any remain; even after the
+   endpoint (and its ENIs) are gone, the orphaned
+   `GuardDutyManagedSecurityGroup-*` it leaves behind still blocks
+   `DeleteVpc` the same way, since a VPC can't be deleted while any
+   non-default security group remains in it (confirmed against a real
+   stuck `coa-dev-network` stack — failed first on the subnets, then again
+   on the VPC itself after the endpoint alone was cleared). Since the
+   whole VPC is being torn down anyway, nothing depends on keeping either;
+   the script deletes the endpoint, waits (up to
+   `SCL_GUARDDUTY_ENDPOINT_WAIT_MAX_SECONDS`, default 300s) for its ENIs to
+   detach, then deletes the security group — all before `cdk destroy` runs.
+   If some other, unrelated resource causes the same subnet/VPC failure,
+   the post-destroy verification below recognizes the "has dependencies"
+   error and points at the culprit.
+6. **`cdk destroy --all`** with the same context resolution as
    `deploy.sh` (`SCL_PREFIX`, `SCL_PROJECT_TAG`, `SCL_APN_TAG`, `SCL_VPC_ID`
    env vars are honored), then verify no `${SCL_PREFIX:-coa}-dev-*` stacks remain.
    If any stack is `DELETE_FAILED`, the script scans its stack events for
@@ -222,7 +243,7 @@ these:
    explicit `DependsOn` ahead of the custom resource — this isn't a
    missing grant in this repo's code) — the script detects and guides
    through them, it doesn't prevent them.
-6. **(Opt-in, `SCL_DESTROY_MANUAL_RESOURCES=1`) Delete manually-created
+7. **(Opt-in, `SCL_DESTROY_MANUAL_RESOURCES=1`) Delete manually-created
    bridge resources** that live outside CDK entirely and so are left in
    place by default: the `/${SCL_PREFIX:-coa}/config` SSM parameter
    (`initialAdminEmail`) and the IAM bridge role named

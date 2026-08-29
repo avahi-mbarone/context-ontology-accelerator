@@ -587,3 +587,62 @@ updated cleanly, runtime `READY`, total deploy 202s.
   ownership-graph traversal, and doesn't select supporting columns) — a real
   follow-up worth a NL→SQL prompt-engineering pass, but out of scope for this fix
   and not a defect in the orchestration change itself.
+
+## Eighth real bug hit and fixed: `make destroy-dev` stuck on GuardDuty-managed VPC resources
+
+Hit while tearing down `coa-dev` (2026-08-29). `cdk destroy --all` got through 15/16
+stacks cleanly, then `coa-dev-network` failed twice in a row on two different
+resources, both for the same underlying reason:
+
+```
+coa-dev-network | DELETE_FAILED | AWS::EC2::Subnet | VpcPublicSubnet1Subnet5C2D37C4
+Resource handler returned message: "The subnet 'subnet-0123456789abcdef0' has
+dependencies and cannot be deleted."
+```
+
+then, after that was resolved manually and the script re-run:
+
+```
+coa-dev-network | DELETE_FAILED | AWS::EC2::VPC | Vpc8378EB38
+Resource handler returned message: "The vpc 'vpc-0123456789abcdef0' has
+dependencies and cannot be deleted."
+```
+
+**Root cause**: AWS GuardDuty's extended threat detection auto-provisions an
+interface VPC endpoint (`com.amazonaws.<region>.guardduty-data`) and its own
+security group (`GuardDutyManagedSecurityGroup-<vpc-id>`) in every monitored VPC —
+both tagged `GuardDutyManaged=true`, both created entirely outside CloudFormation.
+`cdk destroy` has no way to know about either:
+- The endpoint's ENIs (one per AZ/subnet) sit in the VPC's subnets, so CFN's
+  `DeleteSubnet` fails with "has dependencies and cannot be deleted" while any
+  remain — confirmed via `aws ec2 describe-network-interfaces --filters
+  Name=subnet-id,Values=<subnet-id>`, which showed the endpoint's ENI as the only
+  thing left in each stuck subnet.
+- Deleting the endpoint (`aws ec2 delete-vpc-endpoints`) does *not* delete its
+  security group. Once the subnets cleared and `cdk destroy` retried the VPC
+  itself, it failed the same way for the same reason one level up: `aws ec2
+  describe-security-groups --filters Name=vpc-id,Values=<vpc-id>` showed the
+  orphaned `GuardDutyManagedSecurityGroup-*` as the only non-default group left,
+  and a VPC can't be deleted while any non-default security group remains in it.
+
+Neither resource is something this repo (or GuardDuty's account-wide policy)
+needs preserved — the whole VPC was being destroyed anyway.
+
+**Fixed**: `scripts/destroy.sh` gained a new, unconditional (not opt-in) **Step
+6/8**, inserted right before `cdk destroy --all`: resolve the network stack's VPC
+ID via `aws cloudformation describe-stack-resources`, then find and delete any
+`GuardDutyManaged=true`-tagged VPC endpoints (waiting up to
+`SCL_GUARDDUTY_ENDPOINT_WAIT_MAX_SECONDS`, default 300s, for their ENIs to detach)
+and any `GuardDutyManaged=true`-tagged security groups. The post-destroy
+verification's known-issue scanner also gained a reactive fallback: it now
+recognizes "has dependencies and cannot be deleted" on `AWS::EC2::Subnet` or
+`AWS::EC2::VPC` physical IDs and prints the exact `describe-network-interfaces`/
+`describe-security-groups` command to find whatever's still attached, in case some
+other (non-GuardDuty) resource causes the same failure in a different account/VPC
+configuration. Documented in `infra/README.md` and
+`external-docs/content/deploying.md`'s teardown sections.
+
+**Verified**: re-ran `make destroy-dev` after the fix (GuardDuty resources already
+cleared manually by this point) — Step 6/8 correctly reported "No GuardDuty-managed
+VPC endpoints/security groups found" (idempotent no-op once already clean), and
+`coa-dev-network` deleted cleanly on the retry with no manual intervention needed.
