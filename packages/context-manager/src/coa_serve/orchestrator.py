@@ -236,6 +236,7 @@ class Orchestrator:
         gating = await self._resolve_source_gating(namespace, tier_override, trace)
 
         tier2_sparql: str | None = None
+        tier2_structured_data: list[dict] | None = None
         metric_definitions: list[dict] | None = None
 
         # ── Agentic mode owns the whole request ──────────────────────
@@ -284,7 +285,7 @@ class Orchestrator:
         if await self._should_run_tier2(
             strategy, gating, tier_override, options, query, namespace, query_embedding, trace
         ):
-            strategy_result, tier2_sparql = await self._run_tier2(
+            strategy_result, tier2_sparql, tier2_structured_data = await self._run_tier2(
                 query,
                 namespace,
                 profile,
@@ -310,6 +311,7 @@ class Orchestrator:
                 trace,
                 profile=profile,
                 tier2_sparql=tier2_sparql,
+                tier2_structured_data=tier2_structured_data,
                 metric_definitions=metric_definitions,
                 embedding=None if gating.skip_tier3_vector_search else query_embedding,
                 on_token=on_token,
@@ -617,11 +619,16 @@ class Orchestrator:
         strategy_selection: StrategyOption,
         tier_override: int | None,
         model_id: str | None = None,
-    ) -> tuple[InvokeResponse | None, str | None]:
-        """Run Tier 2 strategies and return (response, sparql_for_tier3_grounding).
+    ) -> tuple[InvokeResponse | None, str | None, list[dict] | None]:
+        """Run Tier 2 strategies and return (response, sparql_for_tier3_grounding, low_confidence_rows).
 
         Called only when a strategy applies, so ``strategy_selection`` is always a
         real StrategyOption (never a skip sentinel).
+
+        ``low_confidence_rows`` is populated only when a result was discarded by
+        the confidence gate below and had rows worth handing to Tier 3 as
+        best-effort ``structured_data`` — it is always None alongside a non-None
+        response.
         """
         context = StrategyContext(
             embedding=embedding,
@@ -632,6 +639,8 @@ class Orchestrator:
         )
 
         result = await self._structured_query_tier.resolve(query, namespace, context, option=strategy_selection)
+        discarded_rows: list[dict] | None = None
+        discarded_sparql: str | None = None
 
         if result is not None:
             max_rows = capped_max_rows(options)
@@ -641,11 +650,15 @@ class Orchestrator:
                 result = _replace(result, rows=result.rows[:max_rows], row_count=max_rows, truncated=True)
 
             # Confidence gate: a Tier-2 result below the floor is not a usable
-            # structured answer even when it returned rows — the strategy scraped
-            # together a query it wasn't confident in (e.g. a knowledge question
-            # forced through NL→SQL/VKG). Unless the caller pinned Tier 2, drop it
-            # to None so we fall through to Tier 3. Mirrors is_low_confidence_empty
-            # but also covers non-empty low-confidence results.
+            # STRUCTURED-answer-with-citations Tier-2 response even when it
+            # returned rows — the strategy scraped together a query it wasn't
+            # confident in (e.g. a knowledge question forced through NL→SQL/VKG).
+            # Unless the caller pinned Tier 2, drop the response and fall through
+            # to Tier 3 — but preserve the rows/sparql so Tier 3 can still use them
+            # as best-effort structured_data instead of losing them outright (the
+            # gate is about response *shape/confidence*, not "the data is wrong").
+            # Mirrors is_low_confidence_empty but also covers non-empty low-confidence
+            # results.
             if tier_override != 2 and result.confidence < EMPTY_RESULT_CONFIDENCE_FLOOR:
                 logger.info(
                     "tier2_low_confidence_fallthrough",
@@ -654,6 +667,8 @@ class Orchestrator:
                     strategy=result.strategy_name,
                     namespace=namespace,
                 )
+                discarded_rows = result.rows or None
+                discarded_sparql = result.sparql or None
                 result = None
 
         if result is None:
@@ -675,7 +690,7 @@ class Orchestrator:
                 namespace=namespace,
                 failure_reason="all_strategies_failed",
             )
-            return None, None
+            return None, discarded_sparql, discarded_rows
 
         logger.info(
             "tier2_accepted",
@@ -686,7 +701,7 @@ class Orchestrator:
         )
 
         response = self._strategy_result_to_response(result, trace, namespace, profile, model_id=model_id)
-        return response, result.sparql or None
+        return response, result.sparql or None, None
 
     def _strategy_result_to_response(
         self,
@@ -1052,6 +1067,7 @@ class Orchestrator:
         *,
         profile: dict | None = None,
         tier2_sparql: str | None = None,
+        tier2_structured_data: list[dict] | None = None,
         metric_definitions: list[dict] | None = None,
         embedding: list[float] | None = None,
         on_token: Callable[[str], Awaitable[None]] | None = None,
@@ -1139,7 +1155,12 @@ class Orchestrator:
             embedding=embedding,
             entity_uris=entity_uris or None,
             tier2_sparql_hint=tier2_sparql,
-            structured_data=None,
+            # Rows a Tier-2 strategy produced but that fell below the confidence
+            # floor for a standalone structured answer (orchestrator._run_tier2)
+            # — still real query results, so pass them through as best-effort
+            # context instead of discarding them. None when Tier 2 didn't run or
+            # its result was confident enough to return directly (no fallthrough).
+            structured_data=tier2_structured_data,
             catalog_summary=metric_definitions,
             on_token=on_token,
             conversation_history=conversation_history,

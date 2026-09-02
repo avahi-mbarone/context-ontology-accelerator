@@ -37,24 +37,34 @@
 #      grants, etc.) are RemovalPolicy.RETAIN in namespace-stack.ts so
 #      CFN never attempts (and fails) to delete them itself; this step
 #      is what actually tears the whole tree down.
-#   6. `cdk destroy --all`, then verify no stacks remain.
+#   6. Delete any GuardDuty-managed interface VPC endpoints (e.g.
+#      `com.amazonaws.<region>.guardduty-data`) in the network stack's VPC.
+#      GuardDuty's extended threat detection auto-creates these outside
+#      CloudFormation entirely, so `cdk destroy` doesn't know about them —
+#      but their ENIs sit in the VPC's subnets, and CFN's DeleteSubnet fails
+#      with "has dependencies and cannot be deleted" while any remain
+#      (confirmed against a real stuck coa-dev-network stack). Since the
+#      whole VPC is being torn down anyway, nothing depends on keeping them.
+#   7. `cdk destroy --all`, then verify no stacks remain.
+#   8. (Opt-in, SCL_DESTROY_MANUAL_RESOURCES=1) Delete the two resources below
+#      that are created outside CDK and so are NOT touched by any of the above.
 #
-# NOT torn down by any of the above: the `/${SCL_PREFIX:-coa}/config` SSM
-# parameter (e.g. `initialAdminEmail`) is created manually via
-# `aws ssm put-parameter`, outside CDK entirely (see infra/bin/app.ts's
-# getConfigFromSSM()) — no stack owns it, so it survives `cdk destroy --all`
-# and is still there on the next `make deploy-dev`. Delete it manually
-# (`aws ssm delete-parameter --name /coa/config`) if a fresh deploy should
-# NOT reuse the same admin email / auth config.
+# NOT torn down by default: the `/${SCL_PREFIX:-coa}/config` SSM parameter
+# (e.g. `initialAdminEmail`) is created manually via `aws ssm put-parameter`,
+# outside CDK entirely (see infra/bin/app.ts's getConfigFromSSM()) — no stack
+# owns it, so it survives `cdk destroy --all` and is still there on the next
+# `make deploy-dev`. Left in place so a redeploy reuses the same admin email /
+# auth config, unless SCL_DESTROY_MANUAL_RESOURCES=1 (step 8) deletes it.
 #
-# ALSO not torn down: any bridge IAM role passed via SCL_SMUS_ADMIN_ARNS (e.g.
-# `coa-dev-smus-admin`) if you created one manually — IAM Identity Center
-# permission-set role ARNs and the account root ARN both fail as
-# NamespaceStack's DomainLoginRole trust-policy principal (see HANDOFF.md),
-# so a manually-created bridge role is often needed. It's a plain `aws iam
-# create-role`, not a stack resource, so `cdk destroy --all` leaves it behind.
-# Delete manually (`aws iam delete-role --role-name coa-dev-smus-admin`) if
-# no longer needed.
+# ALSO not torn down by default: the bridge IAM role, named by convention
+# `${STACK_PREFIX}-smus-admin` (e.g. `coa-dev-smus-admin`), if you created one
+# manually — IAM Identity Center permission-set role ARNs and the account root
+# ARN both fail as NamespaceStack's DomainLoginRole trust-policy principal
+# (see HANDOFF.md), so a manually-created bridge role is often needed. It's a
+# plain `aws iam create-role`, not a stack resource, so `cdk destroy --all`
+# leaves it behind. Step 8 (SCL_DESTROY_MANUAL_RESOURCES=1) deletes it by this
+# derived name only — never by blindly acting on SCL_SMUS_ADMIN_ARNS, since
+# that var can also point at a pre-existing SSO role this script must not touch.
 #
 # Mirrors deploy.sh's context resolution so `make destroy-dev` tears
 # down exactly what `make deploy-dev` created.
@@ -115,6 +125,11 @@ if ! command -v aws >/dev/null 2>&1 || ! aws sts get-caller-identity >/dev/null 
 fi
 ok "AWS credentials valid ($(aws sts get-caller-identity --query Account --output text 2>/dev/null))"
 
+BRIDGE_ROLE_NAME="${STACK_PREFIX}-smus-admin"
+if [ "${SCL_DESTROY_MANUAL_RESOURCES:-}" = "1" ]; then
+  info "SCL_DESTROY_MANUAL_RESOURCES=1: will also delete SSM parameter ${SSM_PREFIX}/config and IAM role $BRIDGE_ROLE_NAME (step 8/8)."
+fi
+
 if [ -t 0 ] && [ "${SCL_DESTROY_YES:-}" != "1" ]; then
   echo ""
   read -r -p "Destroy all '${STACK_PREFIX}-*' stacks in $REGION? Type 'yes' to continue: " CONFIRM
@@ -131,7 +146,7 @@ arn_id() { echo "$1" | awk -F/ '{print $NF}'; }
 
 # ── Step 1: Delete AgentCore Runtimes ──────────────────────────────────────
 echo ""
-echo "=== Step 1/6: Delete AgentCore Runtimes ==="
+echo "=== Step 1/8: Delete AgentCore Runtimes ==="
 
 RUNTIME_ARNS=()
 for PARAM in "${SSM_PREFIX}/serve/runtime-arn" "${SSM_PREFIX}/mcp/runtime-arn"; do
@@ -183,7 +198,7 @@ fi
 
 # ── Step 2: Wait for AgentCore ENIs to detach ─────────────────────────────
 echo ""
-echo "=== Step 2/6: Wait for AgentCore Runtime ENIs to detach ==="
+echo "=== Step 2/8: Wait for AgentCore Runtime ENIs to detach ==="
 
 if [ ${#AGENTCORE_SG_IDS[@]} -eq 0 ]; then
   ok "No AgentCore security groups found — nothing to wait on."
@@ -243,7 +258,7 @@ fi
 
 # ── Step 3: Delete VKG ECS services and wait ──────────────────────────────
 echo ""
-echo "=== Step 3/6: Delete VKG cluster services ==="
+echo "=== Step 3/8: Delete VKG cluster services ==="
 
 VKG_CLUSTER="${STACK_PREFIX}-vkg-cluster"
 SERVICE_ARNS=()
@@ -328,7 +343,7 @@ fi
 # ── Step 4: Delete Cloud Map services (CFN owns the namespace, not the
 # services registered inside it) ──────────────────────────────────────────
 echo ""
-echo "=== Step 4/6: Delete Cloud Map services ==="
+echo "=== Step 4/8: Delete Cloud Map services ==="
 
 # Scoped by namespace NAME, which carries the prefix and env
 # (`${this.prefixed("services")}.local` in network-stack.ts). Service names
@@ -425,7 +440,7 @@ fi
 # assets, and asset types that CFN's own DeleteDomain/DeleteProject calls
 # cannot clear on their own) ──────────────────────────────────────────────
 echo ""
-echo "=== Step 5/6: Delete DataZone domain ==="
+echo "=== Step 5/8: Delete DataZone domain ==="
 
 DOMAIN_ID=$(aws ssm get-parameter --name "${SSM_PREFIX}/smus/domain-id" \
   --region "$REGION" --query 'Parameter.Value' --output text 2>/dev/null || echo "")
@@ -517,9 +532,125 @@ else
   done
 fi
 
-# ── Step 5: cdk destroy --all, then verify ────────────────────────────────
+# ── Step 6: Delete GuardDuty-managed VPC resources ────────────────────────
+# GuardDuty's extended threat detection auto-creates an interface VPC
+# endpoint (e.g. com.amazonaws.<region>.guardduty-data) plus its own security
+# group in monitored VPCs, entirely outside CloudFormation — cdk destroy has
+# no way to know about either. The endpoint's ENIs sit in the VPC's subnets
+# and block AWS::EC2::Subnet deletion with "has dependencies and cannot be
+# deleted"; even after the endpoint (and its ENIs) are gone, the orphaned
+# GuardDutyManagedSecurityGroup-* it leaves behind still blocks
+# AWS::EC2::VPC deletion the same way, since a VPC can't be deleted while
+# any non-default security group remains in it (confirmed against a real
+# stuck coa-dev-network stack — DELETE_FAILED first on the subnets, then
+# again on the VPC itself after the endpoint alone was cleared). Since the
+# whole VPC is being torn down anyway, clear both before cdk destroy runs.
 echo ""
-echo "=== Step 6/6: cdk destroy --all ==="
+echo "=== Step 6/8: Delete GuardDuty-managed VPC resources ==="
+
+NETWORK_STACK="${STACK_PREFIX}-network"
+VPC_ID=$(aws cloudformation describe-stack-resources --stack-name "$NETWORK_STACK" --region "$REGION" \
+  --query "StackResources[?ResourceType=='AWS::EC2::VPC'].PhysicalResourceId | [0]" --output text 2>/dev/null || echo "")
+
+if [ -z "$VPC_ID" ] || [ "$VPC_ID" == "None" ]; then
+  ok "Network stack '$NETWORK_STACK' or its VPC not found — nothing to check."
+else
+  GD_ENDPOINT_IDS=()
+  while IFS= read -r EP_ID; do
+    [ -n "$EP_ID" ] && GD_ENDPOINT_IDS+=("$EP_ID")
+  done < <(aws ec2 describe-vpc-endpoints --region "$REGION" \
+    --filters "Name=vpc-id,Values=$VPC_ID" "Name=tag:GuardDutyManaged,Values=true" \
+    --query 'VpcEndpoints[].VpcEndpointId' --output text 2>/dev/null | tr '\t' '\n')
+
+  if [ ${#GD_ENDPOINT_IDS[@]} -eq 0 ]; then
+    ok "No GuardDuty-managed VPC endpoints found in $VPC_ID."
+  else
+    info "Deleting ${#GD_ENDPOINT_IDS[@]} GuardDuty-managed VPC endpoint(s): ${GD_ENDPOINT_IDS[*]}"
+    if aws ec2 delete-vpc-endpoints --region "$REGION" --vpc-endpoint-ids "${GD_ENDPOINT_IDS[@]}" >/dev/null 2>&1; then
+      ok "Deleted GuardDuty-managed VPC endpoint(s)."
+    else
+      warn "delete-vpc-endpoints failed — 'cdk destroy' may hit DELETE_FAILED on"
+      warn "the network stack's subnets. Check manually:"
+      warn "  aws ec2 describe-vpc-endpoints --vpc-endpoint-ids ${GD_ENDPOINT_IDS[*]}"
+    fi
+
+    # Endpoint ENI teardown is asynchronous (observed to take a few minutes),
+    # so wait for them to clear before cdk destroy tries to delete the
+    # subnets they live in (and before we try to delete the endpoint's
+    # security group below, which fails while any ENI still uses it).
+    GUARDDUTY_ENDPOINT_WAIT_MAX_SECONDS="${SCL_GUARDDUTY_ENDPOINT_WAIT_MAX_SECONDS:-300}"
+    DEADLINE=$(( $(date +%s) + GUARDDUTY_ENDPOINT_WAIT_MAX_SECONDS ))
+    while true; do
+      TOTAL_ENIS=0
+      ENI_API_FAILED=false
+      for EP_ID in "${GD_ENDPOINT_IDS[@]}"; do
+        ENI_ERR=$(mktemp)
+        # AWS describes interface-endpoint ENIs as "VPC Endpoint Interface: <id>"
+        # (colon included) — match with a wildcard rather than depending on the
+        # exact separator.
+        if COUNT=$(aws ec2 describe-network-interfaces --region "$REGION" \
+            --filters "Name=vpc-id,Values=$VPC_ID" "Name=description,Values=*$EP_ID*" \
+            --query 'length(NetworkInterfaces)' --output text 2>"$ENI_ERR"); then
+          TOTAL_ENIS=$((TOTAL_ENIS + COUNT))
+        else
+          ENI_API_FAILED=true
+          warn "describe-network-interfaces failed for endpoint $EP_ID: $(cat "$ENI_ERR")"
+        fi
+        rm -f "$ENI_ERR"
+      done
+
+      if [ "$ENI_API_FAILED" = true ]; then
+        warn "API call(s) failed — not treating as 'ENIs detached', retrying..."
+      elif [ "$TOTAL_ENIS" -eq 0 ]; then
+        ok "GuardDuty-managed VPC endpoint ENIs detached."
+        break
+      fi
+
+      if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+        warn "GuardDuty endpoint ENI(s) still present or unconfirmed after"
+        warn "${GUARDDUTY_ENDPOINT_WAIT_MAX_SECONDS}s — proceeding anyway;"
+        warn "'cdk destroy' may fail on the network stack's subnets if they"
+        warn "haven't detached yet. Re-run this script if that happens."
+        break
+      fi
+
+      info "GuardDuty endpoint ENI(s) still attached or unconfirmed, waiting 15s..."
+      sleep 15
+    done
+  fi
+
+  # The endpoint's security group survives its own deletion (GuardDuty
+  # creates it, but nothing deletes it when the endpoint goes away) and
+  # blocks DeleteVpc on its own even once the endpoint and its ENIs are
+  # long gone. Not scoped to GD_ENDPOINT_IDS above — check independently so
+  # a security group orphaned by an endpoint deleted in a prior run (or
+  # manually) still gets cleared.
+  GD_SG_IDS=()
+  while IFS= read -r SG_ID; do
+    [ -n "$SG_ID" ] && GD_SG_IDS+=("$SG_ID")
+  done < <(aws ec2 describe-security-groups --region "$REGION" \
+    --filters "Name=vpc-id,Values=$VPC_ID" "Name=tag:GuardDutyManaged,Values=true" \
+    --query 'SecurityGroups[].GroupId' --output text 2>/dev/null | tr '\t' '\n')
+
+  if [ ${#GD_SG_IDS[@]} -eq 0 ]; then
+    ok "No GuardDuty-managed security groups found in $VPC_ID."
+  else
+    for SG_ID in "${GD_SG_IDS[@]}"; do
+      if aws ec2 delete-security-group --region "$REGION" --group-id "$SG_ID" >/dev/null 2>&1; then
+        ok "Deleted GuardDuty-managed security group $SG_ID"
+      else
+        warn "delete-security-group failed for $SG_ID — 'cdk destroy' may hit"
+        warn "DELETE_FAILED on the VPC itself (\"has dependencies and cannot"
+        warn "be deleted\"). Check manually:"
+        warn "  aws ec2 describe-security-groups --group-ids $SG_ID"
+      fi
+    done
+  fi
+fi
+
+# ── Step 7: cdk destroy --all, then verify ────────────────────────────────
+echo ""
+echo "=== Step 7/8: cdk destroy --all ==="
 echo "CDK context: $CONTEXT"
 pnpm --filter coa-infra exec cdk destroy --all $CONTEXT --force
 DESTROY_EXIT=$?
@@ -584,6 +715,42 @@ if [ -n "$REMAINING" ]; then
           echo "        --output json --query '{Objects: Versions[].{Key:Key,VersionId:VersionId}}')\"" >&2
           echo "" >&2
           ;;
+        *"has dependencies and cannot be deleted"*)
+          case "$PHYSICAL_ID" in
+            subnet-*)
+              echo "KNOWN ISSUE: $STACK_NAME/$LOGICAL_ID — subnet still has a" >&2
+              echo "  dependent ENI, most commonly a GuardDuty-managed interface" >&2
+              echo "  VPC endpoint (step 6 handles the known GuardDutyManaged=true" >&2
+              echo "  case; this means something else is still attached). Subnet:" >&2
+              echo "  $PHYSICAL_ID" >&2
+              echo "  Fix: find and clear the blocking ENI, then re-run this script:" >&2
+              echo "    aws ec2 describe-network-interfaces --region $REGION \\" >&2
+              echo "      --filters Name=subnet-id,Values=$PHYSICAL_ID" >&2
+              echo "" >&2
+              ;;
+            vpc-*)
+              echo "KNOWN ISSUE: $STACK_NAME/$LOGICAL_ID — VPC still has a" >&2
+              echo "  dependent resource, most commonly an orphaned" >&2
+              echo "  GuardDutyManagedSecurityGroup-* left behind after its VPC" >&2
+              echo "  endpoint was deleted (step 6 handles the known" >&2
+              echo "  GuardDutyManaged=true case; this means something else is" >&2
+              echo "  still attached). VPC: $PHYSICAL_ID" >&2
+              echo "  Fix: find and clear the blocking resource, then re-run this script:" >&2
+              echo "    aws ec2 describe-security-groups --region $REGION \\" >&2
+              echo "      --filters Name=vpc-id,Values=$PHYSICAL_ID" >&2
+              echo "    aws ec2 describe-network-interfaces --region $REGION \\" >&2
+              echo "      --filters Name=vpc-id,Values=$PHYSICAL_ID" >&2
+              echo "" >&2
+              ;;
+            *)
+              echo "KNOWN ISSUE: $STACK_NAME/$LOGICAL_ID — resource $PHYSICAL_ID" >&2
+              echo "  still has a dependency CFN can't clear on its own." >&2
+              echo "  Fix: inspect it directly, then re-run this script:" >&2
+              echo "    aws cloudformation describe-stack-events --stack-name $STACK_NAME --region $REGION" >&2
+              echo "" >&2
+              ;;
+          esac
+          ;;
       esac
     done < <(echo "$EVENTS" | python3 -c "
 import json, sys
@@ -600,4 +767,71 @@ for e in json.load(sys.stdin):
 fi
 
 echo "All '${STACK_PREFIX}-*' stacks deleted cleanly."
+
+# ── Step 8: Delete manually-created bridge resources (opt-in) ────────────
+echo ""
+echo "=== Step 8/8: Delete manually-created bridge resources ==="
+
+if [ "${SCL_DESTROY_MANUAL_RESOURCES:-}" != "1" ]; then
+  info "Skipping — SSM parameter ${SSM_PREFIX}/config and IAM role $BRIDGE_ROLE_NAME"
+  info "are left in place so a redeploy can reuse them. Set"
+  info "SCL_DESTROY_MANUAL_RESOURCES=1 to also delete them."
+else
+  CONFIG_PARAM="${SSM_PREFIX}/config"
+  if aws ssm delete-parameter --name "$CONFIG_PARAM" --region "$REGION" >/dev/null 2>&1; then
+    ok "Deleted SSM parameter $CONFIG_PARAM"
+  else
+    ok "SSM parameter $CONFIG_PARAM already gone (or never set)."
+  fi
+
+  # Only ever delete the role by this repo's own naming convention — never by
+  # blindly acting on SCL_SMUS_ADMIN_ARNS, which can also point at a
+  # pre-existing SSO permission-set role this script must not touch.
+  if ! aws iam get-role --role-name "$BRIDGE_ROLE_NAME" >/dev/null 2>&1; then
+    ok "IAM role $BRIDGE_ROLE_NAME not found — already deleted or never created."
+  else
+    info "Deleting IAM bridge role $BRIDGE_ROLE_NAME ..."
+
+    while IFS= read -r POLICY_ARN; do
+      [ -z "$POLICY_ARN" ] && continue
+      if aws iam detach-role-policy --role-name "$BRIDGE_ROLE_NAME" --policy-arn "$POLICY_ARN" >/dev/null 2>&1; then
+        info "  detached managed policy $POLICY_ARN"
+      else
+        warn "  failed to detach managed policy $POLICY_ARN"
+      fi
+    done < <(aws iam list-attached-role-policies --role-name "$BRIDGE_ROLE_NAME" \
+      --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null | tr '\t' '\n')
+
+    while IFS= read -r POLICY_NAME; do
+      [ -z "$POLICY_NAME" ] && continue
+      if aws iam delete-role-policy --role-name "$BRIDGE_ROLE_NAME" --policy-name "$POLICY_NAME" >/dev/null 2>&1; then
+        info "  deleted inline policy $POLICY_NAME"
+      else
+        warn "  failed to delete inline policy $POLICY_NAME"
+      fi
+    done < <(aws iam list-role-policies --role-name "$BRIDGE_ROLE_NAME" \
+      --query 'PolicyNames[]' --output text 2>/dev/null | tr '\t' '\n')
+
+    while IFS= read -r PROFILE_NAME; do
+      [ -z "$PROFILE_NAME" ] && continue
+      if aws iam remove-role-from-instance-profile --role-name "$BRIDGE_ROLE_NAME" \
+          --instance-profile-name "$PROFILE_NAME" >/dev/null 2>&1; then
+        info "  removed from instance profile $PROFILE_NAME"
+      else
+        warn "  failed to remove from instance profile $PROFILE_NAME"
+      fi
+    done < <(aws iam list-instance-profiles-for-role --role-name "$BRIDGE_ROLE_NAME" \
+      --query 'InstanceProfiles[].InstanceProfileName' --output text 2>/dev/null | tr '\t' '\n')
+
+    if aws iam delete-role --role-name "$BRIDGE_ROLE_NAME" >/dev/null 2>&1; then
+      ok "Deleted IAM role $BRIDGE_ROLE_NAME"
+    else
+      warn "delete-role failed for $BRIDGE_ROLE_NAME — check for remaining attachments:"
+      warn "  aws iam list-attached-role-policies --role-name $BRIDGE_ROLE_NAME"
+      warn "  aws iam list-role-policies --role-name $BRIDGE_ROLE_NAME"
+      warn "  aws iam list-instance-profiles-for-role --role-name $BRIDGE_ROLE_NAME"
+    fi
+  fi
+fi
+
 exit $DESTROY_EXIT
