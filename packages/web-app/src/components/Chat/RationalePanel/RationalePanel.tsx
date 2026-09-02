@@ -88,6 +88,7 @@ const STATUS_LABELS: Record<string, string> = {
   timeout: "Timed out",
   degraded: "Degraded",
   multi_metric_bypass: "Skipped",
+  residual_qualifier_bypass: "Skipped",
 };
 
 function getStepDetail(step: TraceStep): React.ReactNode {

@@ -56,6 +56,66 @@ describe("formatStepDetail", () => {
       const result = formatStepDetail("t1.metric_match", { query_length: 53 });
       expect(result).toBe("No matching metric; routing to structured query.");
     });
+
+    it("names the qualifier Tier 1 could not apply", () => {
+      const result = formatStepDetail("t1.metric_match", {
+        metricName: "total_revenue",
+        matchSource: "name",
+        unhandledQualifier: "gold loyalty tier",
+      });
+      expect(result).toBe(
+        'Matched total_revenue but "gold loyalty tier" can\'t be applied to it; routing to structured query.',
+      );
+    });
+
+    it("prefers the bypass wording over the resolved wording", () => {
+      // A bypass detail carries metricName too (the metric that matched), but it
+      // is NOT a resolution — the confidence branch must not win.
+      const result = formatStepDetail("t1.metric_match", {
+        metricName: "total_revenue",
+        unhandledQualifier: "last quarter",
+      });
+      expect(result).not.toContain("Resolved to");
+      expect(result).toContain("last quarter");
+    });
+
+    it("falls back to a generic subject when the bypass omits metricName", () => {
+      const result = formatStepDetail("t1.metric_match", {
+        unhandledQualifier: "north region",
+      });
+      expect(result).toBe(
+        'Matched a metric but "north region" can\'t be applied to it; routing to structured query.',
+      );
+    });
+
+    // The sibling bypass. The backend records match_count > 1 as a bare STRING
+    // ("3 metrics"), so the object formatter never sees it and the raw fragment
+    // used to reach the UI verbatim.
+    it("explains the multi-metric bypass instead of showing the raw count", () => {
+      const result = formatStepDetail("t1.metric_match", "3 metrics");
+      expect(result).toBe(
+        "Question matched 3 metrics, so it is ambiguous for the single-metric path; routing to structured query.",
+      );
+      expect(result).not.toBe("3 metrics");
+    });
+
+    it("pluralizes the count rather than interpolating it bare", () => {
+      // The backend emits f"{count} metrics" unconditionally, so relying on its
+      // wording produced "matched 1 metrics".
+      expect(formatStepDetail("t1.metric_match", "1 metric")).toBe(
+        "Question matched 1 metric, so it is ambiguous for the single-metric path; routing to structured query.",
+      );
+      expect(formatStepDetail("t1.metric_match", "1 metrics")).toContain(
+        "matched 1 metric,",
+      );
+    });
+
+    it("leaves an unrelated string detail alone", () => {
+      // Guard the regex: only "<n> metric(s)" is the bypass shape.
+      expect(formatStepDetail("t1.metric_match", "3 metrics matched foo")).toBe(
+        "3 metrics matched foo",
+      );
+    });
   });
 
   describe("t2.sql.generate error humanization", () => {

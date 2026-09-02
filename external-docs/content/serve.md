@@ -66,12 +66,12 @@ sequenceDiagram
 
     User->>Orch: query (natural language)
     Orch->>T1: match(query, namespace)
-    alt exactly one metric matches
+    alt exactly one metric matches, whole question consumed
         T1->>T1: substitute caller-supplied<br/>dimensions into SQL template
         T1->>FW: evaluate(sql, profile)
         FW->>DB: execute (if allowed)
         DB-->>User: result
-    else no match, or >1 metric matches (ambiguous)
+    else no match, >1 metric matches (ambiguous),<br/>or unhandled qualifier left over
         Orch->>T2: resolve(query, embedding)
         alt VKG: NL→SPARQL→SQL via ontology
             T2->>KG: translate + validate
@@ -102,15 +102,48 @@ and synthesis still run over the ontology graph).
 
 ### Tier 1 — Metric Resolution
 
-**When**: The question matches exactly one defined metric (semantic similarity search). If more than one metric matches, the question is ambiguous for Tier 1 and resolution falls through to Tier 2/3 instead of guessing.
+**When**: The question matches exactly one defined metric (semantic similarity search) **and the metric's name or synonym accounts for the whole question**. If more than one metric matches, the question is ambiguous for Tier 1 and resolution falls through to Tier 2/3 instead of guessing.
 
 The system:
 1. Embeds the query and searches metric definitions
 2. Finds the best-matching metric
-3. Retrieves its SQL expression
-4. Executes the SQL against the source database
+3. Checks that nothing in the question was left unaccounted for (see below)
+4. Retrieves its SQL expression
+5. Executes the SQL against the source database
 
 **Example**: *"What is total revenue?"* → matches `total_revenue` metric → `SUM(orders.total_amount)`
+
+#### Questions carrying a qualifier fall through to Tier 2
+
+A metric's SQL is pre-compiled and executed verbatim — Tier 1 does not read a filter,
+a grouping, or a time window out of your wording. So a question that names a metric
+*and* narrows it is only a partial match, and answering it from Tier 1 would return
+the **unfiltered** total as though it were the answer to the narrower question.
+
+Tier 1 therefore declines these and lets Tier 2 answer, since Tier 2 generates SQL
+and can express the predicate:
+
+| Question | What happens |
+|---|---|
+| *"What was total revenue?"* | Tier 1 — the metric is the whole question |
+| *"What was total revenue for the Gold loyalty tier?"* | Tier 2 — `Gold loyalty tier` is a filter the metric cannot apply |
+| *"Compare total revenue to last year, broken down by month"* | Tier 2 — comparison + grouping |
+| *"What was total revenue last quarter?"* | Tier 2 — time window |
+| *"What was average revenue?"* | Tier 2 — asks for a different aggregate than the metric computes |
+| *"Hello. What was total revenue? Thanks!"* | Tier 1 — greetings and sign-offs are padding, not qualifiers |
+
+The rationale panel names what was left over (*"Matched total_revenue but 'gold
+loyalty tier' can't be applied to it; routing to structured query"*), and the trace
+records it as a `residual_qualifier_bypass` on the `t1.metric_match` step, so a
+re-routed question is never silently indistinguishable from a Tier-1 hit.
+
+Two ways to still get the deterministic Tier-1 answer:
+
+- **Pass the filter as a dimension** — `options.dimensions` is the supported way to
+  filter a metric, and a request that carries it is answered at Tier 1 (the values are
+  bound into the template as parameters).
+- **Pin the tier** — `options.tierOverride: 1` is an explicit instruction to answer
+  from the metric path, and is honored as-is. Only the automatic path re-routes.
 
 ### Tier 2 — Structured Query (NL-to-SQL)
 
@@ -134,7 +167,8 @@ this is automatic and requires no configuration:
   transpiled to the engine's own dialect first (e.g. `LIMIT`→`TOP` for SQL Server), and
   a root-level row cap is applied.
 - **Athena federation** — **cross-source** queries, and any source without a direct
-  path (Glue-catalog sources), execute through the Athena federated catalog
+  path (Glue-catalog sources, and the Oracle/Snowflake JDBC engines, which have no
+  direct-SQL driver), execute through the Athena federated catalog
   (~500–800 ms typical). This is the fallback whenever the direct path can't serve the
   query, so a request always resolves.
 
