@@ -102,16 +102,67 @@ else
 fi
 
 # ── 5. ECR Public authentication ─────────────────────────────────────────
-# ECR Public is hosted only in us-east-1 regardless of deploy region.
-# Re-authenticating is cheap and idempotent, so we always refresh here
-# rather than probing whether the existing token is still valid.
-if [ -n "$CONTAINER_ENGINE" ]; then
+# The build pulls base images from ECR Public (hosted only in us-east-1,
+# regardless of deploy region). We do NOT force `docker login`: a user who
+# configures a credential helper for ECR Public (credHelpers "public.ecr.aws"
+# -> ecr-login, or a credsStore) authenticates automatically on pull and CANNOT
+# `docker login` at all — the helper has no writable credential store, so login
+# exits non-zero. Forcing it turned a valid (AWS-recommended) setup into a hard
+# preflight failure (issue #89). Instead: skip the explicit login when a helper
+# is configured, and treat an inability to log in as a WARNING — ECR Public also
+# serves anonymous (rate-limited) pulls, so a failed login must not block deploy.
+
+# Path to the active engine's config.json (Docker honors $DOCKER_CONFIG).
+_engine_config_file() {
+  case "${CONTAINER_ENGINE:-}" in
+    *finch*)
+      for _ecr_f in "$HOME/.finch/config.json" "$HOME/.finch/.docker/config.json"; do
+        [ -f "$_ecr_f" ] && { printf '%s\n' "$_ecr_f"; return 0; }
+      done
+      return 1
+      ;;
+    *)
+      printf '%s\n' "${DOCKER_CONFIG:-$HOME/.docker}/config.json"
+      ;;
+  esac
+}
+
+# Echo the credential helper bound to public.ecr.aws, or return 1. Scope is
+# deliberately the per-registry credHelper only: a plain credsStore (osxkeychain,
+# desktop, …) supports `docker login` normally, so it must NOT be skipped. The
+# exotic "credsStore": "ecr-login" case is still covered — its login fails and is
+# handled by the non-fatal warning below, not a hard error.
+_ecr_cred_helper() {
+  _ecr_cfg="$(_engine_config_file)" || return 1
+  [ -f "$_ecr_cfg" ] || return 1
+  if command -v jq >/dev/null 2>&1; then
+    _ecr_h="$(jq -r '.credHelpers["public.ecr.aws"] // empty' "$_ecr_cfg" 2>/dev/null)"
+    [ -n "$_ecr_h" ] && { printf '%s\n' "$_ecr_h"; return 0; }
+    return 1
+  fi
+  # jq-less fallback: is public.ecr.aws present as a credHelpers key?
+  grep -Eq '"public\.ecr\.aws"[[:space:]]*:' "$_ecr_cfg" 2>/dev/null && { printf 'credHelper\n'; return 0; }
+  return 1
+}
+
+if [ -n "${CONTAINER_ENGINE:-}" ]; then
   if command -v aws >/dev/null 2>&1 && aws sts get-caller-identity >/dev/null 2>&1; then
-    if aws ecr-public get-login-password --region us-east-1 2>/dev/null \
-        | "$CONTAINER_ENGINE" login --username AWS --password-stdin public.ecr.aws >/dev/null 2>&1; then
-      ok "Authenticated to ECR Public (us-east-1)"
+    if ECR_HELPER="$(_ecr_cred_helper)"; then
+      ok "ECR Public auth handled by credential helper ($ECR_HELPER) — skipping explicit login"
     else
-      err "Failed to authenticate to ECR Public. Base image pulls will fail."
+      # Split the token fetch from the login so the RIGHT error surfaces (a pipe
+      # would either discard the AWS error via 2>/dev/null, or feed it to docker
+      # as the password via 2>&1). Failure is a warning, not a fatal error.
+      _ecr_awserr="$(mktemp)"
+      if _ecr_pw="$(aws ecr-public get-login-password --region us-east-1 2>"$_ecr_awserr")"; then
+        ECR_LOGIN_ERR="$(printf '%s' "$_ecr_pw" \
+          | "$CONTAINER_ENGINE" login --username AWS --password-stdin public.ecr.aws 2>&1)" \
+          && ok "Authenticated to ECR Public (us-east-1)" \
+          || warn "Could not authenticate to ECR Public; base image pulls fall back to anonymous (rate-limited). Detail: ${ECR_LOGIN_ERR:-unknown error}"
+      else
+        warn "Could not obtain an ECR Public token from AWS; base image pulls fall back to anonymous (rate-limited). Detail: $(cat "$_ecr_awserr" 2>/dev/null || echo 'unknown error')"
+      fi
+      rm -f "$_ecr_awserr"
     fi
   else
     warn "AWS credentials not available — skipping ECR Public authentication"
@@ -177,7 +228,70 @@ else
   ok "Lambda reserved concurrency disabled (lambda_reserved_concurrency=0) — skipping headroom check"
 fi
 
-# ── 8. Stale cdk.context.json ────────────────────────────────────────────
+# ── 8. CDK bootstrap in every region the deploy touches ───────────────────
+# The *-edge-waf stack ALWAYS deploys to us-east-1 (CloudFront-scope WAF WebACLs
+# and CloudFront ACM certs exist only there), so a non-us-east-1 deploy needs
+# BOTH regions bootstrapped. Without this the deploy runs for a long while and
+# then fails on that one stack with a bootstrap error — the docs showed a single
+# `cdk bootstrap <REGION>` and never mentioned the second one.
+if command -v aws >/dev/null 2>&1 && aws sts get-caller-identity >/dev/null 2>&1; then
+  _bootstrap_regions="$REGION"
+  [ "$REGION" != "us-east-1" ] && _bootstrap_regions="$REGION us-east-1"
+  for _bsr in $_bootstrap_regions; do
+    if aws cloudformation describe-stacks --stack-name CDKToolkit --region "$_bsr" \
+        >/dev/null 2>&1; then
+      ok "CDK bootstrapped in $_bsr"
+    else
+      err "CDK is not bootstrapped in $_bsr."
+      if [ "$_bsr" = "us-east-1" ] && [ "$REGION" != "us-east-1" ]; then
+        err "us-east-1 is always required — the *-edge-waf stack deploys there regardless of your deploy region."
+      fi
+      err "Run: npx cdk bootstrap aws://\$(aws sts get-caller-identity --query Account --output text)/$_bsr"
+    fi
+  done
+else
+  warn "AWS credentials not available — skipping CDK bootstrap check"
+fi
+
+# ── 9. Configured Bedrock model IDs exist in the deploy region ────────────
+# Nothing validates model IDs at synth or deploy time, so an unusable ID (e.g. a
+# `us.` inference profile in a non-US region) still reaches CREATE_COMPLETE and
+# only fails at first invocation. Deliberately a WARNING, not an error: model
+# availability can be account-scoped and a bare in-region ID lives in a different
+# API than a geographic profile, so a hard failure here could block a valid
+# deploy. Needs jq (the config is JSON) — skipped without it.
+_CONFIG_PARAM="/${SCL_PREFIX:-coa}/config"
+if command -v aws >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 \
+    && aws sts get-caller-identity >/dev/null 2>&1; then
+  _cfg_json="$(aws ssm get-parameter --name "$_CONFIG_PARAM" --region "$REGION" \
+    --query 'Parameter.Value' --output text 2>/dev/null || echo "")"
+  if [ -n "$_cfg_json" ]; then
+    _model_ids="$(printf '%s' "$_cfg_json" | jq -r '
+      [.bedrockLlmModelId, .bedrockEmbedModelId, .bedrockInductionLlmModelId, .bedrockChatModelId]
+      | map(select(. != null and . != "")) | .[]' 2>/dev/null || echo "")"
+    if [ -n "$_model_ids" ]; then
+      _profiles="$(aws bedrock list-inference-profiles --region "$REGION" \
+        --query 'inferenceProfileSummaries[].inferenceProfileId' --output text 2>/dev/null || echo "")"
+      _models="$(aws bedrock list-foundation-models --region "$REGION" \
+        --query 'modelSummaries[].modelId' --output text 2>/dev/null || echo "")"
+      if [ -z "$_profiles" ] && [ -z "$_models" ]; then
+        warn "Could not list Bedrock models in $REGION — skipping model-ID check"
+      else
+        for _mid in $_model_ids; do
+          if printf '%s %s' "$_profiles" "$_models" | grep -qF "$_mid"; then
+            ok "Bedrock model available in $REGION: $_mid"
+          else
+            warn "Bedrock model '$_mid' not found in $REGION (from $_CONFIG_PARAM)."
+            warn "  A cross-geography profile (e.g. 'us.' outside the US) fails at first invocation with"
+            warn "  ValidationException. See 'Where the model IDs live' in external-docs/content/deploying.md."
+          fi
+        done
+      fi
+    fi
+  fi
+fi
+
+# ── 10. Stale cdk.context.json ───────────────────────────────────────────
 if [ -f "$REPO_ROOT/infra/cdk.context.json" ]; then
   warn "infra/cdk.context.json exists — cached lookups may be stale."
   warn "If deploy fails with 'resource not found', delete it: rm infra/cdk.context.json"

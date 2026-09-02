@@ -239,6 +239,7 @@ async function deploy(): Promise<void> {
       neptuneEndpoint: storage.neptuneClusterEndpoint,
       neptuneClusterArn: storage.neptuneClusterArn,
       allowedOrigin,
+      bedrockModelId: config.bedrockEmbedModelId,
       alarmAction,
     },
   );
@@ -344,7 +345,7 @@ async function deploy(): Promise<void> {
       "/namespaces/{namespaceId}/translate": `/${prefix}/data-layer/api-fn-arn`,
       "/namespaces/{namespaceId}/kb/search": `/${prefix}/data-layer/api-fn-arn`,
       "/namespaces/{namespaceId}/graph/traverse": `/${prefix}/data-layer/api-fn-arn`,
-      // ── Data Layer — schema discovery (mirrors MCP describe_schema) ─
+      // DescribeSchema — data-layer proxies to the ontology-engine api-fn.
       "/namespaces/{namespaceId}/schema": `/${prefix}/data-layer/api-fn-arn`,
     },
   });
@@ -365,6 +366,7 @@ async function deploy(): Promise<void> {
     vkgEndpoint: `http://vkg.${prefix}-${envName}-services.local:${vkg.containerPort}`,
     agentCoreAzNames,
     bedrockLlmModelId: config.bedrockLlmModelId,
+    bedrockEmbedModelId: config.bedrockEmbedModelId,
     allowedOverrideModels: config.allowedOverrideModels,
     alarmAction,
   });
@@ -375,6 +377,9 @@ async function deploy(): Promise<void> {
     network,
     storage,
     allowedOrigin,
+    bedrockChatModelId: config.bedrockChatModelId,
+    bedrockEmbedModelId: config.bedrockEmbedModelId,
+    bedrockEmbedDimensions: config.bedrockEmbedDimensions,
     alarmAction,
   });
   sources.addDependency(smusDomain); // needs SSM params from namespace stack
@@ -446,6 +451,10 @@ async function deploy(): Promise<void> {
     ontologyArtifactsBucket: storage.ontologyArtifactsBucket,
     smusDomainId: smusDomain.domainId,
     allowedOrigin,
+    bedrockEmbedModelId: config.bedrockEmbedModelId,
+    bedrockEmbedDimensions: config.bedrockEmbedDimensions,
+    bedrockInductionLlmModelId: config.bedrockInductionLlmModelId,
+    bedrockChatModelId: config.bedrockChatModelId,
     alarmAction,
   });
   ontology.addDependency(smusDomain); // /namespace/namespaces-table-name, /smus/dz-project-access-role-arn
@@ -460,6 +469,17 @@ async function deploy(): Promise<void> {
   // [/coa/ontology-engine/api-fn-arn] from parameter store" when CDK's
   // topological sort picked dataLayer before ontology.
   dataLayer.addDependency(ontology);
+
+  // DataLayerStack reads /{prefix}/ontology-engine/api-fn-arn and
+  // /{prefix}/metric/api-fn-arn via SSM (CFN dynamic refs) for its
+  // direct-invoke DescribeSchema and ListMetrics handlers — the same source
+  // MCP's discovery tools read. CDK cannot infer dependency ordering from
+  // ``valueForStringParameter``, so declare it explicitly. Without these,
+  // a fresh-account ``cdk deploy --all`` can resolve dataLayer before the
+  // parent stacks publish their ARNs, silently baking a dummy value into
+  // the Lambda env and 502ing schema/metric-catalog calls until a redeploy.
+  dataLayer.addDependency(ontology);
+  dataLayer.addDependency(metricService);
 
   // TODO: Re-enable other service stacks as they are implemented
   // const controlPlane = new ControlPlaneStack(app, `${stackPrefix}-control-plane`);

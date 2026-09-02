@@ -31,7 +31,13 @@ describe("mapTraceStatus", () => {
   });
 
   it("maps routine not-applicable statuses to stopped (muted)", () => {
-    for (const s of ["skipped", "miss", "empty", "multi_metric_bypass"]) {
+    for (const s of [
+      "skipped",
+      "miss",
+      "empty",
+      "multi_metric_bypass",
+      "residual_qualifier_bypass",
+    ]) {
       expect(mapTraceStatus(s)).toBe("stopped");
     }
   });

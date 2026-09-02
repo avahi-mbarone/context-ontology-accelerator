@@ -26,7 +26,7 @@ from .model_validation import validate_model_id as _validate_model_id
 from .models import InvokeRequest, InvokeResponse
 from .response_assembler import ResponseAssembler
 from .step_ids import StepId
-from .tier1.metric_resolver import MetricResolver
+from .tier1.metric_resolver import MetricMatch, MetricResolver
 from .tier2.skip import Tier2SkipDecision
 from .tier2.sql_firewall import SQLFirewall
 from .tier2.strategy import (
@@ -360,6 +360,40 @@ class Orchestrator:
         """Tier 3 is the fallback: it runs on the automatic path or a Tier-3 pin."""
         return tier_override is None or tier_override == 3
 
+    @staticmethod
+    def _unhandled_qualifier(metric_match: MetricMatch, options: dict) -> str:
+        """Return the part of the question Tier-1 cannot honour, or ``""``.
+
+        Tier-1 matches a metric by name/synonym anywhere in the question and then
+        executes that metric's SQL **verbatim** — it parses no filter, grouping, or
+        time window out of the natural language. Anything the match did not consume
+        is therefore a qualifier that would be silently dropped, so Tier-1 must
+        decline the question rather than answer a different one.
+
+        Two cases are NOT unhandled:
+
+        * **Caller-supplied dimensions.** ``options.dimensions`` is the documented
+          out-of-band way to filter a metric, so a request that carries them has
+          expressed its qualifier through the supported channel; the residual words
+          are that same intent restated in prose. Substitution still validates them
+          downstream (undeclared/missing values fail closed there).
+        * **A Tier-1 pin.** ``tierOverride=1`` is an explicit instruction to answer
+          from the metric path, and bypassing would turn it into a 404. The caller
+          asked for the deterministic aggregate; the trace still carries the match
+          detail. Only the AUTOMATIC path re-routes.
+
+        Returns:
+            The unconsumed question text, or ``""`` when Tier-1 fully consumed the
+            question (or one of the exemptions above applies).
+        """
+        if not metric_match.residual:
+            return ""
+        if options.get("dimensions"):
+            return ""
+        if options.get("tierOverride") == 1:
+            return ""
+        return metric_match.residual
+
     async def _should_run_tier2(
         self,
         strategy: StrategyOption | None,
@@ -540,6 +574,7 @@ class Orchestrator:
             StrategyOption.NL_TO_SQL,
             StrategyOption.ONTOP_FIRST,
             StrategyOption.NL_TO_SQL_FIRST,
+            StrategyOption.AGENTIC,
         }
     )
 
@@ -738,6 +773,42 @@ class Orchestrator:
                 "multi_metric_bypass",
                 t1_ms,
                 detail=f"{metric_match.match_count} metrics",
+            )
+            return None
+
+        # a match that leaves part of the question unconsumed is a
+        # PARTIAL match: Tier-1 executes the metric's SQL verbatim and cannot
+        # express a filter, grouping, or time window, so answering would return the
+        # unfiltered aggregate as though it were the answer to the narrower question
+        # — at confidence 1.0, with nothing marking the drop. Bypass to Tier 2,
+        # which can express predicates. Checked before .found's success trace so a
+        # declined question never records a Tier-1 hit.
+        unhandled = self._unhandled_qualifier(metric_match, options) if metric_match.found else ""
+        if unhandled:
+            trace.record(
+                StepId.T1_METRIC_MATCH,
+                "residual_qualifier_bypass",
+                t1_ms,
+                detail={
+                    "metricName": metric_match.metric_name,
+                    "matchSource": metric_match.match_source,
+                    # The span of the question Tier-1 could not honour — the evidence
+                    # that was previously missing: a caller can now see exactly what
+                    # was unhandled instead of inferring it from identical results.
+                    "unhandledQualifier": unhandled,
+                    # …paired with the span that DID match, so a surprising bypass is
+                    # diagnosable from the trace alone (e.g. an over-broad synonym
+                    # consuming less of the question than its author expected).
+                    "matchedText": metric_match.matched_text,
+                },
+            )
+            logger.info(
+                "tier1_residual_qualifier_bypass",
+                namespace=namespace,
+                metric=metric_match.metric_name,
+                match_source=metric_match.match_source,
+                matched_text=metric_match.matched_text,
+                unhandled=unhandled,
             )
             return None
 

@@ -104,6 +104,13 @@ const _executeFormatter: Formatter = (d) => {
 
 const stepFormatters: Record<string, Formatter> = {
   "t1.metric_match": (d) => {
+    // Tier-1 matched a metric but the question carried a qualifier the metric's
+    // fixed SQL cannot express (a filter, grouping, or time window), so it
+    // declined rather than return the unfiltered aggregate. Checked before the
+    // metricName branch — a bypass is not a resolution and carries no confidence.
+    if (d.unhandledQualifier) {
+      return `Matched ${d.metricName ?? "a metric"} but "${d.unhandledQualifier}" can't be applied to it; routing to structured query.`;
+    }
     if (d.metricName) {
       return `Resolved to ${d.metricName} (${d.matchSource ?? "exact"}, confidence ${d.confidence ?? 1.0}).`;
     }
@@ -351,6 +358,22 @@ export function formatStepDetail(
   if (stepName === "t2.vkg.translate") {
     const m = trimmed.match(/confidence=([\d.]+)/i);
     if (m) return `NL → SPARQL with confidence ${m[1]}.`;
+  }
+  // The OTHER Tier-1 bypass. When more than one governed metric matches, the
+  // question is ambiguous for the single-metric path, so Tier 1 declines rather
+  // than execute just the first one. The backend records this as a BARE STRING
+  // ("3 metrics"), not an object, so the stepFormatters entry above never sees it
+  // and the raw fragment reached the UI verbatim. Phrase it like its sibling
+  // residual_qualifier_bypass: name the reason, then where the question goes.
+  // The count is pluralized rather than interpolated bare: the backend emits
+  // f"{count} metrics" unconditionally, so a hypothetical "1 metric" detail would
+  // otherwise render "matched 1 metrics".
+  if (stepName === "t1.metric_match") {
+    const m = trimmed.match(/^(\d+)\s+metrics?$/i);
+    if (m) {
+      const n = Number(m[1]);
+      return `Question matched ${n} ${n === 1 ? "metric" : "metrics"}, so it is ambiguous for the single-metric path; routing to structured query.`;
+    }
   }
   // The NL→SQL generate step records its failure detail as a BARE STRING
   // (e.g. "retrieve_failed: Vector search proxy returned an error" or

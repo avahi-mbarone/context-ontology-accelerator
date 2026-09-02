@@ -216,6 +216,48 @@ DEFAULT_EMBED_DIMENSIONS: int = 1024
 # Input validation — reusable across Lambda handlers and API layer
 # ---------------------------------------------------------------------------
 
+MAX_QUERY_CODEPOINTS: int = 4000
+"""Maximum natural-language query length at every API and tokenizer boundary.
+
+Code points, not bytes, so the allowance does not shrink for non-Latin scripts.
+
+A caller cannot always reach this bound, and the reason is upstream of any code
+here: the API's WAF WebACL runs ``AWSManagedRulesCommonRuleSet``, whose
+``SizeRestrictions_BODY`` rule blocks any request body over 8,192 bytes. WAF sits
+in front of the Lambda, so an oversized body is answered ``403 Forbidden`` with no
+explanation and this validator never sees it. Measured against a deployed API: a
+body of 8,188 bytes passes, 8,233 is blocked.
+
+The bound the request body actually imposes therefore depends on encoding:
+
+    ASCII (1 byte/char)      ~4000 code points — the full allowance
+    CJK (3 bytes/char)       ~2725 code points
+    astral (4 bytes/char)    ~2045 code points
+
+Left as is deliberately. A natural-language question does not approach 2,725
+characters, so raising the WAF limit would widen a security control for input
+nobody sends. Recorded here instead so a generated client does not accept 4,000
+characters and then surface an unexplained 403 — and so the decision can be
+revisited with evidence if a real query is ever refused.
+"""
+
+
+def validate_query_text(value: object) -> str:
+    """Return a stripped natural-language query or raise ``ValueError``.
+
+    The raw code-point bound is checked before stripping so oversized input is
+    rejected in constant time before any Unicode segmentation or downstream I/O.
+    """
+    if not isinstance(value, str):
+        raise ValueError("query must be a string")
+    if len(value) > MAX_QUERY_CODEPOINTS:
+        raise ValueError(f"query must be at most {MAX_QUERY_CODEPOINTS} characters")
+    query = value.strip()
+    if not query:
+        raise ValueError("query must not be blank")
+    return query
+
+
 # Namespace and doc-source IDs: alphanumeric, hyphens, underscores only
 SAFE_ID_RE: re.Pattern[str] = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -440,6 +482,33 @@ def ontology_artifact_s3_key(namespace: str, version: str, filename: str) -> str
 
 DEFAULT_PAGE_SIZE: int = 25
 MAX_PAGE_SIZE: int = 100
+
+
+# ---------------------------------------------------------------------------
+# Direct-through discovery: env-var names and Smithy resource paths
+# ---------------------------------------------------------------------------
+# ListMetrics and DescribeSchema are pure catalog reads with no tier
+# orchestration, so both surfaces that expose them (data-layer's ``handler.py``
+# and MCP's ``coa_mcp.tools.discovery``) invoke the backend Lambdas DIRECTLY
+# and skip the Context Manager. The env var names and resource paths below are
+# the contract between those callers and the CDK stacks that wire the ARNs in.
+#
+# If any of these strings diverge between call sites, a caller falls back to
+# an empty ARN (silent 501) or hits a URL the ontology-api-proxy's alias table
+# does not know. Keep this the single source of truth.
+
+# Env var names that the data-layer and MCP-server Lambdas read at cold start
+# to locate the ontology-api-proxy and metric-service Lambdas. Must match what
+# ``data-layer-stack.ts`` and ``mcp-stack.ts`` set in the target Lambda's env.
+ONTOLOGY_PROXY_LAMBDA_ARN_ENV: str = "ONTOLOGY_PROXY_LAMBDA_ARN"
+METRIC_SERVICE_LAMBDA_ARN_ENV: str = "METRIC_SERVICE_LAMBDA_ARN"
+
+# Smithy operation resource paths. Both surfaces must send the identical URI
+# to the backend Lambda so it can route it (via ``api_proxy_handler``'s per-path
+# alias table) to the underlying FastAPI route. These come from
+# ``models/src/main/smithy/serve.smithy`` — the canonical wire contract.
+LIST_METRICS_RESOURCE: str = "/namespaces/{namespaceId}/metrics"
+DESCRIBE_SCHEMA_RESOURCE: str = "/namespaces/{namespaceId}/schema"
 
 
 # ---------------------------------------------------------------------------
