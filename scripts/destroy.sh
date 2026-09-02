@@ -582,27 +582,39 @@ else
     DEADLINE=$(( $(date +%s) + GUARDDUTY_ENDPOINT_WAIT_MAX_SECONDS ))
     while true; do
       TOTAL_ENIS=0
+      ENI_API_FAILED=false
       for EP_ID in "${GD_ENDPOINT_IDS[@]}"; do
-        COUNT=$(aws ec2 describe-network-interfaces --region "$REGION" \
-          --filters "Name=vpc-id,Values=$VPC_ID" "Name=description,Values=VPC Endpoint Interface $EP_ID" \
-          --query 'length(NetworkInterfaces)' --output text 2>/dev/null || echo 0)
-        TOTAL_ENIS=$((TOTAL_ENIS + COUNT))
+        ENI_ERR=$(mktemp)
+        # AWS describes interface-endpoint ENIs as "VPC Endpoint Interface: <id>"
+        # (colon included) — match with a wildcard rather than depending on the
+        # exact separator.
+        if COUNT=$(aws ec2 describe-network-interfaces --region "$REGION" \
+            --filters "Name=vpc-id,Values=$VPC_ID" "Name=description,Values=*$EP_ID*" \
+            --query 'length(NetworkInterfaces)' --output text 2>"$ENI_ERR"); then
+          TOTAL_ENIS=$((TOTAL_ENIS + COUNT))
+        else
+          ENI_API_FAILED=true
+          warn "describe-network-interfaces failed for endpoint $EP_ID: $(cat "$ENI_ERR")"
+        fi
+        rm -f "$ENI_ERR"
       done
 
-      if [ "$TOTAL_ENIS" -eq 0 ]; then
+      if [ "$ENI_API_FAILED" = true ]; then
+        warn "API call(s) failed — not treating as 'ENIs detached', retrying..."
+      elif [ "$TOTAL_ENIS" -eq 0 ]; then
         ok "GuardDuty-managed VPC endpoint ENIs detached."
         break
       fi
 
       if [ "$(date +%s)" -ge "$DEADLINE" ]; then
-        warn "$TOTAL_ENIS GuardDuty endpoint ENI(s) still present after"
+        warn "GuardDuty endpoint ENI(s) still present or unconfirmed after"
         warn "${GUARDDUTY_ENDPOINT_WAIT_MAX_SECONDS}s — proceeding anyway;"
         warn "'cdk destroy' may fail on the network stack's subnets if they"
         warn "haven't detached yet. Re-run this script if that happens."
         break
       fi
 
-      info "$TOTAL_ENIS GuardDuty endpoint ENI(s) still attached, waiting 15s..."
+      info "GuardDuty endpoint ENI(s) still attached or unconfirmed, waiting 15s..."
       sleep 15
     done
   fi

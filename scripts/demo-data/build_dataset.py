@@ -23,6 +23,7 @@ import csv
 import io
 import sys
 import zipfile
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +32,15 @@ import pandas as pd  # type: ignore[import-untyped]  # isolated script deps, no 
 from schema import AMERICAN_CENTURY_CIKS, TABLES_BY_NAME
 
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
-AC_CIKS = set(AMERICAN_CENTURY_CIKS)
+
+
+def normalize_cik(cik: str) -> str:
+    """Strip leading zeros so CIKs compare equal regardless of a source's padding
+    (SEC bulk files are inconsistent: some zero-pad to 10 digits, some don't)."""
+    return cik.lstrip("0") or "0"
+
+
+AC_CIKS = {normalize_cik(cik) for cik in AMERICAN_CENTURY_CIKS}
 
 NULL_TOKENS = {"", "N/A", "[NULL]", "NULL", "NONE"}
 
@@ -187,7 +196,7 @@ def main() -> None:
     # -----------------------------------------------------------------
     print("Reading series/class spine...", file=sys.stderr)
     with open(series_class_csv, encoding="utf-8", errors="replace") as f:
-        series_class_rows = [row for row in csv.DictReader(f) if row["CIK"] in AC_CIKS]
+        series_class_rows = [row for row in csv.DictReader(f) if normalize_cik(row["CIK"]) in AC_CIKS]
 
     ac_fund_ids = {row["series_id"] for row in series_class_rows}
 
@@ -201,7 +210,7 @@ def main() -> None:
     # most recent annual filing across the 8-quarter lookback window.
     # -----------------------------------------------------------------
     print("Building registrant (N-CEN, 8-quarter lookback)...", file=sys.stderr)
-    ncen_registrant_rows = [r for r in read_tsv_zips(ncen_zips, "REGISTRANT.tsv") if r["CIK"] in AC_CIKS]
+    ncen_registrant_rows = [r for r in read_tsv_zips(ncen_zips, "REGISTRANT.tsv") if normalize_cik(r["CIK"]) in AC_CIKS]
     ncen_accessions_seen = {r["ACCESSION_NUMBER"] for r in ncen_registrant_rows}
     ncen_submission_rows = read_tsv_zips_filtered(ncen_zips, "SUBMISSION.tsv", "ACCESSION_NUMBER", ncen_accessions_seen)
     filing_date_by_accession = {r["ACCESSION_NUMBER"]: parse_sec_date(r["FILING_DATE"]) for r in ncen_submission_rows}
@@ -209,9 +218,9 @@ def main() -> None:
     latest_registrant_by_cik: dict[str, dict] = {}
     for row in ncen_registrant_rows:
         cik = row["CIK"]
-        fd = filing_date_by_accession.get(row["ACCESSION_NUMBER"])
+        fd = filing_date_by_accession.get(row["ACCESSION_NUMBER"]) or date.min
         current = latest_registrant_by_cik.get(cik)
-        if current is None or (fd or "") > (filing_date_by_accession.get(current["ACCESSION_NUMBER"]) or ""):
+        if current is None or fd > (filing_date_by_accession.get(current["ACCESSION_NUMBER"]) or date.min):
             latest_registrant_by_cik[cik] = row
 
     latest_ncen_accessions = {r["ACCESSION_NUMBER"] for r in latest_registrant_by_cik.values()}
@@ -298,7 +307,7 @@ def main() -> None:
     # N-PORT: filter to American Century's accessions for this quarter
     # -----------------------------------------------------------------
     print("Filtering N-PORT to American Century...", file=sys.stderr)
-    nport_registrant_rows = [r for r in read_tsv_zip(nport_zip, "REGISTRANT.tsv") if r["CIK"] in AC_CIKS]
+    nport_registrant_rows = [r for r in read_tsv_zip(nport_zip, "REGISTRANT.tsv") if normalize_cik(r["CIK"]) in AC_CIKS]
     nport_accessions = {r["ACCESSION_NUMBER"] for r in nport_registrant_rows}
     nport_submission_rows = [
         r for r in read_tsv_zip(nport_zip, "SUBMISSION.tsv") if r["ACCESSION_NUMBER"] in nport_accessions
